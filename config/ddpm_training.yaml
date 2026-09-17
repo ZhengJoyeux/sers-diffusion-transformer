@@ -1,19 +1,18 @@
 project:
-  name: d3_4_peak_parameter_physics_d2_6_2000step_s001
+  name: d3_current_20260905_210317
   random_seed: 2026
 diagnostic_overfit:
   enabled: false
   spectrum_index: 0
   repeat_count: 50
 data:
-  input_directory: data/input/S001
-  recursive: false
+  input_directory: data/input
+  recursive: true
   allowed_extensions:
   - .xlsx
   - .xls
-  - .csv
   sheet_name: 0
-  header_row: null
+  header_row: 0
   raman_shift_column: 0
   intensity_start_column: 1
   require_same_raman_shift_axis: false
@@ -24,11 +23,15 @@ data:
   length_adaptation: raman_axis_interpolation
   padding_mode: right_zero_padding
   padding_value: 0.0
-  split_unit: spectrum
-  train_ratio: 0.8
-  validation_ratio: 0.1
-  test_ratio: 0.1
-  shuffle: true
+  split_unit: fixed_spectra_within_source_file
+  fixed_spectrum_split:
+    train_count: 12
+    validation_count: 4
+    test_count: 4
+  train_ratio: 0.6
+  validation_ratio: 0.2
+  test_ratio: 0.2
+  shuffle: false
 normalization:
   enabled: true
   method: global_minmax
@@ -178,14 +181,14 @@ diffusion:
 training:
   device: cuda
   batch_size: 8
-  number_of_epochs: 1000
+  number_of_epochs: 223
   learning_rate: 0.0001
   weight_decay: 0.0
   number_of_workers: 0
   pin_memory: true
   drop_last: false
-  validate_every_epochs: 500
-  save_every_epochs: 500
+  validate_every_epochs: 22
+  save_every_epochs: 22
   log_every_batches: 1
   gradient_accumulation_steps: 1
   maximum_gradient_norm: 1.0
@@ -195,17 +198,17 @@ training:
   maximum_validation_batches: 0
   validation_random_seed: 2026001
 output:
-  output_directory: outputs/experiments/d3_4_peak_parameter_physics_d2_6_2000step_s001
-  checkpoint_directory: outputs/experiments/d3_4_peak_parameter_physics_d2_6_2000step_s001/checkpoints
-  log_directory: outputs/experiments/d3_4_peak_parameter_physics_d2_6_2000step_s001/logs
-  generated_spectrum_directory: outputs/experiments/d3_4_peak_parameter_physics_d2_6_2000step_s001/generated/ddim50_ema_no_sampling_calibration
-  preview_plot_directory: outputs/experiments/d3_4_peak_parameter_physics_d2_6_2000step_s001/plots/ddim50_ema_no_sampling_calibration
+  output_directory: /home/wqzheng/project/outputs/experiments/d3_current_20260905_210317
+  checkpoint_directory: /home/wqzheng/project/outputs/experiments/d3_current_20260905_210317/checkpoints
+  log_directory: /home/wqzheng/project/outputs/experiments/d3_current_20260905_210317/logs
+  generated_spectrum_directory: /home/wqzheng/project/outputs/experiments/d3_current_20260905_210317/generated
+  preview_plot_directory: /home/wqzheng/project/outputs/experiments/d3_current_20260905_210317/plots
   latest_checkpoint_name: latest.pt
   best_checkpoint_name: best.pt
   training_log_name: training_log.csv
   split_assignment_name: split_assignment.csv
 generation:
-  number_of_spectra: 100
+  number_of_spectra: 2000
   batch_size: 10
   model_source: ema
   crop_to_original_length: true
@@ -271,4 +274,3 @@ generation:
   output_filename: generated_spectra.xlsx
   output_formats:
   - xlsx
-  - csv

@@ -92,6 +92,207 @@ def _create_gradient_scaler(enabled: bool):
         return torch.cuda.amp.GradScaler(enabled=enabled)
 
 
+class WarmupCosineLearningRateScheduler:
+    """按optimizer step执行一次linear warmup + cosine decay。"""
+
+    def __init__(
+        self,
+        *,
+        optimizer,
+        total_training_steps: int,
+        warmup_fraction: float,
+        warmup_start_learning_rate: float,
+        peak_learning_rate: float,
+        minimum_learning_rate: float,
+    ) -> None:
+        if total_training_steps <= 0:
+            raise ValueError("total_training_steps必须大于0。")
+
+        if not 0.0 < warmup_fraction < 1.0:
+            raise ValueError("warmup_fraction必须位于(0,1)。")
+
+        if not (
+            0.0
+            < minimum_learning_rate
+            <= warmup_start_learning_rate
+            < peak_learning_rate
+        ):
+            raise ValueError(
+                "学习率必须满足0 < minimum <= warmup_start < peak。"
+            )
+
+        self.optimizer = optimizer
+        self.total_training_steps = int(total_training_steps)
+        self.warmup_fraction = float(warmup_fraction)
+        self.warmup_steps = max(
+            1,
+            min(
+                self.total_training_steps - 1,
+                int(
+                    round(
+                        self.total_training_steps
+                        * self.warmup_fraction
+                    )
+                ),
+            ),
+        )
+
+        self.warmup_start_learning_rate = float(
+            warmup_start_learning_rate
+        )
+        self.peak_learning_rate = float(peak_learning_rate)
+        self.minimum_learning_rate = float(minimum_learning_rate)
+        self.completed_steps = 0
+
+        self._set_learning_rate(
+            self.learning_rate_at_step(0)
+        )
+
+    def learning_rate_at_step(self, completed_steps: int) -> float:
+        import math
+
+        step = int(
+            max(
+                0,
+                min(
+                    completed_steps,
+                    self.total_training_steps,
+                ),
+            )
+        )
+
+        if step <= self.warmup_steps:
+            progress = step / self.warmup_steps
+
+            return (
+                self.warmup_start_learning_rate
+                + (
+                    self.peak_learning_rate
+                    - self.warmup_start_learning_rate
+                )
+                * progress
+            )
+
+        cosine_steps = (
+            self.total_training_steps
+            - self.warmup_steps
+        )
+
+        progress = (
+            step - self.warmup_steps
+        ) / cosine_steps
+
+        cosine_factor = (
+            0.5
+            * (
+                1.0
+                + math.cos(
+                    math.pi * progress
+                )
+            )
+        )
+
+        return (
+            self.minimum_learning_rate
+            + (
+                self.peak_learning_rate
+                - self.minimum_learning_rate
+            )
+            * cosine_factor
+        )
+
+    def _set_learning_rate(self, learning_rate: float) -> None:
+        for parameter_group in self.optimizer.param_groups:
+            parameter_group["lr"] = float(learning_rate)
+
+    def step(self) -> float:
+        self.completed_steps = min(
+            self.completed_steps + 1,
+            self.total_training_steps,
+        )
+
+        learning_rate = self.learning_rate_at_step(
+            self.completed_steps
+        )
+        self._set_learning_rate(learning_rate)
+
+        return learning_rate
+
+    def restore_step(self, completed_steps: int) -> float:
+        completed_steps = int(completed_steps)
+
+        if not 0 <= completed_steps <= self.total_training_steps:
+            raise ValueError("scheduler恢复step超出训练范围。")
+
+        self.completed_steps = completed_steps
+        learning_rate = self.learning_rate_at_step(
+            self.completed_steps
+        )
+        self._set_learning_rate(learning_rate)
+
+        return learning_rate
+
+    def state_dict(self) -> dict:
+        return {
+            "scheduler_type": "warmup_cosine",
+            "completed_steps": self.completed_steps,
+            "total_training_steps": self.total_training_steps,
+            "warmup_fraction": self.warmup_fraction,
+            "warmup_steps": self.warmup_steps,
+            "warmup_start_learning_rate":
+                self.warmup_start_learning_rate,
+            "peak_learning_rate": self.peak_learning_rate,
+            "minimum_learning_rate": self.minimum_learning_rate,
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        if str(
+            state.get("scheduler_type", "")
+        ) != "warmup_cosine":
+            raise ValueError(
+                "checkpoint中的scheduler类型不兼容。"
+            )
+
+        if int(
+            state.get("total_training_steps", -1)
+        ) != self.total_training_steps:
+            raise ValueError(
+                "checkpoint scheduler的total_training_steps"
+                "与当前配置不一致。"
+            )
+
+        if int(
+            state.get("warmup_steps", -1)
+        ) != self.warmup_steps:
+            raise ValueError(
+                "checkpoint scheduler的warmup_steps"
+                "与当前配置不一致。"
+            )
+
+        for name, expected in {
+            "warmup_start_learning_rate":
+                self.warmup_start_learning_rate,
+            "peak_learning_rate":
+                self.peak_learning_rate,
+            "minimum_learning_rate":
+                self.minimum_learning_rate,
+        }.items():
+            actual = float(state.get(name, float("nan")))
+
+            if abs(actual - expected) > max(
+                1.0e-15,
+                abs(expected) * 1.0e-10,
+            ):
+                raise ValueError(
+                    "checkpoint scheduler与当前配置"
+                    f"{name}不一致。"
+                )
+
+        self.restore_step(
+            int(state.get("completed_steps", 0))
+        )
+
+
 class DdpmTrainer:
     """
     执行按 step 计数的一维 DDPM 训练与验证。
@@ -154,6 +355,85 @@ class DdpmTrainer:
             lr=float(training["learning_rate"]),
             weight_decay=float(training.get("weight_decay", 0.0)),
         )
+
+        self.learning_rate_scheduler = None
+
+        scheduler_configuration = training.get(
+            "learning_rate_scheduler",
+            {},
+        )
+
+        if bool(
+            scheduler_configuration.get(
+                "enabled",
+                False,
+            )
+        ):
+            scheduler_type = str(
+                scheduler_configuration.get(
+                    "type",
+                    "warmup_cosine",
+                )
+            ).strip().lower()
+
+            if scheduler_type != "warmup_cosine":
+                raise ValueError(
+                    "training.learning_rate_scheduler.type"
+                    "目前只支持warmup_cosine。"
+                )
+
+            peak_learning_rate = float(
+                scheduler_configuration.get(
+                    "peak_learning_rate",
+                    training["learning_rate"],
+                )
+            )
+
+            configured_optimizer_lr = float(
+                training["learning_rate"]
+            )
+
+            if abs(
+                configured_optimizer_lr
+                - peak_learning_rate
+            ) > max(
+                1.0e-15,
+                abs(peak_learning_rate) * 1.0e-10,
+            ):
+                raise ValueError(
+                    "启用warmup_cosine时，"
+                    "training.learning_rate必须与"
+                    "peak_learning_rate一致。"
+                )
+
+            self.learning_rate_scheduler = (
+                WarmupCosineLearningRateScheduler(
+                    optimizer=self.optimizer,
+                    total_training_steps=(
+                        self.total_training_steps
+                    ),
+                    warmup_fraction=float(
+                        scheduler_configuration.get(
+                            "warmup_fraction",
+                            0.05,
+                        )
+                    ),
+                    warmup_start_learning_rate=float(
+                        scheduler_configuration.get(
+                            "warmup_start_learning_rate",
+                            1.0e-5,
+                        )
+                    ),
+                    peak_learning_rate=peak_learning_rate,
+                    minimum_learning_rate=float(
+                        scheduler_configuration.get(
+                            "minimum_learning_rate",
+                            1.0e-6,
+                        )
+                    ),
+                )
+            )
+
         self.use_mixed_precision = (
             bool(training["use_mixed_precision"])
             and device.type == "cuda"
@@ -205,6 +485,27 @@ class DdpmTrainer:
             )
         )
 
+        scheduler_state = checkpoint.get(
+            "scheduler_state"
+        )
+
+        if self.learning_rate_scheduler is not None:
+            if scheduler_state:
+                self.learning_rate_scheduler.load_state_dict(
+                    scheduler_state
+                )
+            else:
+                self.learning_rate_scheduler.restore_step(
+                    self.starting_step
+                )
+
+                if self.starting_step > 0:
+                    print(
+                        "警告：旧checkpoint不含scheduler_state；"
+                        "已按global step恢复warmup+cosine学习率。"
+                        "正式scheduler实验建议从step=0开始。"
+                    )
+
         print(
             f"从step={self.starting_step}继续训练，"
             f"历史最佳验证损失={self.best_validation_loss:.6f}"
@@ -213,15 +514,33 @@ class DdpmTrainer:
     def _move_batch_to_device(
         self,
         batch,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """兼容历史张量batch和D2.2带逐样本PCA先验的字典batch。"""
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        """兼容历史batch、PCA先验、D4掩码和D4.1条件。"""
 
         reference_prior = None
+        valid_mask = None
+        condition = None
+        prior_conditioning = None
+        full_spectrum_target = None
+        local_inverse_slope = None
         if isinstance(batch, dict):
             if "spectrum" not in batch:
                 raise KeyError("数据集字典batch缺少spectrum。")
             spectrum = batch["spectrum"]
             reference_prior = batch.get("constraint_reference_prior")
+            valid_mask = batch.get("valid_mask")
+            condition = batch.get("condition")
+            prior_conditioning = batch.get("prior_conditioning")
+            full_spectrum_target = batch.get("full_spectrum_target")
+            local_inverse_slope = batch.get("local_inverse_slope")
         elif isinstance(batch, (tuple, list)):
             spectrum = batch[0]
             if len(batch) > 1:
@@ -233,26 +552,127 @@ class DdpmTrainer:
             raise TypeError("训练batch中的spectrum必须是torch.Tensor。")
         spectrum = spectrum.to(self.device, non_blocking=True)
 
-        if reference_prior is None:
-            return spectrum, None
-        if not torch.is_tensor(reference_prior):
-            raise TypeError(
-                "constraint_reference_prior必须是torch.Tensor。"
+        if reference_prior is not None:
+            if not torch.is_tensor(reference_prior):
+                raise TypeError(
+                    "constraint_reference_prior必须是torch.Tensor。"
+                )
+            reference_prior = reference_prior.to(
+                self.device,
+                non_blocking=True,
             )
-        reference_prior = reference_prior.to(self.device, non_blocking=True)
-        if reference_prior.shape != spectrum.shape:
+            if reference_prior.shape != spectrum.shape:
+                raise ValueError(
+                    "constraint_reference_prior形状必须与spectrum一致。"
+                )
+
+        if valid_mask is not None:
+            if not torch.is_tensor(valid_mask):
+                raise TypeError("valid_mask必须是torch.Tensor。")
+            valid_mask = valid_mask.to(
+                self.device,
+                non_blocking=True,
+            )
+            if valid_mask.shape != spectrum.shape:
+                raise ValueError("valid_mask形状必须与spectrum一致。")
+
+        if condition is not None:
+            if not torch.is_tensor(condition):
+                raise TypeError("condition必须是torch.Tensor。")
+            condition = condition.to(self.device, non_blocking=True)
+            if condition.ndim != 2 or condition.shape[0] != spectrum.shape[0]:
+                raise ValueError("condition形状必须为[B,C]。")
+
+        if prior_conditioning is not None:
+            if not torch.is_tensor(prior_conditioning):
+                raise TypeError("prior_conditioning必须是torch.Tensor。")
+            prior_conditioning = prior_conditioning.to(
+                self.device, non_blocking=True
+            )
+            if prior_conditioning.shape != spectrum.shape:
+                raise ValueError("prior_conditioning形状必须与spectrum一致。")
+            if not torch.isfinite(prior_conditioning).all():
+                raise ValueError("prior_conditioning包含NaN或无穷值。")
+
+        for name, value in (
+            ("full_spectrum_target", full_spectrum_target),
+            ("local_inverse_slope", local_inverse_slope),
+        ):
+            if value is None:
+                continue
+            if not torch.is_tensor(value):
+                raise TypeError(f"{name}必须是torch.Tensor。")
+            value = value.to(self.device, non_blocking=True)
+            if value.shape != spectrum.shape:
+                raise ValueError(f"{name}形状必须与spectrum一致。")
+            if not torch.isfinite(value).all():
+                raise ValueError(f"{name}包含NaN或无穷值。")
+            if name == "full_spectrum_target":
+                full_spectrum_target = value
+            else:
+                if torch.any(value < 0.0):
+                    raise ValueError("local_inverse_slope不能为负。")
+                local_inverse_slope = value
+        if (full_spectrum_target is None) != (local_inverse_slope is None):
             raise ValueError(
-                "constraint_reference_prior形状必须与spectrum一致。"
+                "full_spectrum_target与local_inverse_slope必须同时提供。"
             )
-        return spectrum, reference_prior
+
+        return (
+            spectrum,
+            reference_prior,
+            valid_mask,
+            condition,
+            prior_conditioning,
+            full_spectrum_target,
+            local_inverse_slope,
+        )
 
     def _calculate_loss(
         self,
         spectrum: torch.Tensor,
         constraint_reference_prior: torch.Tensor | None,
+        valid_mask: torch.Tensor | None,
+        condition: torch.Tensor | None = None,
+        prior_conditioning: torch.Tensor | None = None,
+        full_spectrum_target: torch.Tensor | None = None,
+        local_inverse_slope: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        arguments = {}
+
+        if valid_mask is not None:
+            if not bool(
+                getattr(
+                    self.diffusion,
+                    "supports_valid_mask",
+                    False,
+                )
+            ):
+                raise RuntimeError(
+                    "当前扩散模型不支持valid_mask。"
+                )
+            arguments["valid_mask"] = valid_mask
+
+        if condition is not None:
+            if not bool(getattr(self.diffusion, "supports_condition", False)):
+                raise RuntimeError("当前扩散模型不支持condition。")
+            arguments["condition"] = condition
+
+        if prior_conditioning is not None:
+            if not bool(
+                getattr(self.diffusion, "supports_prior_conditioning", False)
+            ):
+                raise RuntimeError("当前扩散模型不支持prior_conditioning。")
+            arguments["prior_conditioning"] = prior_conditioning
+
+        if full_spectrum_target is not None or local_inverse_slope is not None:
+            if full_spectrum_target is None or local_inverse_slope is None:
+                raise ValueError("完整谱训练上下文必须成对提供。")
+            arguments["full_spectrum_target"] = full_spectrum_target
+            arguments["local_inverse_slope"] = local_inverse_slope
+
         if constraint_reference_prior is None:
-            return self.diffusion(spectrum)
+            return self.diffusion(spectrum, **arguments)
         if not bool(
             getattr(
                 self.diffusion,
@@ -260,14 +680,23 @@ class DdpmTrainer:
                 False,
             )
         ):
-            return self.diffusion(spectrum)
+            return self.diffusion(spectrum, **arguments)
 
         return self.diffusion(
             spectrum,
             constraint_reference_prior=constraint_reference_prior,
+            **arguments,
         )
 
-    def _next_training_batch(self) -> tuple[torch.Tensor, torch.Tensor | None]:
+    def _next_training_batch(self) -> tuple[
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
         if self._training_iterator is None:
             self._training_iterator = iter(self.training_loader)
 
@@ -399,7 +828,15 @@ class DdpmTrainer:
                     ):
                         break
 
-                    spectrum, constraint_reference_prior = (
+                    (
+                        spectrum,
+                        constraint_reference_prior,
+                        valid_mask,
+                        condition,
+                        prior_conditioning,
+                        full_spectrum_target,
+                        local_inverse_slope,
+                    ) = (
                         self._move_batch_to_device(batch)
                     )
 
@@ -411,6 +848,11 @@ class DdpmTrainer:
                         loss = self._calculate_loss(
                             spectrum,
                             constraint_reference_prior,
+                            valid_mask,
+                            condition,
+                            prior_conditioning,
+                            full_spectrum_target,
+                            local_inverse_slope,
                         )
 
                     detached_loss = loss.detach()
@@ -455,6 +897,11 @@ class DdpmTrainer:
             diffusion_state=self.diffusion.state_dict(),
             ema_state=self.ema.state_dict(),
             optimizer_state=self.optimizer.state_dict(),
+            scheduler_state=(
+                None
+                if self.learning_rate_scheduler is None
+                else self.learning_rate_scheduler.state_dict()
+            ),
             scaler_state=self.gradient_scaler.state_dict(),
             configuration=self.configuration,
             metadata=self.metadata,
@@ -484,7 +931,15 @@ class DdpmTrainer:
             step_components: dict[str, torch.Tensor] = {}
 
             for _ in range(self.gradient_accumulation_steps):
-                spectrum, constraint_reference_prior = (
+                (
+                    spectrum,
+                    constraint_reference_prior,
+                    valid_mask,
+                    condition,
+                    prior_conditioning,
+                    full_spectrum_target,
+                    local_inverse_slope,
+                ) = (
                     self._next_training_batch()
                 )
 
@@ -496,6 +951,11 @@ class DdpmTrainer:
                     loss = self._calculate_loss(
                         spectrum,
                         constraint_reference_prior,
+                        valid_mask,
+                        condition,
+                        prior_conditioning,
+                        full_spectrum_target,
+                        local_inverse_slope,
                     )
                     backward_loss = (
                         loss / self.gradient_accumulation_steps
@@ -526,8 +986,28 @@ class DdpmTrainer:
                 self.diffusion.parameters(),
                 self.maximum_gradient_norm,
             )
+            scale_before_update = float(
+                self.gradient_scaler.get_scale()
+            )
+
             self.gradient_scaler.step(self.optimizer)
             self.gradient_scaler.update()
+
+            scale_after_update = float(
+                self.gradient_scaler.get_scale()
+            )
+
+            optimizer_step_applied = (
+                not self.use_mixed_precision
+                or scale_after_update >= scale_before_update
+            )
+
+            if (
+                optimizer_step_applied
+                and self.learning_rate_scheduler is not None
+            ):
+                self.learning_rate_scheduler.step()
+
             self.ema.update(self.diffusion)
 
             accumulated_log_loss = (
@@ -568,6 +1048,7 @@ class DdpmTrainer:
             should_log = (
                 step % self.log_every_steps == 0
                 or step == self.total_training_steps
+                or should_validate
             )
 
             if should_log:

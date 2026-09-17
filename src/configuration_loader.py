@@ -14,6 +14,9 @@ from src.feature_peak_residual_limiter import (
 from src.sers_diversity_constraints import (
     normalize_diversity_configuration,
 )
+from src.conditional_diversity_constraints import (
+    normalize_condition_aware_diversity_configuration,
+)
 from src.sers_local_peak_distribution_constraints import (
     normalize_local_peak_distribution_configuration,
 )
@@ -350,6 +353,7 @@ def _validate_data_configuration(
         "sample_folder",
         "spectrum",
         "spectrum_within_folder",
+        "fixed_spectra_within_source_file",
     }
 
     if (
@@ -359,12 +363,51 @@ def _validate_data_configuration(
         raise ValueError(
             "data.split_unit必须为"
             "source_file、sample_folder、"
-            "spectrum或spectrum_within_folder。"
+            "spectrum、spectrum_within_folder或"
+            "fixed_spectra_within_source_file。"
         )
 
     data[
         "split_unit"
     ] = split_unit
+
+    if split_unit == "fixed_spectra_within_source_file":
+        fixed_split = data.get(
+            "fixed_spectrum_split"
+        )
+
+        if not isinstance(fixed_split, dict):
+            raise ValueError(
+                "使用fixed_spectra_within_source_file时，"
+                "data.fixed_spectrum_split必须为字典。"
+            )
+
+        normalized_fixed_split: dict[str, int] = {}
+
+        for key in (
+            "train_count",
+            "validation_count",
+            "test_count",
+        ):
+            if key not in fixed_split:
+                raise KeyError(
+                    "data.fixed_spectrum_split缺少"
+                    f"{key}。"
+                )
+
+            count = int(fixed_split[key])
+
+            if count <= 0:
+                raise ValueError(
+                    "data.fixed_spectrum_split."
+                    f"{key}必须大于0。"
+                )
+
+            normalized_fixed_split[key] = count
+
+        data[
+            "fixed_spectrum_split"
+        ] = normalized_fixed_split
 
     if (
         split_unit
@@ -391,6 +434,24 @@ def _validate_data_configuration(
             "data.length_adaptation必须为"
             "raman_axis_interpolation。"
         )
+
+    raman_axis_mode = str(
+        data.get(
+            "raman_axis_mode",
+            "strict",
+        )
+    ).strip().lower()
+
+    if raman_axis_mode not in {
+        "strict",
+        "union_with_valid_mask",
+    }:
+        raise ValueError(
+            "data.raman_axis_mode只支持strict或"
+            "union_with_valid_mask。"
+        )
+
+    data["raman_axis_mode"] = raman_axis_mode
 
     if str(
         data.get(
@@ -1016,6 +1077,66 @@ def _validate_prior_residual_configuration(
         "pointwise_scale_floor_quantile"
     ] = pointwise_floor_quantile
 
+    # ------------------------------------------------------------------
+    # D4.3.2.14 training-only PCA cross-fit
+    # ------------------------------------------------------------------
+
+    training_cross_fit = (
+        prior_residual.get(
+            "training_cross_fit",
+            {},
+        )
+        or {}
+    )
+
+    if not isinstance(
+        training_cross_fit,
+        dict,
+    ):
+        raise TypeError(
+            "prior_residual.training_cross_fit必须是字典。"
+        )
+
+    cross_fit_enabled = bool(
+        training_cross_fit.get(
+            "enabled",
+            False,
+        )
+    )
+
+    cross_fit_method = str(
+        training_cross_fit.get(
+            "method",
+            "leave_one_out",
+        )
+    ).strip().lower()
+
+    if (
+        cross_fit_enabled
+        and cross_fit_method != "leave_one_out"
+    ):
+        raise ValueError(
+            "D4.3.2.14目前只支持"
+            "prior_residual.training_cross_fit."
+            "method=leave_one_out。"
+        )
+
+    if (
+        cross_fit_enabled
+        and prior_method != "pca_reconstruction"
+    ):
+        raise ValueError(
+            "prior_residual.training_cross_fit"
+            "要求prior_method=pca_reconstruction。"
+        )
+
+    prior_residual[
+        "training_cross_fit"
+    ] = {
+        "enabled": cross_fit_enabled,
+        "method": cross_fit_method,
+    }
+
     configuration[
         "prior_residual"
     ] = prior_residual
@@ -1094,10 +1215,22 @@ def _validate_d3_configuration(
             "enabled": False,
         }
 
-    diversity = (
-        normalize_diversity_configuration(
-            raw_diversity
+    conditional_mask_mode = (
+        str(
+            configuration.get("data", {}).get("raman_axis_mode", "")
+        ).strip().lower()
+        == "union_with_valid_mask"
+        and bool(
+            (configuration.get("conditioning", {}) or {}).get(
+                "enabled", False
+            )
         )
+    )
+
+    diversity = (
+        normalize_condition_aware_diversity_configuration(raw_diversity)
+        if conditional_mask_mode
+        else normalize_diversity_configuration(raw_diversity)
     )
 
     configuration[
@@ -1200,10 +1333,20 @@ def _validate_d3_configuration(
         )
     )
 
+    conditional_diversity_enabled = diversity_enabled and conditional_mask_mode
+
+    if conditional_diversity_enabled:
+        if not bool(prior_residual.get("enabled", False)):
+            raise ValueError("D4.3多样性约束要求启用D4.2条件先验残差。")
+        if str(configuration["diffusion"]["objective"]).strip().lower() != "pred_x0":
+            raise ValueError("D4.3多样性约束当前只支持objective=pred_x0。")
+        if bool(configuration["diffusion"]["auto_normalize"]):
+            raise ValueError("D4.3要求diffusion.auto_normalize=false。")
+
     any_d3 = any(
         (
             physics_enabled,
-            diversity_enabled,
+            diversity_enabled and not conditional_mask_mode,
             limiter_enabled,
             local_enabled,
             residual_aware_enabled,
@@ -1347,6 +1490,62 @@ def validate_config(
         model,
     )
 
+    conditioning = configuration.get("conditioning", {}) or {}
+    if not isinstance(conditioning, dict):
+        raise TypeError("conditioning必须是字典。")
+    conditioning["enabled"] = bool(conditioning.get("enabled", False))
+    conditioning["vector_size"] = int(conditioning.get("vector_size", 14))
+    conditioning["embedding_dimension"] = int(
+        conditioning.get("embedding_dimension", 8)
+    )
+    conditioning["injection"] = str(
+        conditioning.get("injection", "input_only")
+    ).strip().lower()
+    prior_spectrum = conditioning.get("prior_spectrum", {}) or {}
+    if not isinstance(prior_spectrum, dict):
+        raise TypeError("conditioning.prior_spectrum必须是字典。")
+    prior_spectrum["enabled"] = bool(prior_spectrum.get("enabled", False))
+    prior_spectrum["source"] = str(
+        prior_spectrum.get("source", "condition_reconstruction_base")
+    ).strip().lower()
+    prior_spectrum["injection"] = str(
+        prior_spectrum.get("injection", "input_channel")
+    ).strip().lower()
+    if prior_spectrum["source"] != "condition_reconstruction_base":
+        raise ValueError(
+            "conditioning.prior_spectrum.source必须为"
+            "condition_reconstruction_base。"
+        )
+    if prior_spectrum["injection"] != "input_channel":
+        raise ValueError(
+            "conditioning.prior_spectrum.injection必须为input_channel。"
+        )
+    conditioning["prior_spectrum"] = prior_spectrum
+    if conditioning["vector_size"] != 14:
+        raise ValueError("D4.1的conditioning.vector_size必须为14。")
+    if conditioning["embedding_dimension"] <= 0:
+        raise ValueError("conditioning.embedding_dimension必须大于0。")
+    if conditioning["injection"] not in {
+        "input_only",
+        "input_and_all_resnet_blocks_film",
+    }:
+        raise ValueError(
+            "conditioning.injection必须为input_only或"
+            "input_and_all_resnet_blocks_film。"
+        )
+    if conditioning["enabled"]:
+        if data["raman_axis_mode"] != "union_with_valid_mask":
+            raise ValueError(
+                "启用D4.1条件生成时raman_axis_mode必须为"
+                "union_with_valid_mask。"
+            )
+        if data["split_unit"] != "fixed_spectra_within_source_file":
+            raise ValueError(
+                "启用D4.1条件生成时split_unit必须为"
+                "fixed_spectra_within_source_file。"
+            )
+    configuration["conditioning"] = conditioning
+
     _validate_normalization_configuration(
         normalization,
         diffusion,
@@ -1361,6 +1560,19 @@ def validate_config(
             configuration
         )
     )
+
+    if conditioning["prior_spectrum"]["enabled"]:
+        broad_local = configuration.get("broad_local_residual", {}) or {}
+        if not conditioning["enabled"]:
+            raise ValueError("先验谱条件化要求conditioning.enabled=true。")
+        if not bool(prior_residual.get("enabled", False)):
+            raise ValueError("先验谱条件化要求prior_residual.enabled=true。")
+        if not isinstance(broad_local, dict) or not bool(
+            broad_local.get("enabled", False)
+        ):
+            raise ValueError(
+                "先验谱条件化要求broad_local_residual.enabled=true。"
+            )
 
     _validate_d3_configuration(
         configuration,

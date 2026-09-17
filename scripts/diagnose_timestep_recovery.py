@@ -2,7 +2,9 @@
 
 该脚本同时支持：
 1. D0/D1：模型直接学习完整的全局归一化光谱；
-2. D2：模型学习“完整归一化光谱-参考先验”的缩放残差。
+2. D2：模型学习“完整归一化光谱-参考先验”的缩放残差；
+3. D4.2/D4.3：按指定条件诊断条件PCA+broad先验上的local残差，
+   并对混合Raman轴使用valid_mask。
 
 D2诊断必须在缩放残差域中执行前向加噪和模型恢复，然后依次：
 缩放残差 -> 加回对应参考先验 -> 完整归一化光谱 -> 原始强度光谱。
@@ -27,6 +29,7 @@ import pandas as pd
 import torch
 
 from src.checkpoint_manager import load_checkpoint_file
+from src.conditional_prior_residual import ConditionalPriorResidualBank
 from src.configuration_loader import (
     load_configuration,
     resolve_project_path,
@@ -34,6 +37,9 @@ from src.configuration_loader import (
 from src.intensity_normalizer import GlobalMinMaxNormalizer
 from src.model_builder import build_diffusion_model
 from src.prior_residual import PriorResidualTransformer
+from src.spectrum_conditioning import (
+    resolve_source_named_condition_from_metadata,
+)
 from src.spectrum_file_reader import read_spectrum_collection
 from src.spectrum_length_adapter import SpectrumLengthAdapter
 
@@ -89,6 +95,22 @@ def calculate_pearson(
     )
 
 
+def calculate_cosine(
+    reference: np.ndarray,
+    prediction: np.ndarray,
+) -> float:
+    """安全计算余弦相似度。"""
+
+    reference_64 = np.asarray(reference, dtype=np.float64)
+    prediction_64 = np.asarray(prediction, dtype=np.float64)
+    denominator = np.linalg.norm(reference_64) * np.linalg.norm(prediction_64)
+    if denominator <= 1.0e-12:
+        return float("nan")
+    return float(
+        np.clip(np.dot(reference_64, prediction_64) / denominator, -1.0, 1.0)
+    )
+
+
 def safe_ratio(
     value: float,
     baseline: float,
@@ -127,7 +149,7 @@ def build_diagnostic_timesteps(
     if total_timesteps <= 0:
         raise ValueError("扩散总步数必须大于0。")
 
-    # 当总步数为100时得到：0、10、25、50、75、90、99。
+    # T=200时得到：0、20、50、100、150、180、199；其他T同比例检查。
     fractions = (
         0.0,
         0.10,
@@ -194,6 +216,19 @@ def load_prior_residual_transformer(
         return None
 
     return PriorResidualTransformer.from_state_dict(state)
+
+
+def load_conditional_prior_residual_bank(
+    metadata: dict[str, Any],
+) -> ConditionalPriorResidualBank | None:
+    """Restore the D4.2/D4.3 per-condition prior bank when present."""
+
+    state = metadata.get("conditional_prior_residual_state")
+    if state is None:
+        return None
+    if not isinstance(state, dict):
+        raise TypeError("conditional_prior_residual_state必须是字典。")
+    return ConditionalPriorResidualBank.from_state_dict(state)
 
 
 def restore_full_normalized_spectra(
@@ -313,8 +348,8 @@ def main() -> None:
     parser.add_argument(
         "--model-source",
         choices=("raw", "ema"),
-        default="raw",
-        help="使用原始模型权重或EMA权重。",
+        default="ema",
+        help="使用原始模型权重或EMA权重；默认与正式生成一致使用EMA。",
     )
 
     parser.add_argument(
@@ -325,6 +360,29 @@ def main() -> None:
             "真实光谱索引。未指定时优先读取checkpoint配置中的"
             "diagnostic_overfit.spectrum_index。"
         ),
+    )
+
+    parser.add_argument(
+        "--condition",
+        default=None,
+        help=(
+            "D4.2/D4.3输入文件的原始条件名。指定后从该条件的"
+            "validation或test固定子集中选择光谱。"
+        ),
+    )
+
+    parser.add_argument(
+        "--reference-split",
+        choices=("validation", "test"),
+        default="validation",
+        help="条件诊断默认使用validation；最终参数冻结后才使用test。",
+    )
+
+    parser.add_argument(
+        "--condition-spectrum-offset",
+        type=int,
+        default=0,
+        help="指定条件固定子集内的光谱序号，允许0--3。",
     )
 
     parser.add_argument(
@@ -441,7 +499,55 @@ def main() -> None:
         data_configuration,
     )
 
+    conditional_prior_bank = load_conditional_prior_residual_bank(metadata)
+    selected_condition_name: str | None = None
+    selected_condition_id: str | None = None
+    selected_condition_vector: np.ndarray | None = None
+    selected_source_file: str | None = None
+
     spectrum_index = arguments.spectrum_index
+    if arguments.condition is not None:
+        if spectrum_index is not None:
+            raise ValueError("--condition与--spectrum-index不能同时使用。")
+        if conditional_prior_bank is None:
+            raise ValueError("--condition仅适用于D4.2/D4.3条件先验检查点。")
+        conditioning_metadata = metadata.get("conditioning_metadata")
+        if not isinstance(conditioning_metadata, dict):
+            raise RuntimeError("D4 checkpoint缺少conditioning_metadata。")
+        (
+            selected_condition_name,
+            selected_condition_id,
+            selected_condition_vector,
+            selected_source_file,
+        ) = resolve_source_named_condition_from_metadata(
+            conditioning_metadata,
+            arguments.condition,
+        )
+        relative_sources = np.asarray(
+            [str(value) for value in collection.relative_source_files],
+            dtype=object,
+        )
+        if relative_sources.tolist() != metadata.get("relative_source_files"):
+            raise RuntimeError("当前输入文件顺序与checkpoint训练时不一致。")
+        split_indices = set(
+            int(value)
+            for value in metadata.get(
+                f"{arguments.reference_split}_indices", []
+            )
+        )
+        candidates = [
+            int(index)
+            for index in np.flatnonzero(relative_sources == selected_source_file)
+            if int(index) in split_indices
+        ]
+        offset = int(arguments.condition_spectrum_offset)
+        if len(candidates) != 4 or not 0 <= offset < len(candidates):
+            raise ValueError(
+                f"条件{selected_condition_name}的{arguments.reference_split}"
+                f"应有4条且offset应在0--3；实际候选={len(candidates)}，"
+                f"offset={offset}。"
+            )
+        spectrum_index = candidates[offset]
 
     if spectrum_index is None:
         diagnostic_configuration = checkpoint_configuration.get(
@@ -459,9 +565,29 @@ def main() -> None:
             f"当前共有{len(collection.spectra)}条光谱。"
         )
 
-    true_original_2d = length_adapter.interpolate_to_model_axis(
-        [collection.spectra[spectrum_index]],
-        [collection.raman_shifts[spectrum_index]],
+    if conditional_prior_bank is not None and selected_condition_id is None:
+        conditioning_metadata = metadata.get("conditioning_metadata")
+        if not isinstance(conditioning_metadata, dict):
+            raise RuntimeError("D4 checkpoint缺少conditioning_metadata。")
+        selected_source_file = str(collection.relative_source_files[spectrum_index])
+        (
+            selected_condition_name,
+            selected_condition_id,
+            selected_condition_vector,
+            resolved_source_file,
+        ) = resolve_source_named_condition_from_metadata(
+            conditioning_metadata,
+            Path(selected_source_file).stem,
+        )
+        if resolved_source_file != selected_source_file:
+            raise RuntimeError("诊断光谱的源文件与条件元数据不一致。")
+
+    (
+        true_original_2d,
+        true_valid_mask_2d,
+    ) = length_adapter.interpolate_to_model_axis_with_mask(
+        spectra=[collection.spectra[spectrum_index]],
+        raman_shifts=[collection.raman_shifts[spectrum_index]],
     )
 
     if "normalization_state" not in metadata:
@@ -476,17 +602,39 @@ def main() -> None:
     # 完整光谱的全局归一化结果。
     true_normalized_2d = normalizer.transform(true_original_2d)
 
-    # 自动识别D0/D1或D2。
-    prior_transformer = load_prior_residual_transformer(
-        checkpoint_configuration,
-        metadata,
+    # D4使用126套条件先验；旧D2继续使用单套先验状态。
+    prior_transformer = (
+        None
+        if conditional_prior_bank is not None
+        else load_prior_residual_transformer(
+            checkpoint_configuration,
+            metadata,
+        )
     )
 
     # D2.2 PCA可变先验：为当前诊断光谱解析其对应参考先验。
     # 后续transform、prior-only恢复和预测恢复必须使用同一个先验。
     true_reference_priors: np.ndarray | None
 
-    if prior_transformer is None:
+    conditional_deterministic_base_2d: np.ndarray | None = None
+    if conditional_prior_bank is not None:
+        if selected_condition_id is None or selected_condition_vector is None:
+            raise RuntimeError("D4诊断未解析出条件ID或14维条件向量。")
+        diagnostic_mode = "conditional_prior_broad_local_residual_scaled"
+        (
+            true_model_domain_2d,
+            conditional_deterministic_base_2d,
+        ) = conditional_prior_bank.diagnostic_transform(
+            true_normalized_2d,
+            valid_mask=true_valid_mask_2d,
+            condition_id=selected_condition_id,
+        )
+        true_reference_priors = None
+        prior_normalized_2d = conditional_deterministic_base_2d
+        prior_original_2d = normalizer.inverse_transform(
+            prior_normalized_2d
+        )
+    elif prior_transformer is None:
         diagnostic_mode = "full_normalized_spectrum"
         true_reference_priors = None
         true_model_domain_2d = np.asarray(
@@ -521,6 +669,9 @@ def main() -> None:
         )
 
     padded_2d = length_adapter.adapt(true_model_domain_2d)
+    padded_valid_mask_2d = length_adapter.adapt_valid_mask(
+        true_valid_mask_2d
+    )
 
     x_start = (
         torch.as_tensor(
@@ -529,6 +680,22 @@ def main() -> None:
             device=device,
         )
         .unsqueeze(1)
+    )
+    valid_mask_tensor = (
+        torch.as_tensor(
+            padded_valid_mask_2d,
+            dtype=torch.float32,
+            device=device,
+        ).unsqueeze(1)
+    )
+    condition_tensor = (
+        None
+        if selected_condition_vector is None
+        else torch.as_tensor(
+            selected_condition_vector,
+            dtype=torch.float32,
+            device=device,
+        ).reshape(1, -1)
     )
 
     generator = torch.Generator(device=device)
@@ -539,28 +706,32 @@ def main() -> None:
         generator=generator,
         device=device,
         dtype=x_start.dtype,
-    )
+    ) * valid_mask_tensor
 
     total_timesteps = int(diffusion.num_timesteps)
     timesteps = build_diagnostic_timesteps(total_timesteps)
 
+    valid_indices = np.flatnonzero(true_valid_mask_2d[0] > 0.5)
+    if valid_indices.size < 3:
+        raise RuntimeError("诊断光谱有效Raman点少于3个。")
+
     true_original = np.asarray(
-        true_original_2d[0],
+        true_original_2d[0, valid_indices],
         dtype=np.float64,
     )
 
     true_normalized = np.asarray(
-        true_normalized_2d[0],
+        true_normalized_2d[0, valid_indices],
         dtype=np.float64,
     )
 
     true_model_domain = np.asarray(
-        true_model_domain_2d[0],
+        true_model_domain_2d[0, valid_indices],
         dtype=np.float64,
     )
 
     raman_axis = np.asarray(
-        length_adapter.model_axis,
+        length_adapter.model_axis[valid_indices],
         dtype=np.float64,
     )
 
@@ -569,11 +740,11 @@ def main() -> None:
     )
 
     true_noise = np.asarray(
-        true_noise_2d[0],
+        true_noise_2d[0, valid_indices],
         dtype=np.float64,
     )
 
-    if prior_transformer is None:
+    if prior_transformer is None and conditional_prior_bank is None:
         prior_normalized = None
         prior_original = None
         prior_only_pearson = float("nan")
@@ -582,11 +753,11 @@ def main() -> None:
         prior_only_original_mae = float("nan")
     else:
         prior_normalized = np.asarray(
-            prior_normalized_2d[0],
+            prior_normalized_2d[0, valid_indices],
             dtype=np.float64,
         )
         prior_original = np.asarray(
-            prior_original_2d[0],
+            prior_original_2d[0, valid_indices],
             dtype=np.float64,
         )
         prior_only_pearson = calculate_pearson(
@@ -628,12 +799,20 @@ def main() -> None:
                 x_start,
                 time_tensor,
                 noise=fixed_noise,
-            )
+            ) * valid_mask_tensor
 
+            prediction_arguments: dict[str, torch.Tensor] = {}
+            if bool(getattr(diffusion, "supports_valid_mask", False)):
+                prediction_arguments["valid_mask"] = valid_mask_tensor
+            if bool(getattr(diffusion, "supports_condition", False)):
+                if condition_tensor is None:
+                    raise RuntimeError("条件扩散模型诊断缺少condition。")
+                prediction_arguments["condition"] = condition_tensor
             model_prediction = diffusion.model_predictions(
                 noisy_spectrum,
                 time_tensor,
                 clip_x_start=False,
+                **prediction_arguments,
             )
 
             predicted_noise_tensor = model_prediction.pred_noise
@@ -672,59 +851,80 @@ def main() -> None:
             )
 
             predicted_model_unclipped = np.asarray(
-                predicted_model_unclipped_2d[0],
+                predicted_model_unclipped_2d[0, valid_indices],
                 dtype=np.float64,
             )
 
             predicted_model_clipped = np.asarray(
-                predicted_model_clipped_2d[0],
+                predicted_model_clipped_2d[0, valid_indices],
                 dtype=np.float64,
             )
 
             predicted_noise = np.asarray(
-                predicted_noise_2d[0],
+                predicted_noise_2d[0, valid_indices],
                 dtype=np.float64,
             )
 
             # D2必须先加回当前真实光谱对应的参考先验，
             # 再进行全局反归一化。
-            predicted_normalized_unclipped_2d = (
-                restore_full_normalized_spectra(
-                    predicted_model_unclipped_2d,
-                    prior_transformer,
-                    reference_priors=true_reference_priors,
+            if conditional_prior_bank is not None:
+                if (
+                    selected_condition_id is None
+                    or conditional_deterministic_base_2d is None
+                ):
+                    raise RuntimeError("D4诊断缺少条件基线。")
+                predicted_normalized_unclipped_2d = (
+                    conditional_prior_bank.restore_diagnostic_prediction(
+                        predicted_model_unclipped_2d,
+                        deterministic_base=conditional_deterministic_base_2d,
+                        condition_id=selected_condition_id,
+                    )
                 )
-            )
+                predicted_normalized_clipped_2d = (
+                    conditional_prior_bank.restore_diagnostic_prediction(
+                        predicted_model_clipped_2d,
+                        deterministic_base=conditional_deterministic_base_2d,
+                        condition_id=selected_condition_id,
+                    )
+                )
+            else:
+                predicted_normalized_unclipped_2d = (
+                    restore_full_normalized_spectra(
+                        predicted_model_unclipped_2d,
+                        prior_transformer,
+                        reference_priors=true_reference_priors,
+                    )
+                )
 
-            predicted_normalized_clipped_2d = (
-                restore_full_normalized_spectra(
-                    predicted_model_clipped_2d,
-                    prior_transformer,
-                    reference_priors=true_reference_priors,
+                predicted_normalized_clipped_2d = (
+                    restore_full_normalized_spectra(
+                        predicted_model_clipped_2d,
+                        prior_transformer,
+                        reference_priors=true_reference_priors,
+                    )
                 )
-            )
 
             predicted_normalized_unclipped = np.asarray(
-                predicted_normalized_unclipped_2d[0],
+                predicted_normalized_unclipped_2d[0, valid_indices],
                 dtype=np.float64,
             )
 
             predicted_normalized_clipped = np.asarray(
-                predicted_normalized_clipped_2d[0],
+                predicted_normalized_clipped_2d[0, valid_indices],
                 dtype=np.float64,
             )
 
             predicted_original_unclipped = np.asarray(
                 normalizer.inverse_transform(
                     predicted_normalized_unclipped_2d
-                )[0],
+                )[0, valid_indices],
                 dtype=np.float64,
             )
 
             predicted_original_clipped = np.asarray(
                 normalizer.inverse_transform(
                     predicted_normalized_clipped_2d
-                )[0],
+                )[0, valid_indices],
                 dtype=np.float64,
             )
 
@@ -754,7 +954,7 @@ def main() -> None:
                 )
 
                 baseline_noise = np.asarray(
-                    baseline_noise_2d[0],
+                    baseline_noise_2d[0, valid_indices],
                     dtype=np.float64,
                 )
 
@@ -840,6 +1040,10 @@ def main() -> None:
                         true_original,
                         predicted_original_clipped,
                     ),
+                    "clipped_x0_cosine": calculate_cosine(
+                        true_original,
+                        predicted_original_clipped,
+                    ),
                     "clipped_x0_model_domain_rmse": calculate_rmse(
                         true_model_domain,
                         predicted_model_clipped,
@@ -854,6 +1058,10 @@ def main() -> None:
                         predicted_original_clipped,
                     ),
                     "unclipped_x0_pearson": calculate_pearson(
+                        true_original,
+                        predicted_original_unclipped,
+                    ),
+                    "unclipped_x0_cosine": calculate_cosine(
                         true_original,
                         predicted_original_unclipped,
                     ),
@@ -1163,7 +1371,7 @@ def main() -> None:
 
     baseline_label = (
         "Zero-residual baseline RMSE"
-        if prior_transformer is not None
+        if prior_transformer is not None or conditional_prior_bank is not None
         else "Zero-signal baseline RMSE"
     )
 
@@ -1216,8 +1424,21 @@ def main() -> None:
         "光谱名称："
         f"{collection.spectrum_names[spectrum_index]}"
     )
+    print(f"有效Raman点数：{valid_indices.size}")
 
-    if prior_transformer is not None:
+    if conditional_prior_bank is not None:
+        print("D4条件先验残差支持：已启用")
+        print(f"原始条件名：{selected_condition_name}")
+        print(f"模型内部条件ID：{selected_condition_id}")
+        print(
+            "仅条件PCA+broad基线Pearson："
+            f"{prior_only_pearson:.6f}"
+        )
+        print(
+            "仅条件PCA+broad基线原始强度RMSE："
+            f"{prior_only_original_rmse:.6f}"
+        )
+    elif prior_transformer is not None:
         print("D2先验残差支持：已启用")
         print(
             "残差归一化方法："
@@ -1260,7 +1481,9 @@ def main() -> None:
     terminal_columns = [
         "timestep",
         "clipped_x0_pearson",
+        "clipped_x0_cosine",
         "unclipped_x0_pearson",
+        "unclipped_x0_cosine",
         "unclipped_x0_normalized_rmse",
         "unclipped_x0_original_rmse",
         "clipping_fraction",
@@ -1270,7 +1493,7 @@ def main() -> None:
         "noise_improvement_percent",
     ]
 
-    if prior_transformer is not None:
+    if prior_transformer is not None or conditional_prior_bank is not None:
         terminal_columns.extend(
             [
                 "prior_only_original_rmse",
@@ -1301,10 +1524,10 @@ def main() -> None:
         "噪声预测相对简单基线有改善。"
     )
 
-    if prior_transformer is not None:
+    if prior_transformer is not None or conditional_prior_bank is not None:
         print(
-            "4. D2中的零模型信号表示零缩放残差，"
-            "对应完整光谱域中的仅参考先验。"
+            "4. 先验残差模型中的零模型信号表示零缩放残差，"
+            "对应完整光谱域中的仅先验（D4含broad基线）。"
         )
         print(
             "5. unclipped_model_to_prior_original_rmse_ratio < 1，"

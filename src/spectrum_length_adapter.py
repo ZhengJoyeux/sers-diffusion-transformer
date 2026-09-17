@@ -169,6 +169,10 @@ class SpectrumLengthAdapter:
 
     raman_range_tolerance: float = 1.0
 
+    # strict要求所有文件起止范围基本一致；
+    # union_with_valid_mask允许较短光谱只覆盖统一轴的一部分。
+    raman_axis_mode: str = "strict"
+
     def __post_init__(self) -> None:
         if self.original_length <= 0:
             raise ValueError(
@@ -229,6 +233,15 @@ class SpectrumLengthAdapter:
                 "raman_range_tolerance不能小于0。"
             )
 
+        if self.raman_axis_mode not in {
+            "strict",
+            "union_with_valid_mask",
+        }:
+            raise ValueError(
+                "raman_axis_mode只支持strict或"
+                "union_with_valid_mask。"
+            )
+
         if self.model_raman_shift:
             model_axis = _validate_axis(
                 np.asarray(
@@ -263,6 +276,7 @@ class SpectrumLengthAdapter:
         ),
         padding_value: float = 0.0,
         raman_range_tolerance: float = 1.0,
+        raman_axis_mode: str = "strict",
     ) -> "SpectrumLengthAdapter":
         multipliers = tuple(
             int(value)
@@ -284,6 +298,19 @@ class SpectrumLengthAdapter:
             len(multipliers) - 1
         )
 
+        resolved_axis_mode = str(
+            raman_axis_mode
+        ).strip().lower()
+
+        if resolved_axis_mode not in {
+            "strict",
+            "union_with_valid_mask",
+        }:
+            raise ValueError(
+                "raman_axis_mode只支持strict或"
+                "union_with_valid_mask。"
+            )
+
         if raman_shifts is not None:
             axes = [
                 _validate_axis(
@@ -300,43 +327,78 @@ class SpectrumLengthAdapter:
                     "raman_shifts不能为空。"
                 )
 
-            # 使用训练集中点数最多的真实位移轴。
-            model_axis = max(
-                axes,
-                key=lambda axis: axis.size,
-            ).copy()
-
             tolerance = float(
                 raman_range_tolerance
             )
 
-            for index, axis in enumerate(
-                axes
-            ):
-                start_difference = abs(
-                    axis[0] - model_axis[0]
+            if resolved_axis_mode == "strict":
+                # 保持D0-D3原行为：使用点数最多的真实轴，
+                # 并要求所有文件的起止范围基本一致。
+                model_axis = max(
+                    axes,
+                    key=lambda axis: axis.size,
+                ).copy()
+            else:
+                # D4.0-B不凭空构造位移点，而是从输入中选择一条
+                # 能覆盖全部起止范围的真实轴作为联合轴。
+                minimum_start = min(
+                    float(axis[0]) for axis in axes
                 )
-
-                end_difference = abs(
-                    axis[-1] - model_axis[-1]
+                maximum_end = max(
+                    float(axis[-1]) for axis in axes
                 )
-
-                if (
-                    max(
-                        start_difference,
-                        end_difference,
+                candidates = [
+                    axis
+                    for axis in axes
+                    if (
+                        float(axis[0])
+                        <= minimum_start + tolerance
+                        and float(axis[-1])
+                        >= maximum_end - tolerance
                     )
-                    > tolerance
-                ):
+                ]
+                if not candidates:
                     raise ValueError(
-                        f"raman_shifts[{index}]与统一训练轴"
-                        "的起止范围相差过大；"
-                        f"起点差{start_difference:.6g} cm-1，"
-                        f"终点差{end_difference:.6g} cm-1，"
-                        f"允许值为{tolerance:.6g} cm-1。"
-                        "不同点数可以自动适配，"
-                        "但测量范围必须基本一致。"
+                        "union_with_valid_mask要求输入中至少有一条"
+                        "真实Raman轴覆盖全部输入范围；当前无法安全"
+                        "建立联合轴。"
                     )
+                model_axis = max(
+                    candidates,
+                    key=lambda axis: (
+                        float(axis[-1] - axis[0]),
+                        axis.size,
+                    ),
+                ).copy()
+
+            if resolved_axis_mode == "strict":
+                for index, axis in enumerate(
+                    axes
+                ):
+                    start_difference = abs(
+                        axis[0] - model_axis[0]
+                    )
+
+                    end_difference = abs(
+                        axis[-1] - model_axis[-1]
+                    )
+
+                    if (
+                        max(
+                            start_difference,
+                            end_difference,
+                        )
+                        > tolerance
+                    ):
+                        raise ValueError(
+                            f"raman_shifts[{index}]与统一训练轴"
+                            "的起止范围相差过大；"
+                            f"起点差{start_difference:.6g} cm-1，"
+                            f"终点差{end_difference:.6g} cm-1，"
+                            f"允许值为{tolerance:.6g} cm-1。"
+                            "不同点数可以自动适配，"
+                            "但测量范围必须基本一致。"
+                        )
 
             resolved_original_length = int(
                 model_axis.size
@@ -423,6 +485,7 @@ class SpectrumLengthAdapter:
             raman_range_tolerance=float(
                 raman_range_tolerance
             ),
+            raman_axis_mode=resolved_axis_mode,
         )
 
     @classmethod
@@ -475,6 +538,12 @@ class SpectrumLengthAdapter:
                     1.0,
                 )
             ),
+            raman_axis_mode=str(
+                metadata.get(
+                    "raman_axis_mode",
+                    "strict",
+                )
+            ),
         )
 
     @property
@@ -492,6 +561,19 @@ class SpectrumLengthAdapter:
         raman_shifts: Sequence[np.ndarray],
     ) -> np.ndarray:
         """将全部光谱按真实拉曼位移插值到统一轴。"""
+
+        output, _ = self.interpolate_to_model_axis_with_mask(
+            spectra=spectra,
+            raman_shifts=raman_shifts,
+        )
+        return output
+
+    def interpolate_to_model_axis_with_mask(
+        self,
+        spectra: Sequence[np.ndarray],
+        raman_shifts: Sequence[np.ndarray],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """插值到统一轴，并返回每条光谱真实测量区的有效掩码。"""
 
         spectrum_items = list(
             spectra
@@ -516,11 +598,17 @@ class SpectrumLengthAdapter:
 
         model_axis = self.model_axis
 
-        output = np.empty(
+        output = np.full(
             (
                 len(spectrum_items),
                 self.original_length,
             ),
+            fill_value=float(self.padding_value),
+            dtype=np.float32,
+        )
+
+        valid_masks = np.zeros_like(
+            output,
             dtype=np.float32,
         )
 
@@ -554,39 +642,117 @@ class SpectrumLengthAdapter:
                     f"第{index}条光谱含NaN或无穷值。"
                 )
 
-            start_difference = abs(
-                source_axis[0]
-                - model_axis[0]
-            )
-
-            end_difference = abs(
-                source_axis[-1]
-                - model_axis[-1]
-            )
-
-            if (
-                max(
-                    start_difference,
-                    end_difference,
+            if self.raman_axis_mode == "strict":
+                start_difference = abs(
+                    source_axis[0]
+                    - model_axis[0]
                 )
-                > self.raman_range_tolerance
-            ):
+
+                end_difference = abs(
+                    source_axis[-1]
+                    - model_axis[-1]
+                )
+
+                if (
+                    max(
+                        start_difference,
+                        end_difference,
+                    )
+                    > self.raman_range_tolerance
+                ):
+                    raise ValueError(
+                        f"第{index}条光谱与训练轴的"
+                        "起止范围相差过大；"
+                        f"起点差{start_difference:.6g} cm-1，"
+                        f"终点差{end_difference:.6g} cm-1。"
+                    )
+                valid = np.ones(
+                    model_axis.shape,
+                    dtype=bool,
+                )
+            else:
+                if (
+                    source_axis[0]
+                    < model_axis[0] - self.raman_range_tolerance
+                    or source_axis[-1]
+                    > model_axis[-1] + self.raman_range_tolerance
+                ):
+                    raise ValueError(
+                        f"第{index}条光谱超出联合训练轴范围。"
+                    )
+                valid = np.logical_and(
+                    model_axis >= source_axis[0],
+                    model_axis <= source_axis[-1],
+                )
+
+            if not np.any(valid):
                 raise ValueError(
-                    f"第{index}条光谱与训练轴的"
-                    "起止范围相差过大；"
-                    f"起点差{start_difference:.6g} cm-1，"
-                    f"终点差{end_difference:.6g} cm-1。"
+                    f"第{index}条光谱与统一训练轴没有公共点。"
                 )
 
-            output[index] = np.interp(
-                model_axis,
+            output[index, valid] = np.interp(
+                model_axis[valid],
                 source_axis,
                 values,
             ).astype(
                 np.float32
             )
 
-        return output
+            valid_masks[index, valid] = 1.0
+
+        return output, valid_masks
+
+    def adapt_valid_mask(
+        self,
+        valid_mask: np.ndarray,
+    ) -> np.ndarray:
+        """将统一物理轴掩码右补零到网络输入长度。"""
+
+        mask = np.asarray(
+            valid_mask,
+            dtype=np.float32,
+        )
+        if (
+            mask.ndim != 2
+            or mask.shape[1] != self.original_length
+        ):
+            raise ValueError(
+                "valid_mask必须为统一物理轴上的[N,L]数组。"
+            )
+        if not np.logical_or(mask == 0.0, mask == 1.0).all():
+            raise ValueError("valid_mask只能包含0和1。")
+
+        return adapt_spectrum_length(
+            spectra=mask,
+            target_length=self.padded_length,
+            method=self.padding_mode,
+            padding_value=0.0,
+        )
+
+    def valid_mask_for_axis(
+        self,
+        target_raman_shift: np.ndarray,
+    ) -> np.ndarray:
+        """建立指定输出轴在模型联合轴上的一维有效掩码。"""
+
+        target_axis = _validate_axis(
+            target_raman_shift,
+            "target_raman_shift",
+        )
+        model_axis = self.model_axis
+        if (
+            target_axis[0]
+            < model_axis[0] - self.raman_range_tolerance
+            or target_axis[-1]
+            > model_axis[-1] + self.raman_range_tolerance
+        ):
+            raise ValueError("目标输出轴超出模型联合轴范围。")
+
+        physical_mask = np.logical_and(
+            model_axis >= target_axis[0],
+            model_axis <= target_axis[-1],
+        ).astype(np.float32)[np.newaxis, :]
+        return self.adapt_valid_mask(physical_mask)[0]
 
     def adapt(
         self,
@@ -754,5 +920,8 @@ class SpectrumLengthAdapter:
             ),
             "raman_range_tolerance": (
                 self.raman_range_tolerance
+            ),
+            "raman_axis_mode": (
+                self.raman_axis_mode
             ),
         }

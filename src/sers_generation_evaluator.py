@@ -1267,15 +1267,20 @@ def sample_pair_metrics(
     if number < 2:
         raise ValueError("pair metrics至少需要2条光谱。")
 
-    if all_pairs_if_small:
+    total_unique_pairs = number * (number - 1) // 2
+    requested = int(pair_count)
+    if requested <= 0:
+        raise ValueError("pair_count必须大于0。")
+
+    # Once the requested sample count reaches the finite number of unique
+    # unordered pairs, calculate every pair exactly. This removes duplicated
+    # random pairs and is both faster and statistically stronger for n=20/200.
+    if all_pairs_if_small or requested >= total_unique_pairs:
         left_indices, right_indices = np.triu_indices(
             number,
             k=1,
         )
     else:
-        requested = int(pair_count)
-        if requested <= 0:
-            raise ValueError("pair_count必须大于0。")
         rng = np.random.default_rng(int(random_seed))
         left_indices = rng.integers(
             0,

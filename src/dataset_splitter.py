@@ -17,6 +17,12 @@ The project supports three split modes:
     spectra inside every folder. This mode is intended for the directory form
     in which every sample-combination folder contains many files and every file
     contains exactly one spectrum.
+
+``fixed_spectra_within_source_file``
+    Keep the physical-sample assignment encoded by the intensity-column order
+    inside every source file. For example, with 20 spectra per Excel file, the
+    first 12 spectra can be fixed as training data, the next 4 as validation
+    data, and the final 4 as test data. No random reassignment is performed.
 """
 
 from __future__ import annotations
@@ -454,6 +460,150 @@ def _split_by_source_file(
     )
 
 
+def _read_fixed_spectrum_counts(
+    data_config: dict,
+) -> tuple[int, int, int]:
+    """Read the exact per-source 12/4/4-style split contract."""
+
+    raw_configuration = data_config.get(
+        "fixed_spectrum_split",
+    )
+
+    if not isinstance(raw_configuration, dict):
+        raise ValueError(
+            "split_unit=fixed_spectra_within_source_file要求"
+            "data.fixed_spectrum_split为字典。"
+        )
+
+    required_keys = (
+        "train_count",
+        "validation_count",
+        "test_count",
+    )
+
+    missing_keys = [
+        key
+        for key in required_keys
+        if key not in raw_configuration
+    ]
+
+    if missing_keys:
+        raise KeyError(
+            "data.fixed_spectrum_split缺少配置："
+            f"{missing_keys}。"
+        )
+
+    counts = tuple(
+        int(raw_configuration[key])
+        for key in required_keys
+    )
+
+    if any(count <= 0 for count in counts):
+        raise ValueError(
+            "fixed_spectrum_split中的train_count、"
+            "validation_count和test_count都必须大于0。"
+        )
+
+    return counts
+
+
+def _split_fixed_spectra_within_source_file(
+    *,
+    collection: SpectrumCollection,
+    data_config: dict,
+) -> SpectrumDatasetSplit:
+    """Apply one fixed column-order split independently to every source.
+
+    The reader appends spectra in intensity-column order, so the ordered
+    indices for one source file correspond to that file's first, second, ...
+    intensity spectra. This function deliberately does not shuffle those
+    indices: their physical-sample roles were fixed before model training.
+    """
+
+    (
+        train_count,
+        validation_count,
+        test_count,
+    ) = _read_fixed_spectrum_counts(data_config)
+
+    expected_count = (
+        train_count
+        + validation_count
+        + test_count
+    )
+
+    all_source_files = np.asarray(
+        collection.source_files,
+        dtype=object,
+    ).reshape(-1)
+
+    if all_source_files.size != len(collection.spectra):
+        raise ValueError(
+            "source_files数量与光谱数量不一致，"
+            "无法执行源文件内部固定划分。"
+        )
+
+    source_file_to_indices: dict[str, list[int]] = {}
+
+    for spectrum_index, source_file in enumerate(
+        all_source_files.tolist()
+    ):
+        source_key = str(source_file)
+        source_file_to_indices.setdefault(
+            source_key,
+            [],
+        ).append(spectrum_index)
+
+    if not source_file_to_indices:
+        raise ValueError(
+            "没有找到可用于固定划分的源文件。"
+        )
+
+    train_indices: list[int] = []
+    validation_indices: list[int] = []
+    test_indices: list[int] = []
+
+    for source_file, ordered_indices in source_file_to_indices.items():
+        actual_count = len(ordered_indices)
+
+        if actual_count != expected_count:
+            raise ValueError(
+                f"源文件{source_file!r}包含{actual_count}条光谱，"
+                "但fixed_spectrum_split要求每个源文件恰好包含"
+                f"{expected_count}条光谱"
+                f"（{train_count}/{validation_count}/{test_count}）。"
+            )
+
+        validation_end = train_count + validation_count
+
+        train_indices.extend(
+            ordered_indices[:train_count]
+        )
+        validation_indices.extend(
+            ordered_indices[
+                train_count:validation_end
+            ]
+        )
+        test_indices.extend(
+            ordered_indices[validation_end:]
+        )
+
+    return SpectrumDatasetSplit(
+        train=_make_subset(
+            collection,
+            np.asarray(train_indices, dtype=np.int64),
+        ),
+        validation=_make_subset(
+            collection,
+            np.asarray(validation_indices, dtype=np.int64),
+        ),
+        test=_make_subset(
+            collection,
+            np.asarray(test_indices, dtype=np.int64),
+        ),
+    )
+
+
 def _validate_spectrum_within_folder_input(
     collection: SpectrumCollection,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -713,6 +863,12 @@ def split_spectrum_collection(
         Independently split the single-spectrum files inside every folder.
         Every folder therefore contributes spectra to train, validation,
         and test according to the configured ratios.
+
+    ``fixed_spectra_within_source_file``
+        Preserve the intensity-column order inside every source file and use
+        exact counts from ``data.fixed_spectrum_split``. This is the mode for
+        files whose first 12 spectra, next 4 spectra, and final 4 spectra come
+        from three separately assigned physical samples.
     """
 
     number_of_spectra = len(collection.spectra)
@@ -732,12 +888,6 @@ def split_spectrum_collection(
             "spectrum_names数量与光谱数量不一致。"
         )
 
-    (
-        train_ratio,
-        validation_ratio,
-        test_ratio,
-    ) = _read_split_ratios(data_config)
-
     split_unit = str(
         data_config.get(
             "split_unit",
@@ -751,6 +901,25 @@ def split_spectrum_collection(
             True,
         )
     )
+
+    if split_unit == "fixed_spectra_within_source_file":
+        dataset_split = _split_fixed_spectra_within_source_file(
+            collection=collection,
+            data_config=data_config,
+        )
+
+        _validate_complete_split(
+            dataset_split=dataset_split,
+            number_of_spectra=number_of_spectra,
+        )
+
+        return dataset_split
+
+    (
+        train_ratio,
+        validation_ratio,
+        test_ratio,
+    ) = _read_split_ratios(data_config)
 
     if split_unit == "source_file":
         dataset_split = _split_by_source_file(
@@ -784,8 +953,9 @@ def split_spectrum_collection(
 
     else:
         raise ValueError(
-            "data.split_unit只支持source_file、spectrum或"
-            "spectrum_within_folder，"
+            "data.split_unit只支持source_file、spectrum、"
+            "spectrum_within_folder或"
+            "fixed_spectra_within_source_file，"
             f"当前值为{split_unit!r}。"
         )
 

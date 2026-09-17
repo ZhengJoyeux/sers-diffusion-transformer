@@ -372,3 +372,146 @@ def test_existing_folder_split_is_stable_when_new_folder_is_added() -> None:
             np.sort(original_indices),
             np.sort(expanded_indices),
         )
+
+
+def _fixed_source_split_config() -> dict[str, object]:
+    return {
+        "split_unit": "fixed_spectra_within_source_file",
+        "fixed_spectrum_split": {
+            "train_count": 12,
+            "validation_count": 4,
+            "test_count": 4,
+        },
+        # This flag must not alter the experimentally fixed assignment.
+        "shuffle": True,
+    }
+
+
+def _indices_for_source(
+    collection: SpectrumCollection,
+    indices: np.ndarray,
+    source_file: str,
+) -> np.ndarray:
+    source_files = np.asarray(
+        collection.source_files,
+        dtype=object,
+    )
+
+    return np.asarray(
+        [
+            int(index)
+            for index in indices.tolist()
+            if str(source_files[int(index)]) == source_file
+        ],
+        dtype=np.int64,
+    )
+
+
+def test_fixed_spectra_within_source_file_preserves_12_4_4_order() -> None:
+    """Every 20-spectrum file must keep its first/middle/final assignment."""
+
+    collection = _build_folder_collection(
+        {
+            "DEL": 2,
+            "DEL_CHL": 1,
+        },
+        spectra_per_source_file=20,
+    )
+
+    dataset_split = split_spectrum_collection(
+        collection=collection,
+        data_config=_fixed_source_split_config(),
+        random_seed=2026,
+    )
+
+    ordered_sources: list[str] = []
+    for source_file in collection.source_files.tolist():
+        source_key = str(source_file)
+        if source_key not in ordered_sources:
+            ordered_sources.append(source_key)
+
+    for source_file in ordered_sources:
+        all_source_indices = np.flatnonzero(
+            np.asarray(
+                [
+                    str(value) == source_file
+                    for value in collection.source_files
+                ],
+                dtype=bool,
+            )
+        ).astype(np.int64)
+
+        np.testing.assert_array_equal(
+            _indices_for_source(
+                collection,
+                dataset_split.train.indices,
+                source_file,
+            ),
+            all_source_indices[:12],
+        )
+        np.testing.assert_array_equal(
+            _indices_for_source(
+                collection,
+                dataset_split.validation.indices,
+                source_file,
+            ),
+            all_source_indices[12:16],
+        )
+        np.testing.assert_array_equal(
+            _indices_for_source(
+                collection,
+                dataset_split.test.indices,
+                source_file,
+            ),
+            all_source_indices[16:20],
+        )
+
+    assert dataset_split.train.indices.size == 36
+    assert dataset_split.validation.indices.size == 12
+    assert dataset_split.test.indices.size == 12
+
+
+def test_fixed_spectra_within_source_file_ignores_seed_and_shuffle() -> None:
+    """Physical-sample roles must not change with a random seed."""
+
+    collection = _build_folder_collection(
+        {"DEL_TEB_CHL": 2},
+        spectra_per_source_file=20,
+    )
+    configuration = _fixed_source_split_config()
+
+    split_a = split_spectrum_collection(
+        collection=collection,
+        data_config=configuration,
+        random_seed=1,
+    )
+    split_b = split_spectrum_collection(
+        collection=collection,
+        data_config=configuration,
+        random_seed=9999,
+    )
+
+    for subset_name in ("train", "validation", "test"):
+        np.testing.assert_array_equal(
+            getattr(split_a, subset_name).indices,
+            getattr(split_b, subset_name).indices,
+        )
+
+
+def test_fixed_spectra_within_source_file_rejects_wrong_count() -> None:
+    """A malformed file must fail instead of shifting physical-sample roles."""
+
+    collection = _build_folder_collection(
+        {"DEL": 1},
+        spectra_per_source_file=19,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="包含19条光谱.*恰好包含20条光谱",
+    ):
+        split_spectrum_collection(
+            collection=collection,
+            data_config=_fixed_source_split_config(),
+            random_seed=2026,
+        )

@@ -383,6 +383,7 @@ class CheckpointManager:
         configuration: dict[str, Any],
         metadata: dict[str, Any],
         best_validation_loss: float,
+        scheduler_state: dict[str, Any] | None = None,
         file_name: str | None = None,
         update_latest: bool = True,
     ) -> Path:
@@ -431,6 +432,7 @@ class CheckpointManager:
             "optimizer_state": (
                 optimizer_state
             ),
+            "scheduler_state": scheduler_state,
             "scaler_state": scaler_state,
             "configuration": configuration,
             "metadata": metadata,

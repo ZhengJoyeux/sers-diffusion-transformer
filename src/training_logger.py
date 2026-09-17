@@ -37,6 +37,7 @@ COMPONENT_FIELDS = (
     "mean_pathology_timestep_weight",
     "mean_detected_peaks",
     "diversity_loss",
+    "diversity_uncapped_loss",
     "diversity_raw_loss",
     "pairwise_distance_loss",
     "pairwise_correlation_loss",
@@ -48,7 +49,31 @@ COMPONENT_FIELDS = (
     "peak_width_dispersion_loss",
     "mean_morphology_peaks",
     "diversity_active_samples",
+    "conditional_diversity_active_groups",
     "mean_diversity_timestep_weight",
+
+    # D4.3.2.11+ quality/full-spectrum diagnostics.
+    "quality_fidelity_loss",
+    "quality_fidelity_uncapped_loss",
+    "quality_fidelity_raw_loss",
+    "legacy_quality_loss",
+    "legacy_quality_uncapped_loss",
+    "legacy_quality_scale",
+    "independent_full_spectrum_raw_loss",
+    "independent_full_spectrum_uncapped_loss",
+    "independent_full_spectrum_loss",
+    "independent_full_spectrum_scale",
+    "first_derivative_fidelity_loss",
+    "multiscale_shape_loss",
+    "condition_multiscale_variance_floor_loss",
+    "condition_derivative_variance_floor_loss",
+    "condition_mean_fidelity_loss",
+    "condition_envelope_loss",
+    "full_spectrum_reconstruction_loss",
+    "full_spectrum_tail_span_loss",
+    "full_spectrum_tail_active_groups",
+    "quality_fidelity_active_groups",
+
     "local_peak_distribution_loss",
     "local_peak_distribution_raw_loss",
     "local_peak_loss_cap",
@@ -218,6 +243,72 @@ class TrainingLogger:
             diversity_text = (
                 f"{training_components.get('diversity_loss', 0.0):.6f}"
             )
+            diversity_uncapped_text = (
+                f"{training_components.get('diversity_uncapped_loss', 0.0):.6f}"
+            )
+
+            ddpm_value = float(
+                training_components.get("ddpm_loss", float("nan"))
+            )
+            quality_raw_value = float(
+                training_components.get(
+                    "quality_fidelity_raw_loss",
+                    float("nan"),
+                )
+            )
+            quality_uncapped_value = float(
+                training_components.get(
+                    "quality_fidelity_uncapped_loss",
+                    float("nan"),
+                )
+            )
+            quality_capped_value = float(
+                training_components.get(
+                    "quality_fidelity_loss",
+                    float("nan"),
+                )
+            )
+
+            quality_keep_ratio = (
+                quality_capped_value / quality_uncapped_value
+                if abs(quality_uncapped_value) > 1.0e-12
+                else float("nan")
+            )
+            quality_to_ddpm_ratio = (
+                quality_capped_value / ddpm_value
+                if abs(ddpm_value) > 1.0e-12
+                else float("nan")
+            )
+
+            quality_raw_text = f"{quality_raw_value:.6f}"
+            quality_uncapped_text = f"{quality_uncapped_value:.6f}"
+            quality_capped_text = f"{quality_capped_value:.6f}"
+            quality_keep_text = f"{quality_keep_ratio:.3f}"
+            quality_to_ddpm_text = f"{quality_to_ddpm_ratio:.3f}"
+
+            legacy_quality_text = (
+                f"{training_components.get('legacy_quality_loss', 0.0):.6f}"
+            )
+            legacy_quality_scale_text = (
+                f"{training_components.get('legacy_quality_scale', 0.0):.3f}"
+            )
+            independent_full_text = (
+                f"{training_components.get('independent_full_spectrum_loss', 0.0):.6f}"
+            )
+            independent_full_scale_text = (
+                f"{training_components.get('independent_full_spectrum_scale', 0.0):.3f}"
+            )
+
+            full_reconstruction_text = (
+                f"{training_components.get('full_spectrum_reconstruction_loss', 0.0):.6f}"
+            )
+            full_tail_span_text = (
+                f"{training_components.get('full_spectrum_tail_span_loss', 0.0):.6f}"
+            )
+            full_tail_groups_text = (
+                f"{training_components.get('full_spectrum_tail_active_groups', 0.0):.1f}"
+            )
+
             local_text = (
                 f"{training_components.get('local_peak_distribution_loss', 0.0):.6f}"
             )
@@ -275,6 +366,19 @@ class TrainingLogger:
 
             extra_text = (
                 f" | ddpm_uniform={uniform_text}"
+                f" | div_uncapped={diversity_uncapped_text}"
+                f" | quality_raw={quality_raw_text}"
+                f" | quality_uncapped={quality_uncapped_text}"
+                f" | quality_capped={quality_capped_text}"
+                f" | quality_keep={quality_keep_text}"
+                f" | quality/ddpm={quality_to_ddpm_text}"
+                f" | legacy_q={legacy_quality_text}"
+                f" | legacy_scale={legacy_quality_scale_text}"
+                f" | full_q={independent_full_text}"
+                f" | full_scale={independent_full_scale_text}"
+                f" | full_recon={full_reconstruction_text}"
+                f" | tail_span={full_tail_span_text}"
+                f" | tail_groups={full_tail_groups_text}"
                 f" | local_peak={local_text}"
                 f" | local_scale={local_scale_text}"
                 f" | neg_tail={neg_text}"

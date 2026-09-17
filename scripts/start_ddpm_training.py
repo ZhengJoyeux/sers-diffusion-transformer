@@ -83,6 +83,9 @@ from src.prior_residual import (
 from src.broad_local_residual import (
     BroadLocalResidualDecomposer,
 )
+from src.conditional_prior_residual import (
+    ConditionalPriorResidualBank,
+)
 from src.random_seed_manager import (
     create_data_loader_generator,
     seed_data_loader_worker,
@@ -90,6 +93,13 @@ from src.random_seed_manager import (
 )
 from src.sers_diversity_constraints import (
     fit_sers_diversity_constraint_state,
+)
+from src.conditional_diversity_constraints import (
+    D4_3_METHOD_VERSION,
+    fit_condition_aware_diversity_constraint_state,
+)
+from src.condition_grouped_batch_sampler import (
+    ConditionGroupedBatchSampler,
 )
 from src.sers_physics_constraints import (
     fit_sers_physics_constraint_state,
@@ -112,6 +122,12 @@ from src.spectrum_file_reader import (
 )
 from src.spectrum_length_adapter import (
     SpectrumLengthAdapter,
+)
+from src.spectrum_conditioning import (
+    CONDITION_VECTOR_SIZE,
+    build_conditioning_metadata,
+    condition_ids_from_source_files,
+    encode_source_file_conditions,
 )
 from src.training_logger import (
     TrainingLogger,
@@ -141,6 +157,15 @@ def parse_arguments() -> argparse.Namespace:
         help=(
             "只执行D3.4真实training batch约束激活和梯度检查，"
             "不开始正式训练。"
+        ),
+    )
+
+    parser.add_argument(
+        "--pipeline-check-only",
+        action="store_true",
+        help=(
+            "只拟合train-only预处理状态并对一个真实batch执行前向/反向检查；"
+            "不执行optimizer.step、不保存checkpoint。"
         ),
     )
 
@@ -561,6 +586,10 @@ def validate_resume_stage(
         )
 
     configuration_pairs = (
+        (
+            "conditioning",
+            "D4.1化学条件编码",
+        ),
         (
             "prior_residual",
             "D2先验残差",
@@ -1048,6 +1077,8 @@ def print_physics_summary(
             "旧D3复合物理/峰约束：未启用"
         )
 
+        return
+
     if peak_derivative_enabled:
         print(
             "D3.1唯一新增变量：train-only自动峰区"
@@ -1087,9 +1118,14 @@ def print_diversity_summary(
 
         return
 
-    print(
-        "D3多样性约束：已启用"
-    )
+    if state.get("method_version") == D4_3_METHOD_VERSION:
+        print(
+            "D4.3条件/掩码感知多样性约束：已启用；"
+            f"条件数={state.get('number_of_conditions', 'unknown')}；"
+            "状态仅由training子集拟合"
+        )
+    else:
+        print("D3多样性约束：已启用")
 
 
 def print_feature_peak_residual_limiter_summary(
@@ -1134,6 +1170,28 @@ def main() -> None:
     data_config = configuration[
         "data"
     ]
+
+    conditioning_config = configuration.get("conditioning", {}) or {}
+    if not isinstance(conditioning_config, dict):
+        raise TypeError("conditioning配置必须是字典。")
+    conditioning_enabled = bool(
+        conditioning_config.get("enabled", False)
+    )
+    prior_spectrum_config = conditioning_config.get("prior_spectrum", {}) or {}
+    if not isinstance(prior_spectrum_config, dict):
+        raise TypeError("conditioning.prior_spectrum配置必须是字典。")
+    prior_conditioning_enabled = bool(
+        prior_spectrum_config.get("enabled", False)
+    )
+    if conditioning_enabled:
+        configured_vector_size = int(
+            conditioning_config.get("vector_size", CONDITION_VECTOR_SIZE)
+        )
+        if configured_vector_size != CONDITION_VECTOR_SIZE:
+            raise ValueError(
+                "D4.1固定使用14维条件向量，"
+                f"但conditioning.vector_size={configured_vector_size}。"
+            )
 
     model_config = configuration[
         "model"
@@ -1261,6 +1319,10 @@ def main() -> None:
             "D2.6 broad_local_residual。"
         )
 
+    mixed_axis_mask_enabled = str(
+        data_config.get("raman_axis_mode", "strict")
+    ).strip().lower() == "union_with_valid_mask"
+
     if broad_local_enabled:
         if not bool(
             prior_config.get(
@@ -1283,12 +1345,18 @@ def main() -> None:
                 "prior_residual.prior_method=pca_reconstruction。"
             )
 
-        incompatible_sections = (
+        incompatible_sections = [
             "physics_constraints",
-            "diversity_constraints",
             "feature_peak_residual_limiter",
             "local_peak_distribution_constraints",
-        )
+        ]
+        if not (
+            mixed_axis_mask_enabled
+            and conditioning_enabled
+        ):
+            incompatible_sections.append(
+                "diversity_constraints"
+            )
 
         enabled_incompatible = []
 
@@ -1324,6 +1392,47 @@ def main() -> None:
                 "当前仍启用："
                 f"{enabled_incompatible}。"
             )
+
+    if mixed_axis_mask_enabled:
+        masked_incompatible_sections = (
+            "physics_constraints",
+            "peak_derivative_constraints",
+            "relative_peak_intensity_constraints",
+            "peak_parameter_constraints",
+            "feature_peak_residual_limiter",
+            "local_peak_distribution_constraints",
+        )
+        enabled_masked_incompatible = []
+        for section_name in masked_incompatible_sections:
+            section = configuration.get(section_name, {}) or {}
+            if isinstance(section, dict) and bool(
+                section.get("enabled", False)
+            ):
+                enabled_masked_incompatible.append(section_name)
+
+        residual_aware = (
+            configuration.get("diffusion", {}) or {}
+        ).get("residual_aware_loss", {}) or {}
+        if isinstance(residual_aware, dict) and bool(
+            residual_aware.get("enabled", False)
+        ):
+            enabled_masked_incompatible.append(
+                "diffusion.residual_aware_loss"
+            )
+
+        if enabled_masked_incompatible:
+            raise ValueError(
+                "D4.2条件先验残差阶段尚未适配以下D3模块："
+                f"{enabled_masked_incompatible}。请保持这些模块关闭。"
+            )
+        prior_enabled = bool(prior_config.get("enabled", False))
+        if prior_enabled != broad_local_enabled:
+            raise ValueError(
+                "D4.2混合轴要求prior_residual和broad_local_residual"
+                "同时启用或同时关闭。"
+            )
+        if prior_enabled and not conditioning_enabled:
+            raise ValueError("D4.2条件先验残差要求conditioning.enabled=true。")
 
     training_config = configuration[
         "training"
@@ -1375,6 +1484,25 @@ def main() -> None:
         raise RuntimeError(
             "没有读取到任何光谱。"
         )
+
+    conditions_on_spectra = None
+    condition_ids_on_spectra = None
+    conditioning_metadata = None
+    if conditioning_enabled:
+        conditions_on_spectra = encode_source_file_conditions(
+            collection.relative_source_files
+        )
+        conditioning_metadata = build_conditioning_metadata(
+            collection.relative_source_files
+        )
+        condition_ids_on_spectra = condition_ids_from_source_files(
+            collection.relative_source_files
+        )
+        if conditions_on_spectra.shape != (
+            number_of_spectra,
+            CONDITION_VECTOR_SIZE,
+        ):
+            raise RuntimeError("逐光谱条件矩阵形状不正确。")
 
     # ------------------------------------------------------------------
     # 数据划分
@@ -1446,11 +1574,20 @@ def main() -> None:
                     1.0,
                 )
             ),
+            raman_axis_mode=str(
+                data_config.get(
+                    "raman_axis_mode",
+                    "strict",
+                )
+            ),
         )
     )
 
-    spectra_on_model_axis = (
-        length_adapter.interpolate_to_model_axis(
+    (
+        spectra_on_model_axis,
+        valid_masks_on_model_axis,
+    ) = (
+        length_adapter.interpolate_to_model_axis_with_mask(
             collection.spectra,
             collection.raman_shifts,
         )
@@ -1482,6 +1619,33 @@ def main() -> None:
         raise RuntimeError(
             "插值后的光谱包含NaN或无穷值。"
         )
+
+    if valid_masks_on_model_axis.shape != expected_shape:
+        raise RuntimeError("有效区掩码形状与统一轴光谱不一致。")
+
+    valid_counts = valid_masks_on_model_axis.sum(axis=1).astype(np.int64)
+    unique_valid_counts, valid_profile_counts = np.unique(
+        valid_counts,
+        return_counts=True,
+    )
+    print(
+        "Raman轴处理模式："
+        f"{length_adapter.raman_axis_mode}；"
+        "统一物理轴="
+        f"{length_adapter.model_axis[0]:.3f}–"
+        f"{length_adapter.model_axis[-1]:.3f} cm^-1；"
+        f"点数={length_adapter.original_length}"
+    )
+    print(
+        "逐样本有效点数统计："
+        + "，".join(
+            f"{int(length)}点×{int(count)}条"
+            for length, count in zip(
+                unique_valid_counts,
+                valid_profile_counts,
+            )
+        )
+    )
 
     # ------------------------------------------------------------------
     # train-only global_minmax
@@ -1532,12 +1696,16 @@ def main() -> None:
         normalizer.fit(
             spectra_on_model_axis[
                 training_indices
-            ]
+            ],
+            valid_mask=valid_masks_on_model_axis[
+                training_indices
+            ],
         )
 
         normalized_full_spectra = (
             normalizer.transform(
-                spectra_on_model_axis
+                spectra_on_model_axis,
+                valid_mask=valid_masks_on_model_axis,
             )
         )
 
@@ -1572,7 +1740,14 @@ def main() -> None:
 
     broad_local_residual_state = None
 
+    conditional_prior_residual_bank: (
+        ConditionalPriorResidualBank | None
+    ) = None
+    conditional_prior_residual_state = None
+
     constraint_reconstruction_bases_full = None
+    prior_conditionings_full = None
+    local_inverse_slopes_full = None
 
     spectra_for_model = (
         normalized_full_spectra.copy()
@@ -1584,7 +1759,86 @@ def main() -> None:
         ]
     )
 
-    if bool(
+    conditional_prior_enabled = bool(
+        mixed_axis_mask_enabled
+        and conditioning_enabled
+        and prior_config.get("enabled", False)
+        and broad_local_enabled
+    )
+
+    if conditional_prior_enabled:
+        if normalizer is None or normalization_state is None:
+            raise ValueError(
+                "D4.2条件先验残差要求启用并保存train-only global_minmax。"
+            )
+        if condition_ids_on_spectra is None:
+            raise RuntimeError("D4.2缺少逐光谱condition_id。")
+        conditional_prior_residual_bank = ConditionalPriorResidualBank(
+            prior_configuration=prior_config,
+            broad_local_configuration=broad_local_config,
+        ).fit(
+            normalized_full_spectra,
+            valid_masks=valid_masks_on_model_axis,
+            condition_ids=condition_ids_on_spectra,
+            training_indices=training_indices,
+            raman_shift=np.asarray(
+                length_adapter.model_raman_shift,
+                dtype=np.float64,
+            ),
+        )
+        if prior_conditioning_enabled:
+            (
+                spectra_for_model,
+                prior_conditionings_full,
+            ) = conditional_prior_residual_bank.transform_training_aware_with_conditioning(
+                normalized_full_spectra,
+                valid_masks=valid_masks_on_model_axis,
+                condition_ids=condition_ids_on_spectra,
+                training_indices=training_indices,
+            )
+            local_inverse_slopes_full = (
+                conditional_prior_residual_bank
+                .local_inverse_linearization_slopes(
+                    spectra_for_model,
+                    valid_masks=valid_masks_on_model_axis,
+                    condition_ids=condition_ids_on_spectra,
+                )
+            )
+        else:
+            spectra_for_model = conditional_prior_residual_bank.transform_training_aware(
+                normalized_full_spectra,
+                valid_masks=valid_masks_on_model_axis,
+                condition_ids=condition_ids_on_spectra,
+                training_indices=training_indices,
+            )
+        training_scaled_residuals = spectra_for_model[training_indices]
+        conditional_prior_residual_state = (
+            conditional_prior_residual_bank.state_dict()
+        )
+        summary = conditional_prior_residual_bank.summary()
+        print("\n===== D4.2 条件PCA+broad/local先验残差 =====")
+        print(
+            "training PCA cross-fit："
+            f"{summary['training_cross_fit']['enabled']}；"
+            f"method={summary['training_cross_fit']['method']}"
+        )
+        print(
+            f"条件先验数量：{summary['number_of_conditions']}；"
+            f"共享DDPM训练光谱：{summary['total_training_spectra']}"
+        )
+        print(
+            "条件有效点数分布："
+            + "，".join(
+                f"{length}点×{count}条件"
+                for length, count in summary["valid_lengths"].items()
+            )
+        )
+        print(
+            "每条件训练光谱数："
+            f"{summary['training_spectra_per_condition']}"
+        )
+
+    elif bool(
         prior_config.get(
             "enabled",
             False,
@@ -2088,8 +2342,27 @@ def main() -> None:
             False,
         )
     ):
-        diversity_constraint_state = (
-            fit_sers_diversity_constraint_state(
+        condition_aware_diversity_enabled = bool(
+            mixed_axis_mask_enabled
+            and conditioning_enabled
+        )
+        if condition_aware_diversity_enabled:
+            if conditions_on_spectra is None:
+                raise RuntimeError("D4.3缺少逐光谱条件向量。")
+            diversity_constraint_state = (
+                fit_condition_aware_diversity_constraint_state(
+                    training_scaled_residuals=training_scaled_residuals,
+                    training_valid_masks=valid_masks_on_model_axis[
+                        training_indices
+                    ],
+                    training_condition_vectors=conditions_on_spectra[
+                        training_indices
+                    ],
+                    configuration=diversity_config,
+                )
+            )
+        else:
+            diversity_constraint_state = fit_sers_diversity_constraint_state(
                 training_scaled_residuals=(
                     training_scaled_residuals
                 ),
@@ -2097,7 +2370,8 @@ def main() -> None:
                     diversity_config
                 ),
             )
-        )
+    else:
+        condition_aware_diversity_enabled = False
 
     print_diversity_summary(
         diversity_constraint_state
@@ -2167,6 +2441,43 @@ def main() -> None:
         )
     )
 
+    padded_valid_masks = (
+        length_adapter.adapt_valid_mask(
+            valid_masks_on_model_axis
+        )
+    )
+
+    # 无论上游是否执行其他变换，无效测量区和网络补齐区始终为0。
+    padded_spectra = (
+        padded_spectra
+        * padded_valid_masks
+    ).astype(np.float32, copy=False)
+
+    padded_prior_conditionings = None
+    if prior_conditionings_full is not None:
+        padded_prior_conditionings = length_adapter.adapt(
+            prior_conditionings_full
+        )
+        padded_prior_conditionings = (
+            padded_prior_conditionings * padded_valid_masks
+        ).astype(np.float32, copy=False)
+
+    padded_full_spectrum_targets = None
+    padded_local_inverse_slopes = None
+    if local_inverse_slopes_full is not None:
+        padded_full_spectrum_targets = length_adapter.adapt(
+            normalized_full_spectra
+        )
+        padded_full_spectrum_targets = (
+            padded_full_spectrum_targets * padded_valid_masks
+        ).astype(np.float32, copy=False)
+        padded_local_inverse_slopes = length_adapter.adapt(
+            local_inverse_slopes_full
+        )
+        padded_local_inverse_slopes = (
+            padded_local_inverse_slopes * padded_valid_masks
+        ).astype(np.float32, copy=False)
+
     if not np.isfinite(
         padded_spectra
     ).all():
@@ -2217,9 +2528,19 @@ def main() -> None:
     spectrum_dataset = (
         SpectrumDataset(
             padded_spectra,
+            valid_masks=(
+                padded_valid_masks
+                if length_adapter.raman_axis_mode
+                == "union_with_valid_mask"
+                else None
+            ),
             constraint_reference_priors=(
                 padded_constraint_reference_priors
             ),
+            conditions=conditions_on_spectra,
+            prior_conditionings=padded_prior_conditionings,
+            full_spectrum_targets=padded_full_spectrum_targets,
+            local_inverse_slopes=padded_local_inverse_slopes,
         )
     )
 
@@ -2283,45 +2604,72 @@ def main() -> None:
             "training.batch_size必须大于0。"
         )
 
-    training_loader = DataLoader(
-        training_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=number_of_workers,
-        pin_memory=pin_memory,
-        drop_last=bool(
-            training_config.get(
-                "drop_last",
-                False,
-            )
-        ),
-        worker_init_fn=(
-            seed_data_loader_worker
-        ),
-        generator=(
-            create_data_loader_generator(
-                random_seed
-            )
-        ),
-        persistent_workers=(
-            number_of_workers > 0
-        ),
-    )
+    if condition_aware_diversity_enabled:
+        if conditions_on_spectra is None:
+            raise RuntimeError("D4.3条件分组采样缺少条件向量。")
+        samples_per_condition = int(
+            diversity_config["condition_grouping"]["samples_per_condition"]
+        )
+        training_batch_sampler = ConditionGroupedBatchSampler(
+            conditions_on_spectra[training_indices],
+            batch_size=batch_size,
+            samples_per_condition=samples_per_condition,
+            shuffle=True,
+            random_seed=random_seed,
+            drop_last=bool(training_config.get("drop_last", False)),
+        )
+        validation_batch_sampler = ConditionGroupedBatchSampler(
+            conditions_on_spectra[validation_indices],
+            batch_size=batch_size,
+            samples_per_condition=samples_per_condition,
+            shuffle=False,
+            random_seed=int(training_config["validation_random_seed"]),
+            drop_last=False,
+        )
+        training_loader = DataLoader(
+            training_dataset,
+            batch_sampler=training_batch_sampler,
+            num_workers=number_of_workers,
+            pin_memory=pin_memory,
+            worker_init_fn=seed_data_loader_worker,
+            persistent_workers=(number_of_workers > 0),
+        )
+        validation_loader = DataLoader(
+            validation_dataset,
+            batch_sampler=validation_batch_sampler,
+            num_workers=number_of_workers,
+            pin_memory=pin_memory,
+            worker_init_fn=seed_data_loader_worker,
+            persistent_workers=(number_of_workers > 0),
+        )
+        print(
+            "D4.3条件分组batch："
+            f"每条件{samples_per_condition}条；batch_size={batch_size}；"
+            f"每batch条件数={batch_size // samples_per_condition}"
+        )
+    else:
+        training_loader = DataLoader(
+            training_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=number_of_workers,
+            pin_memory=pin_memory,
+            drop_last=bool(training_config.get("drop_last", False)),
+            worker_init_fn=seed_data_loader_worker,
+            generator=create_data_loader_generator(random_seed),
+            persistent_workers=(number_of_workers > 0),
+        )
 
-    validation_loader = DataLoader(
-        validation_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=number_of_workers,
-        pin_memory=pin_memory,
-        drop_last=False,
-        worker_init_fn=(
-            seed_data_loader_worker
-        ),
-        persistent_workers=(
-            number_of_workers > 0
-        ),
-    )
+        validation_loader = DataLoader(
+            validation_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=number_of_workers,
+            pin_memory=pin_memory,
+            drop_last=False,
+            worker_init_fn=seed_data_loader_worker,
+            persistent_workers=(number_of_workers > 0),
+        )
 
     steps_per_epoch = len(
         training_loader
@@ -2520,6 +2868,72 @@ def main() -> None:
                 diversity_constraint_state
             ),
         )
+
+    if arguments.pipeline_check_only:
+        if arguments.resume is not None or arguments.constraint_check_only:
+            raise RuntimeError(
+                "--pipeline-check-only不能与--resume或"
+                "--constraint-check-only同时使用。"
+            )
+        batch = next(iter(training_loader))
+        if not isinstance(batch, dict):
+            raise RuntimeError("D4.2管线自检要求字典batch。")
+        spectrum = batch["spectrum"].to(device)
+        valid_mask = batch.get("valid_mask")
+        condition = batch.get("condition")
+        prior_conditioning = batch.get("prior_conditioning")
+        full_spectrum_target = batch.get("full_spectrum_target")
+        local_inverse_slope = batch.get("local_inverse_slope")
+        if valid_mask is None or condition is None:
+            raise RuntimeError(
+                "D4.2管线自检缺少valid_mask或condition。"
+            )
+        if prior_conditioning_enabled and prior_conditioning is None:
+            raise RuntimeError("D4.3.2.10管线自检缺少prior_conditioning。")
+        valid_mask = valid_mask.to(device)
+        condition = condition.to(device)
+        if prior_conditioning is not None:
+            prior_conditioning = prior_conditioning.to(device)
+        if full_spectrum_target is not None:
+            full_spectrum_target = full_spectrum_target.to(device)
+        if local_inverse_slope is not None:
+            local_inverse_slope = local_inverse_slope.to(device)
+        diffusion = diffusion.to(device).train()
+        loss = diffusion(
+            spectrum,
+            valid_mask=valid_mask,
+            condition=condition,
+            prior_conditioning=prior_conditioning,
+            full_spectrum_target=full_spectrum_target,
+            local_inverse_slope=local_inverse_slope,
+        )
+        if loss.ndim != 0 or not torch.isfinite(loss):
+            raise RuntimeError("D4.2真实batch损失不是有限标量。")
+        loss.backward()
+        film_gradients = [
+            parameter.grad
+            for name, parameter in diffusion.named_parameters()
+            if "condition_film" in name and parameter.grad is not None
+        ]
+        if not film_gradients or not any(
+            bool(torch.isfinite(gradient).all())
+            and float(gradient.detach().abs().sum().cpu()) > 0.0
+            for gradient in film_gradients
+        ):
+            raise RuntimeError("条件FiLM层没有获得有限非零梯度。")
+        print("===== D4.2 管线自检通过 =====")
+        print(f"真实batch：{spectrum.shape[0]}条；loss={float(loss.detach().cpu()):.8g}")
+        print("掩码损失：已激活；14维条件：已激活；全层FiLM梯度：非零")
+        if prior_conditioning_enabled:
+            print("本次抽取的先验谱输入通道：已激活；先验与局部残差：逐样本配对")
+        if conditional_prior_residual_bank is not None:
+            summary = conditional_prior_residual_bank.summary()
+            print(
+                f"条件先验：{summary['number_of_conditions']}套；"
+                f"联合训练光谱：{summary['total_training_spectra']}条"
+            )
+        print("未执行optimizer.step，未开始正式训练，未保存checkpoint。")
+        return
 
     # ------------------------------------------------------------------
     # D3.4真实training batch约束激活/梯度检查
@@ -3239,11 +3653,15 @@ def main() -> None:
         "normalization_state": (
             normalization_state
         ),
+        "conditioning_metadata": conditioning_metadata,
         "prior_residual_state": (
             prior_residual_state
         ),
         "broad_local_residual_state": (
             broad_local_residual_state
+        ),
+        "conditional_prior_residual_state": (
+            conditional_prior_residual_state
         ),
         "physics_constraint_state": (
             physics_constraint_state
@@ -3350,6 +3768,16 @@ def main() -> None:
         f"{number_of_spectra}"
     )
 
+    if conditioning_metadata is not None:
+        print(
+            "D4化学条件：启用；条件向量=14维；组合条件数量="
+            f"{len(conditioning_metadata['conditions'])}"
+        )
+        print(
+            "条件注入："
+            f"{conditioning_config.get('injection', 'input_only')}"
+        )
+
     print(
         "训练/验证/测试光谱数量："
         f"{len(training_dataset)}/"
@@ -3426,6 +3854,14 @@ def main() -> None:
             f"组件数={broad_local_summary['broad_pca_components']}；"
             "累计解释方差="
             f"{broad_local_summary['broad_pca_cumulative_explained_variance']:.6f}"
+        )
+
+    if conditional_prior_residual_bank is not None:
+        print("D4.2 条件PCA+broad-local residual：已启用")
+        print("D4.2 DDPM数量：1（全部训练光谱联合训练）")
+        print(
+            "D4.2 条件先验状态数量："
+            f"{len(conditional_prior_residual_bank.entries)}"
         )
 
     if not bool(

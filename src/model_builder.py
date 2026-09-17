@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from torch import nn
+
 from src.one_dimensional_ddpm import (
     GaussianDiffusion1D,
     Unet1D,
@@ -12,8 +14,17 @@ from src.one_dimensional_ddpm import (
 from src.physics_guided_diffusion import (
     SersPhysicsGuidedGaussianDiffusion1D,
 )
+from src.masked_diffusion import (
+    MaskedGaussianDiffusion1D,
+)
+from src.masked_unet import (
+    MaskConditionedUnet1D,
+)
 from src.sers_diversity_constraints import (
     normalize_diversity_configuration,
+)
+from src.conditional_diversity_constraints import (
+    normalize_condition_aware_diversity_configuration,
 )
 from src.sers_local_peak_distribution_constraints import (
     normalize_local_peak_distribution_configuration,
@@ -58,7 +69,7 @@ def _as_optional_dictionary(
 def build_diffusion_model(
     model_configuration: dict[str, Any],
     sequence_length: int,
-) -> tuple[Unet1D, GaussianDiffusion1D]:
+) -> tuple[nn.Module, GaussianDiffusion1D]:
     """
     构建 D0-D2 普通 GaussianDiffusion1D，或带 D3 额外损失的子类。
 
@@ -115,6 +126,78 @@ def build_diffusion_model(
         diffusion_config.get("residual_aware_loss", {}),
         name="diffusion.residual_aware_loss",
     )
+    data_config = _as_optional_dictionary(
+        model_configuration.get("data", {}),
+        name="data",
+    )
+    raman_axis_mode = str(
+        data_config.get("raman_axis_mode", "strict")
+    ).strip().lower()
+    mask_enabled = raman_axis_mode == "union_with_valid_mask"
+    conditioning_config = _as_optional_dictionary(
+        model_configuration.get("conditioning", {}),
+        name="conditioning",
+    )
+    conditioning_enabled = bool(
+        conditioning_config.get("enabled", False)
+    )
+    condition_dimension = int(
+        conditioning_config.get("vector_size", 14)
+        if conditioning_enabled
+        else 0
+    )
+    condition_embedding_dimension = int(
+        conditioning_config.get("embedding_dimension", 8)
+    )
+    condition_injection = str(
+        conditioning_config.get("injection", "input_only")
+    ).strip().lower()
+    prior_spectrum_config = _as_optional_dictionary(
+        conditioning_config.get("prior_spectrum", {}),
+        name="conditioning.prior_spectrum",
+    )
+    prior_conditioning_enabled = bool(
+        prior_spectrum_config.get("enabled", False)
+    )
+    prior_conditioning_injection = str(
+        prior_spectrum_config.get("injection", "input_channel")
+    ).strip().lower()
+    prior_conditioning_source = str(
+        prior_spectrum_config.get(
+            "source", "condition_reconstruction_base"
+        )
+    ).strip().lower()
+    if condition_dimension < 0:
+        raise ValueError("conditioning.vector_size不能小于0。")
+    if conditioning_enabled and condition_dimension <= 0:
+        raise ValueError("启用conditioning时vector_size必须大于0。")
+    if condition_embedding_dimension <= 0:
+        raise ValueError("conditioning.embedding_dimension必须大于0。")
+    if conditioning_enabled and not mask_enabled:
+        raise ValueError(
+            "D4.1条件模型要求data.raman_axis_mode="
+            "union_with_valid_mask。"
+        )
+    if prior_conditioning_injection != "input_channel":
+        raise ValueError(
+            "conditioning.prior_spectrum.injection当前只支持input_channel。"
+        )
+    if prior_conditioning_source != "condition_reconstruction_base":
+        raise ValueError(
+            "conditioning.prior_spectrum.source当前只支持"
+            "condition_reconstruction_base。"
+        )
+    if prior_conditioning_enabled:
+        broad_local_config = _as_optional_dictionary(
+            model_configuration.get("broad_local_residual", {}),
+            name="broad_local_residual",
+        )
+        if not conditioning_enabled or not mask_enabled:
+            raise ValueError("先验谱条件化要求同时启用化学条件和valid_mask。")
+        if not bool(prior_config.get("enabled", False)):
+            raise ValueError("先验谱条件化要求prior_residual.enabled=true。")
+        if not bool(broad_local_config.get("enabled", False)):
+            raise ValueError("先验谱条件化要求broad_local_residual.enabled=true。")
 
     dimension_multipliers = tuple(
         int(value)
@@ -152,15 +235,34 @@ def build_diffusion_model(
     if not 0.0 <= dropout < 1.0:
         raise ValueError("dropout必须在[0,1)范围内。")
 
-    unet = Unet1D(
-        dim=base_dimension,
-        dim_mults=dimension_multipliers,
-        channels=channels,
-        dropout=dropout,
-        self_condition=bool(
-            architecture.get("self_condition", False)
-        ),
+    self_condition = bool(
+        architecture.get("self_condition", False)
     )
+    if mask_enabled:
+        if self_condition:
+            raise ValueError(
+                "D4.0-B掩码条件U-Net当前要求self_condition=false。"
+            )
+        unet = MaskConditionedUnet1D(
+            dim=base_dimension,
+            dim_mults=dimension_multipliers,
+            channels=channels,
+            dropout=dropout,
+            condition_dimension=condition_dimension,
+            condition_embedding_dimension=(
+                condition_embedding_dimension
+            ),
+            condition_injection=condition_injection,
+            prior_conditioning_enabled=prior_conditioning_enabled,
+        )
+    else:
+        unet = Unet1D(
+            dim=base_dimension,
+            dim_mults=dimension_multipliers,
+            channels=channels,
+            dropout=dropout,
+            self_condition=self_condition,
+        )
 
     diffusion_timesteps = int(
         _get_required_value(
@@ -215,7 +317,11 @@ def build_diffusion_model(
     }
 
     physics_config = normalize_physics_configuration(physics_raw)
-    diversity_config = normalize_diversity_configuration(diversity_raw)
+    diversity_config = (
+        normalize_condition_aware_diversity_configuration(diversity_raw)
+        if mask_enabled
+        else normalize_diversity_configuration(diversity_raw)
+    )
     local_peak_config = normalize_local_peak_distribution_configuration(
         local_peak_raw
     )
@@ -256,6 +362,43 @@ def build_diffusion_model(
             residual_aware_enabled,
         )
     )
+
+    mask_incompatible_extra_loss_enabled = any(
+        (
+            physics_enabled,
+            local_peak_enabled,
+            peak_derivative_enabled,
+            relative_peak_enabled,
+            peak_parameter_enabled,
+            residual_aware_enabled,
+        )
+    )
+
+    if mask_enabled:
+        broad_local_config = _as_optional_dictionary(
+            model_configuration.get("broad_local_residual", {}),
+            name="broad_local_residual",
+        )
+        prior_enabled = bool(prior_config.get("enabled", False))
+        broad_enabled = bool(broad_local_config.get("enabled", False))
+        if prior_enabled != broad_enabled:
+            raise ValueError(
+                "混合轴条件先验残差要求prior_residual和"
+                "broad_local_residual同时启用或同时关闭。"
+            )
+        if prior_enabled and not conditioning_enabled:
+            raise ValueError("混合轴条件先验残差要求conditioning.enabled=true。")
+        if mask_incompatible_extra_loss_enabled:
+            raise ValueError(
+                "D4.3当前只完成diversity_constraints的条件/掩码适配；"
+                "其他D3额外约束仍不能在union_with_valid_mask下启用。"
+            )
+        if diversity_enabled and not conditioning_enabled:
+            raise ValueError("D4.3多样性约束要求conditioning.enabled=true。")
+        if common_arguments["auto_normalize"]:
+            raise ValueError(
+                "union_with_valid_mask要求auto_normalize=false。"
+            )
 
     if extra_loss_enabled:
         if objective != "pred_x0":
@@ -328,7 +471,12 @@ def build_diffusion_model(
                 "用于只从训练集拟合稳定峰参考。"
             )
 
-    if extra_loss_enabled:
+    if mask_enabled:
+        diffusion_model = MaskedGaussianDiffusion1D(
+            diversity_configuration=diversity_config,
+            **common_arguments,
+        )
+    elif extra_loss_enabled:
         diffusion_model = SersPhysicsGuidedGaussianDiffusion1D(
             physics_configuration=physics_config,
             diversity_configuration=diversity_config,
@@ -363,6 +511,15 @@ def build_diffusion_model(
     )
     diffusion_model.configured_residual_aware_enabled = (
         residual_aware_enabled
+    )
+    diffusion_model.configured_valid_mask_enabled = mask_enabled
+    diffusion_model.configured_conditioning_enabled = (
+        conditioning_enabled
+    )
+    diffusion_model.configured_condition_dimension = condition_dimension
+    diffusion_model.configured_condition_injection = condition_injection
+    diffusion_model.configured_prior_conditioning_enabled = (
+        prior_conditioning_enabled
     )
 
     return unet, diffusion_model

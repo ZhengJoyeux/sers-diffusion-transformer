@@ -19,18 +19,34 @@ class GlobalMinMaxNormalizer:
     def fit(
         self,
         train_spectra: np.ndarray,
+        valid_mask: np.ndarray | None = None,
     ) -> "GlobalMinMaxNormalizer":
         values = self._validate_array(
             train_spectra,
             "train_spectra",
         )
 
+        mask = self._validate_mask(
+            valid_mask,
+            values.shape,
+            "valid_mask",
+        )
+
+        valid_values = (
+            values.reshape(-1)
+            if mask is None
+            else values[mask]
+        )
+
+        if valid_values.size == 0:
+            raise ValueError("训练掩码中没有有效Raman点。")
+
         self.data_min = float(
-            values.min()
+            valid_values.min()
         )
 
         self.data_max = float(
-            values.max()
+            valid_values.max()
         )
 
         if (
@@ -46,12 +62,19 @@ class GlobalMinMaxNormalizer:
     def transform(
         self,
         spectra: np.ndarray,
+        valid_mask: np.ndarray | None = None,
     ) -> np.ndarray:
         self._check_fitted()
 
         values = self._validate_array(
             spectra,
             "spectra",
+        )
+
+        mask = self._validate_mask(
+            valid_mask,
+            values.shape,
+            "valid_mask",
         )
 
         normalized_01 = (
@@ -72,6 +95,14 @@ class GlobalMinMaxNormalizer:
                 self.target_max,
             )
 
+        if mask is not None:
+            # 无效位置使用网络域的中性零值；不能把补值参与归一化。
+            normalized = np.where(
+                mask,
+                normalized,
+                0.0,
+            )
+
         return normalized.astype(
             np.float32,
             copy=False,
@@ -80,12 +111,19 @@ class GlobalMinMaxNormalizer:
     def inverse_transform(
         self,
         normalized_spectra: np.ndarray,
+        valid_mask: np.ndarray | None = None,
     ) -> np.ndarray:
         self._check_fitted()
 
         values = self._validate_array(
             normalized_spectra,
             "normalized_spectra",
+        )
+
+        mask = self._validate_mask(
+            valid_mask,
+            values.shape,
+            "valid_mask",
         )
 
         values_01 = (
@@ -98,6 +136,13 @@ class GlobalMinMaxNormalizer:
             * (self.data_max - self.data_min)
             + self.data_min
         )
+
+        if mask is not None:
+            restored = np.where(
+                mask,
+                restored,
+                0.0,
+            )
 
         return restored.astype(
             np.float32,
@@ -196,3 +241,24 @@ class GlobalMinMaxNormalizer:
             raise RuntimeError(
                 "归一化器尚未使用训练集执行 fit()。"
             )
+
+    @staticmethod
+    def _validate_mask(
+        valid_mask: np.ndarray | None,
+        expected_shape: tuple[int, ...],
+        name: str,
+    ) -> np.ndarray | None:
+        if valid_mask is None:
+            return None
+
+        mask = np.asarray(valid_mask)
+        if mask.shape != expected_shape:
+            raise ValueError(
+                f"{name}形状{mask.shape}与光谱形状"
+                f"{expected_shape}不一致。"
+            )
+        if not np.isfinite(mask).all():
+            raise ValueError(f"{name}包含NaN或无穷值。")
+        if not np.logical_or(mask == 0, mask == 1).all():
+            raise ValueError(f"{name}只能包含0和1。")
+        return mask.astype(bool, copy=False)
