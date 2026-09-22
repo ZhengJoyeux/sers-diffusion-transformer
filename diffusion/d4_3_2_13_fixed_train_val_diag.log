@@ -1,0 +1,81 @@
+Raman轴处理模式：union_with_valid_mask；统一物理轴=600.000–2500.000 cm^-1；点数=1901
+逐样本有效点数统计：1401点×600条，1901点×1920条
+
+===== D4.2 条件PCA+broad/local先验残差 =====
+条件先验数量：126；共享DDPM训练光谱：1512
+条件有效点数分布：1401点×30条件，1901点×96条件
+每条件训练光谱数：[12]
+旧D3复合物理/峰约束：未启用
+D3.1自动峰区一阶导数约束：未启用
+D3.2自动峰区相对峰强约束：未启用
+D3.4完整重建谱峰参数物理约束：未启用
+D4.3条件/掩码感知多样性约束：已启用；条件数=126；状态仅由training子集拟合
+D3特征峰残差limiter：未启用
+D4.3条件分组batch：每条件4条；batch_size=8；每batch条件数=2
+从step=1323继续训练，历史最佳验证损失=0.127746
+
+===== 开始训练 =====
+设备：cuda
+实验名称：d4_3_2_13_medium
+文件夹标签：CHL、CHL_TEB、DEL、DEL_CHL、DEL_TEB、DEL_TEB_CHL、TEB
+总光谱数量：2520
+D4化学条件：启用；条件向量=14维；组合条件数量=126
+条件注入：input_and_all_resnet_blocks_film
+训练/验证/测试光谱数量：1512/504/504
+各原始拉曼轴点数：[1401, 1901]
+统一训练轴长度：1901
+模型输入长度：1904
+末尾补齐点数：3
+每个epoch的step：189
+总训练step：1512
+真实输入光谱额外平滑或去基线：不执行
+D4.2 条件PCA+broad-local residual：已启用
+D4.2 DDPM数量：1（全部训练光谱联合训练）
+D4.2 条件先验状态数量：126
+D3物理/峰约束：未启用
+训练集原始强度范围：-107.97828–822.57281
+模型缩放残差输入范围：-2.1827776–2.3594952
+====================
+
+FIXED_DIAG TRAIN total=0.040351 ddpm=0.035560
+FIXED_DIAG TRAIN conditional_diversity_active_groups=0.703704
+FIXED_DIAG TRAIN ddpm_loss=0.035560
+FIXED_DIAG TRAIN ddpm_uniform_loss=0.033909
+FIXED_DIAG TRAIN diversity_active_samples=2.814815
+FIXED_DIAG TRAIN diversity_loss=0.000812
+FIXED_DIAG TRAIN diversity_raw_loss=0.092908
+FIXED_DIAG TRAIN diversity_uncapped_loss=0.003926
+FIXED_DIAG TRAIN independent_full_spectrum_loss=0.000423
+FIXED_DIAG TRAIN independent_full_spectrum_raw_loss=0.029280
+FIXED_DIAG TRAIN independent_full_spectrum_scale=0.835855
+FIXED_DIAG TRAIN independent_full_spectrum_uncapped_loss=0.002928
+FIXED_DIAG TRAIN legacy_quality_loss=0.003556
+FIXED_DIAG TRAIN legacy_quality_scale=0.320781
+FIXED_DIAG TRAIN legacy_quality_uncapped_loss=0.014272
+FIXED_DIAG TRAIN mean_diversity_timestep_weight=0.509367
+FIXED_DIAG TRAIN quality_fidelity_active_groups=2.000000
+FIXED_DIAG TRAIN quality_fidelity_loss=0.003979
+FIXED_DIAG TRAIN quality_fidelity_raw_loss=0.172004
+FIXED_DIAG TRAIN quality_fidelity_uncapped_loss=0.017200
+FIXED_DIAG VAL total=0.127745 ddpm=0.113494
+FIXED_DIAG VAL conditional_diversity_active_groups=0.634921
+FIXED_DIAG VAL ddpm_loss=0.113494
+FIXED_DIAG VAL ddpm_uniform_loss=0.107491
+FIXED_DIAG VAL diversity_active_samples=2.539683
+FIXED_DIAG VAL diversity_loss=0.001545
+FIXED_DIAG VAL diversity_raw_loss=0.055358
+FIXED_DIAG VAL diversity_uncapped_loss=0.002335
+FIXED_DIAG VAL independent_full_spectrum_loss=0.001357
+FIXED_DIAG VAL independent_full_spectrum_raw_loss=0.103018
+FIXED_DIAG VAL independent_full_spectrum_scale=0.778700
+FIXED_DIAG VAL independent_full_spectrum_uncapped_loss=0.010302
+FIXED_DIAG VAL legacy_quality_loss=0.011349
+FIXED_DIAG VAL legacy_quality_scale=0.448631
+FIXED_DIAG VAL legacy_quality_uncapped_loss=0.029206
+FIXED_DIAG VAL mean_diversity_timestep_weight=0.457592
+FIXED_DIAG VAL quality_fidelity_active_groups=2.000000
+FIXED_DIAG VAL quality_fidelity_loss=0.012706
+FIXED_DIAG VAL quality_fidelity_raw_loss=0.395078
+FIXED_DIAG VAL quality_fidelity_uncapped_loss=0.039508
+FIXED_DIAG VAL_TRAIN_DDPM_RATIO=3.1916
+FIXED_DIAG VAL_TRAIN_TOTAL_RATIO=3.1658

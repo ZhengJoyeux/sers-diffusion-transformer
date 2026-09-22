@@ -1,0 +1,456 @@
+"""记录 D0-D3 训练、验证及各类 SERS 约束分项损失。"""
+
+from __future__ import annotations
+
+import csv
+from pathlib import Path
+import time
+from typing import Any
+
+
+COMPONENT_FIELDS = (
+    "ddpm_loss",
+    "ddpm_uniform_loss",
+    "ddpm_residual_aware_loss",
+    "residual_reference_scale",
+    "residual_weight_mean",
+    "residual_weight_min",
+    "residual_weight_max",
+    "physics_loss",
+    "physics_raw_loss",
+    "position_loss",
+    "width_loss",
+    "sharpness_loss",
+    "presence_loss",
+    "local_shape_loss",
+    "stable_peak_shift_loss",
+    "stable_peak_coherence_loss",
+    "stable_peak_height_loss",
+    "stable_peak_width_loss",
+    "stable_peak_mean_absolute_shift_cm1",
+    "stable_peak_count",
+    "roughness_loss",
+    "extreme_loss",
+    "negative_valley_loss",
+    "scaled_residual_guard_loss",
+    "mean_timestep_weight",
+    "mean_pathology_timestep_weight",
+    "mean_detected_peaks",
+    "diversity_loss",
+    "diversity_uncapped_loss",
+    "diversity_raw_loss",
+    "pairwise_distance_loss",
+    "pairwise_correlation_loss",
+    "pointwise_variance_floor_loss",
+    "peak_morphology_loss",
+    "peak_position_dispersion_loss",
+    "peak_shift_coherence_loss",
+    "peak_height_dispersion_loss",
+    "peak_width_dispersion_loss",
+    "mean_morphology_peaks",
+    "diversity_active_samples",
+    "conditional_diversity_active_groups",
+    "mean_diversity_timestep_weight",
+
+    # D4.3.2.11+ quality/full-spectrum diagnostics.
+    "quality_fidelity_loss",
+    "quality_fidelity_uncapped_loss",
+    "quality_fidelity_raw_loss",
+    "legacy_quality_loss",
+    "legacy_quality_uncapped_loss",
+    "legacy_quality_scale",
+    "independent_full_spectrum_raw_loss",
+    "independent_full_spectrum_uncapped_loss",
+    "independent_full_spectrum_loss",
+    "independent_full_spectrum_scale",
+    "first_derivative_fidelity_loss",
+    "multiscale_shape_loss",
+    "condition_multiscale_variance_floor_loss",
+    "condition_derivative_variance_floor_loss",
+    "condition_mean_fidelity_loss",
+    "condition_envelope_loss",
+    "full_spectrum_reconstruction_loss",
+    "full_spectrum_tail_span_loss",
+    "full_spectrum_tail_active_groups",
+    "full_spectrum_group_variance_loss",
+    "full_spectrum_group_variance_active_groups",
+    "full_spectrum_group_variance_mean_abs_z",
+    "full_spectrum_group_variance_over_fraction",
+    "full_spectrum_group_variance_under_fraction",
+    "quality_fidelity_active_groups",
+
+    "local_peak_distribution_loss",
+    "local_peak_distribution_raw_loss",
+    "local_peak_loss_cap",
+    "local_peak_loss_scale",
+    "negative_tail_guard_loss",
+    "negative_tail_guard_contribution",
+    "wing_shape_tracking_loss",
+    "wing_shape_tracking_contribution",
+    "wing_dispersion_loss",
+    "wing_dispersion_contribution",
+    "shift_dispersion_loss",
+    "shift_dispersion_contribution",
+    "width_dispersion_loss",
+    "width_dispersion_contribution",
+    "height_cv_upper_loss",
+    "height_cv_upper_contribution",
+    "local_peak_active_samples",
+    "local_peak_count",
+    "mean_local_peak_timestep_weight",
+    "peak_derivative_loss",
+    "peak_derivative_candidate_loss",
+    "peak_derivative_raw_loss",
+    "peak_derivative_timestep_weighted_loss",
+    "peak_derivative_loss_cap",
+    "peak_derivative_loss_scale",
+    "mean_peak_derivative_timestep_weight",
+    "mean_peak_derivative_absolute_error",
+    "relative_peak_intensity_loss",
+    "relative_peak_intensity_candidate_loss",
+    "relative_peak_intensity_boundary_loss",
+    "relative_peak_intensity_target_loss",
+    "relative_peak_intensity_loss_cap",
+    "relative_peak_intensity_loss_scale",
+    "mean_relative_peak_intensity_timestep_weight",
+    "mean_relative_peak_intensity_boundary_error",
+    "mean_relative_peak_intensity_target_error",
+    "mean_relative_peak_height",
+    "peak_parameter_loss",
+    "peak_parameter_candidate_loss",
+    "peak_parameter_raw_loss",
+    "peak_parameter_position_loss",
+    "peak_parameter_width_loss",
+    "peak_parameter_loss_cap",
+    "peak_parameter_loss_scale",
+    "mean_peak_position_violation_cm1",
+    "mean_peak_width_violation_cm1",
+    "peak_position_violation_fraction",
+    "peak_width_violation_fraction",
+    "target_peak_position_violation_fraction",
+    "target_peak_width_violation_fraction",
+    "mean_peak_parameter_timestep_weight",
+    "mean_predicted_peak_position_cm1",
+    "mean_predicted_effective_width_cm1",
+)
+
+
+class TrainingLogger:
+    """把训练过程写入 CSV，并在终端打印关键分项。"""
+
+    FIELD_NAMES = (
+        "step",
+        "training_loss",
+        *(f"training_{name}" for name in COMPONENT_FIELDS),
+        "validation_loss",
+        *(f"validation_{name}" for name in COMPONENT_FIELDS),
+        "learning_rate",
+        "elapsed_seconds",
+    )
+
+    def __init__(self, log_file: str | Path) -> None:
+        self.log_file = Path(log_file)
+        self.log_file.parent.mkdir(parents=True, exist_ok=True)
+        self.start_time = time.time()
+
+        if self.log_file.exists():
+            with self.log_file.open(
+                "r",
+                encoding="utf-8",
+                newline="",
+            ) as file:
+                existing_header = next(csv.reader(file), [])
+
+            if tuple(existing_header) != tuple(self.FIELD_NAMES):
+                raise RuntimeError(
+                    "现有训练日志表头与当前日志格式不一致。"
+                    "当前D3模块增加了新的日志字段；"
+                    "请使用新的output目录，不要覆盖旧实验日志。"
+                )
+        else:
+            with self.log_file.open(
+                "w",
+                encoding="utf-8",
+                newline="",
+            ) as file:
+                csv.DictWriter(
+                    file,
+                    fieldnames=self.FIELD_NAMES,
+                ).writeheader()
+
+    @staticmethod
+    def _value(
+        mapping: dict[str, Any] | None,
+        name: str,
+    ) -> float | str:
+        if not mapping or name not in mapping:
+            return ""
+        return float(mapping[name])
+
+    def record(
+        self,
+        *,
+        step: int,
+        training_loss: float,
+        validation_loss: float | None,
+        learning_rate: float,
+        training_components: dict[str, float] | None = None,
+        validation_components: dict[str, float] | None = None,
+    ) -> None:
+        elapsed_seconds = time.time() - self.start_time
+
+        row: dict[str, Any] = {
+            "step": int(step),
+            "training_loss": float(training_loss),
+            "validation_loss": (
+                "" if validation_loss is None else float(validation_loss)
+            ),
+            "learning_rate": float(learning_rate),
+            "elapsed_seconds": float(elapsed_seconds),
+        }
+
+        for name in COMPONENT_FIELDS:
+            row[f"training_{name}"] = self._value(
+                training_components,
+                name,
+            )
+            row[f"validation_{name}"] = self._value(
+                validation_components,
+                name,
+            )
+
+        with self.log_file.open(
+            "a",
+            encoding="utf-8",
+            newline="",
+        ) as file:
+            csv.DictWriter(
+                file,
+                fieldnames=self.FIELD_NAMES,
+            ).writerow(row)
+
+        validation_text = (
+            "未计算"
+            if validation_loss is None
+            else f"{validation_loss:.6f}"
+        )
+
+        if training_components:
+            ddpm_text = (
+                f"{training_components.get('ddpm_loss', float('nan')):.6f}"
+            )
+            uniform_text = (
+                f"{training_components.get('ddpm_uniform_loss', float('nan')):.6f}"
+            )
+            physics_text = (
+                f"{training_components.get('physics_loss', 0.0):.6f}"
+            )
+            diversity_text = (
+                f"{training_components.get('diversity_loss', 0.0):.6f}"
+            )
+            diversity_uncapped_text = (
+                f"{training_components.get('diversity_uncapped_loss', 0.0):.6f}"
+            )
+
+            ddpm_value = float(
+                training_components.get("ddpm_loss", float("nan"))
+            )
+            quality_raw_value = float(
+                training_components.get(
+                    "quality_fidelity_raw_loss",
+                    float("nan"),
+                )
+            )
+            quality_uncapped_value = float(
+                training_components.get(
+                    "quality_fidelity_uncapped_loss",
+                    float("nan"),
+                )
+            )
+            quality_capped_value = float(
+                training_components.get(
+                    "quality_fidelity_loss",
+                    float("nan"),
+                )
+            )
+
+            quality_keep_ratio = (
+                quality_capped_value / quality_uncapped_value
+                if abs(quality_uncapped_value) > 1.0e-12
+                else float("nan")
+            )
+            quality_to_ddpm_ratio = (
+                quality_capped_value / ddpm_value
+                if abs(ddpm_value) > 1.0e-12
+                else float("nan")
+            )
+
+            quality_raw_text = f"{quality_raw_value:.6f}"
+            quality_uncapped_text = f"{quality_uncapped_value:.6f}"
+            quality_capped_text = f"{quality_capped_value:.6f}"
+            quality_keep_text = f"{quality_keep_ratio:.3f}"
+            quality_to_ddpm_text = f"{quality_to_ddpm_ratio:.3f}"
+
+            legacy_quality_text = (
+                f"{training_components.get('legacy_quality_loss', 0.0):.6f}"
+            )
+            legacy_quality_scale_text = (
+                f"{training_components.get('legacy_quality_scale', 0.0):.3f}"
+            )
+            independent_full_text = (
+                f"{training_components.get('independent_full_spectrum_loss', 0.0):.6f}"
+            )
+            independent_full_scale_text = (
+                f"{training_components.get('independent_full_spectrum_scale', 0.0):.3f}"
+            )
+
+            # D4.23 condition-wise equalized-residual tail envelope
+            residual_tail_raw_text = (
+                f"{training_components.get('equalized_residual_tail_raw_loss', 0.0):.6f}"
+            )
+            residual_tail_uncapped_text = (
+                f"{training_components.get('equalized_residual_tail_uncapped_loss', 0.0):.6f}"
+            )
+            residual_tail_text = (
+                f"{training_components.get('equalized_residual_tail_loss', 0.0):.6f}"
+            )
+            residual_tail_scale_text = (
+                f"{training_components.get('equalized_residual_tail_scale', 0.0):.3f}"
+            )
+            residual_tail_active_text = (
+                f"{training_components.get('equalized_residual_tail_active_fraction', 0.0):.4f}"
+            )
+            residual_tail_excess_text = (
+                f"{training_components.get('equalized_residual_tail_mean_abs_excess', 0.0):.6f}"
+            )
+            residual_tail_gate_text = (
+                f"{training_components.get('equalized_residual_tail_mean_gate', 0.0):.3f}"
+            )
+            residual_tail_over_gate_text = (
+                f"{training_components.get('equalized_residual_tail_overdispersion_gate_mean', 0.0):.3f}"
+            )
+
+            full_reconstruction_text = (
+                f"{training_components.get('full_spectrum_reconstruction_loss', 0.0):.6f}"
+            )
+            full_tail_span_text = (
+                f"{training_components.get('full_spectrum_tail_span_loss', 0.0):.6f}"
+            )
+            full_tail_groups_text = (
+                f"{training_components.get('full_spectrum_tail_active_groups', 0.0):.1f}"
+            )
+
+            local_text = (
+                f"{training_components.get('local_peak_distribution_loss', 0.0):.6f}"
+            )
+            local_scale_text = (
+                f"{training_components.get('local_peak_loss_scale', 0.0):.3f}"
+            )
+            neg_text = (
+                f"{training_components.get('negative_tail_guard_loss', 0.0):.4f}"
+            )
+            wing_track_text = (
+                f"{training_components.get('wing_shape_tracking_loss', 0.0):.4f}"
+            )
+            wing_disp_text = (
+                f"{training_components.get('wing_dispersion_loss', 0.0):.4f}"
+            )
+            shift_text = (
+                f"{training_components.get('shift_dispersion_loss', 0.0):.4f}"
+            )
+            width_text = (
+                f"{training_components.get('width_dispersion_loss', 0.0):.4f}"
+            )
+            height_text = (
+                f"{training_components.get('height_cv_upper_loss', 0.0):.4f}"
+            )
+            active_text = (
+                f"{training_components.get('local_peak_active_samples', 0.0):.1f}"
+            )
+            peak_derivative_text = (
+                f"{training_components.get('peak_derivative_loss', 0.0):.6f}"
+            )
+            peak_derivative_scale_text = (
+                f"{training_components.get('peak_derivative_loss_scale', 0.0):.3f}"
+            )
+            relative_peak_text = (
+                f"{training_components.get('relative_peak_intensity_loss', 0.0):.6f}"
+            )
+            relative_peak_scale_text = (
+                f"{training_components.get('relative_peak_intensity_loss_scale', 0.0):.3f}"
+            )
+            relative_peak_error_text = (
+                f"{training_components.get('mean_relative_peak_intensity_boundary_error', 0.0):.4f}"
+            )
+            peak_parameter_text = (
+                f"{training_components.get('peak_parameter_loss', 0.0):.6f}"
+            )
+            peak_parameter_scale_text = (
+                f"{training_components.get('peak_parameter_loss_scale', 0.0):.3f}"
+            )
+            peak_position_violation_text = (
+                f"{training_components.get('mean_peak_position_violation_cm1', 0.0):.4f}"
+            )
+            peak_width_violation_text = (
+                f"{training_components.get('mean_peak_width_violation_cm1', 0.0):.4f}"
+            )
+
+            extra_text = (
+                f" | ddpm_uniform={uniform_text}"
+                f" | div_uncapped={diversity_uncapped_text}"
+                f" | quality_raw={quality_raw_text}"
+                f" | quality_uncapped={quality_uncapped_text}"
+                f" | quality_capped={quality_capped_text}"
+                f" | quality_keep={quality_keep_text}"
+                f" | quality/ddpm={quality_to_ddpm_text}"
+                f" | legacy_q={legacy_quality_text}"
+                f" | legacy_scale={legacy_quality_scale_text}"
+                f" | full_q={independent_full_text}"
+                f" | full_scale={independent_full_scale_text}"
+                f" | res_tail_raw={residual_tail_raw_text}"
+                f" | res_tail_uncap={residual_tail_uncapped_text}"
+                f" | res_tail={residual_tail_text}"
+                f" | res_tail_scale={residual_tail_scale_text}"
+                f" | res_tail_active={residual_tail_active_text}"
+                f" | res_tail_excess={residual_tail_excess_text}"
+                f" | res_tail_gate={residual_tail_gate_text}"
+                f" | res_tail_over_gate={residual_tail_over_gate_text}"
+                f" | full_recon={full_reconstruction_text}"
+                f" | tail_span={full_tail_span_text}"
+                f" | tail_groups={full_tail_groups_text}"
+                f" | local_peak={local_text}"
+                f" | local_scale={local_scale_text}"
+                f" | neg_tail={neg_text}"
+                f" | wing_track={wing_track_text}"
+                f" | wing_disp={wing_disp_text}"
+                f" | shift_disp={shift_text}"
+                f" | width_disp={width_text}"
+                f" | height_cv={height_text}"
+                f" | local_n={active_text}"
+                f" | peak_d1={peak_derivative_text}"
+                f" | peak_d1_scale={peak_derivative_scale_text}"
+                f" | rel_peak={relative_peak_text}"
+                f" | rel_peak_scale={relative_peak_scale_text}"
+                f" | rel_peak_err={relative_peak_error_text}"
+                f" | peak_param={peak_parameter_text}"
+                f" | peak_param_scale={peak_parameter_scale_text}"
+                f" | peak_pos_v={peak_position_violation_text}"
+                f" | peak_width_v={peak_width_violation_text}"
+            )
+        else:
+            ddpm_text = "未记录"
+            physics_text = "未记录"
+            diversity_text = "未记录"
+            extra_text = ""
+
+        print(
+            f"step={step}"
+            f" | train_total={training_loss:.6f}"
+            f" | train_ddpm={ddpm_text}"
+            f" | train_physics={physics_text}"
+            f" | train_diversity={diversity_text}"
+            f"{extra_text}"
+            f" | val_total={validation_text}"
+            f" | lr={learning_rate:.3e}"
+            f" | elapsed={elapsed_seconds:.1f}s"
+        )

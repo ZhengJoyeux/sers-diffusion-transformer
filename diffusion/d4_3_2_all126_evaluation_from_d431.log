@@ -1,0 +1,641 @@
+nohup: ignoring input
+===== D4条件生成核心指标评价 =====
+checkpoint：/home/wqzheng/project/outputs/experiments/d4_3_1_floor_only_diversity_formal/checkpoints/best.pt
+真实参考子集：validation
+条件数：126
+[1/126] CHL-H_TEB-H_soil：MSE=200.086；cos=0.983429；r=0.981325；W1raw=5.437588；W1norm=0.027838
+  平均谱：MSE=34.7895；cos=0.996821；r=0.996454
+  多样性MSE：train=212.941；generated=224.01；ratio=1.0520；Pearson-distance ratio=1.0312
+  负值：min=-70.294；<-40点=0.064966%；<-40光谱=18.500%
+  QQ尾宽/oracle上界：lower=1.0295/1.1939；upper=0.9445/1.2503；overrun=False
+[2/126] CHL-H_TEB-H_water：MSE=322.243；cos=0.984008；r=0.982199；W1raw=7.267740；W1norm=0.029499
+  平均谱：MSE=76.9562；cos=0.996540；r=0.996133
+  多样性MSE：train=458.098；generated=325.44；ratio=0.7104；Pearson-distance ratio=0.6977
+  负值：min=-159.865；<-40点=0.900579%；<-40光谱=98.500%
+  QQ尾宽/oracle上界：lower=0.9782/1.1722；upper=0.9740/1.2228；overrun=False
+[3/126] CHL-H_TEB-M_soil：MSE=201.304；cos=0.974626；r=0.971150；W1raw=6.024393；W1norm=0.035995
+  平均谱：MSE=54.7988；cos=0.993125；r=0.992117
+  多样性MSE：train=264.393；generated=223.104；ratio=0.8438；Pearson-distance ratio=0.7788
+  负值：min=-36.721；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.7993/1.1449；upper=0.8637/1.1935；overrun=False
+[4/126] CHL-H_TEB-M_water：MSE=177.163；cos=0.976357；r=0.973630；W1raw=6.220099；W1norm=0.037299
+  平均谱：MSE=60.0178；cos=0.992478；r=0.991482
+  多样性MSE：train=277.123；generated=235.973；ratio=0.8515；Pearson-distance ratio=0.7227
+  负值：min=-62.371；<-40点=0.149658%；<-40光谱=41.000%
+  QQ尾宽/oracle上界：lower=0.9428/1.1853；upper=0.9154/1.2079；overrun=False
+[5/126] CHL-H_TEB-S_soil：MSE=203.197；cos=0.971389；r=0.967750；W1raw=6.299874；W1norm=0.038658
+  平均谱：MSE=70.1524；cos=0.988575；r=0.987032
+  多样性MSE：train=294.869；generated=221.908；ratio=0.7526；Pearson-distance ratio=0.7776
+  负值：min=-50.724；<-40点=0.027091%；<-40光谱=13.500%
+  QQ尾宽/oracle上界：lower=0.8556/1.1217；upper=0.9178/1.1439；overrun=False
+[6/126] CHL-H_TEB-S_water：MSE=197.441；cos=0.974783；r=0.972136；W1raw=6.039059；W1norm=0.038026
+  平均谱：MSE=58.8243；cos=0.993621；r=0.993046
+  多样性MSE：train=217.753；generated=183.303；ratio=0.8418；Pearson-distance ratio=0.8547
+  负值：min=-55.994；<-40点=0.091005%；<-40光谱=29.500%
+  QQ尾宽/oracle上界：lower=0.7677/1.1142；upper=0.9745/1.1095；overrun=False
+[7/126] CHL-H_soil：MSE=377.618；cos=0.984141；r=0.982482；W1raw=8.477596；W1norm=0.035285
+  平均谱：MSE=96.1644；cos=0.995445；r=0.994928
+  多样性MSE：train=605.175；generated=423.388；ratio=0.6996；Pearson-distance ratio=0.7510
+  负值：min=-92.451；<-40点=0.294319%；<-40光谱=80.000%
+  QQ尾宽/oracle上界：lower=0.8028/1.1762；upper=0.7938/1.1333；overrun=False
+[8/126] CHL-H_water：MSE=362.225；cos=0.988321；r=0.987384；W1raw=7.695040；W1norm=0.025822
+  平均谱：MSE=56.8483；cos=0.998191；r=0.998046
+  多样性MSE：train=587.892；generated=437.731；ratio=0.7446；Pearson-distance ratio=0.7969
+  负值：min=-73.422；<-40点=0.285376%；<-40光谱=67.000%
+  QQ尾宽/oracle上界：lower=1.0206/1.1685；upper=0.7924/1.1852；overrun=False
+[9/126] CHL-M_TEB-H_soil：MSE=102.861；cos=0.977811；r=0.974850；W1raw=5.155645；W1norm=0.039998
+  平均谱：MSE=55.3555；cos=0.987136；r=0.985349
+  多样性MSE：train=118.924；generated=90.5187；ratio=0.7611；Pearson-distance ratio=0.8281
+  负值：min=-35.188；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.6512/1.0711；upper=0.6905/1.1353；overrun=False
+[10/126] CHL-M_TEB-H_water：MSE=105.261；cos=0.978915；r=0.975716；W1raw=4.710773；W1norm=0.035679
+  平均谱：MSE=29.8844；cos=0.993538；r=0.992513
+  多样性MSE：train=137.927；generated=110.403；ratio=0.8004；Pearson-distance ratio=0.7834
+  负值：min=-39.022；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.8166/1.1269；upper=0.8719/1.1836；overrun=False
+[11/126] CHL-M_TEB-M_soil：MSE=130.963；cos=0.966662；r=0.962068；W1raw=5.723766；W1norm=0.045771
+  平均谱：MSE=73.7448；cos=0.981046；r=0.978171
+  多样性MSE：train=140.756；generated=133.729；ratio=0.9501；Pearson-distance ratio=0.9551
+  负值：min=-41.205；<-40点=0.003156%；<-40光谱=2.500%
+  QQ尾宽/oracle上界：lower=0.7684/1.1695；upper=0.7145/1.2293；overrun=False
+[12/126] CHL-M_TEB-M_water：MSE=177.736；cos=0.961985；r=0.956367；W1raw=5.717175；W1norm=0.042445
+  平均谱：MSE=52.3006；cos=0.987385；r=0.985312
+  多样性MSE：train=284.656；generated=177.58；ratio=0.6238；Pearson-distance ratio=0.7190
+  负值：min=-51.241；<-40点=0.009206%；<-40光谱=3.000%
+  QQ尾宽/oracle上界：lower=0.9567/1.1840；upper=0.8062/1.1449；overrun=False
+[13/126] CHL-M_TEB-S_soil：MSE=156.259；cos=0.949277；r=0.943223；W1raw=4.889957；W1norm=0.046779
+  平均谱：MSE=18.6103；cos=0.991660；r=0.990627
+  多样性MSE：train=205.812；generated=185.643；ratio=0.9020；Pearson-distance ratio=0.8351
+  负值：min=-60.867；<-40点=0.042083%；<-40光谱=9.000%
+  QQ尾宽/oracle上界：lower=1.0274/1.2692；upper=0.9413/1.2378；overrun=False
+[14/126] CHL-M_TEB-S_water：MSE=168.988；cos=0.958877；r=0.953981；W1raw=5.442574；W1norm=0.049353
+  平均谱：MSE=28.7795；cos=0.991808；r=0.990642
+  多样性MSE：train=430.014；generated=250.766；ratio=0.5832；Pearson-distance ratio=0.7338
+  负值：min=-54.702；<-40点=0.076539%；<-40光谱=23.500%
+  QQ尾宽/oracle上界：lower=1.0346/1.1640；upper=0.9552/1.1801；overrun=False
+[15/126] CHL-M_soil：MSE=563.318；cos=0.970587；r=0.967749；W1raw=9.618188；W1norm=0.052548
+  平均谱：MSE=312.973；cos=0.986355；r=0.984964
+  多样性MSE：train=433.746；generated=338.057；ratio=0.7794；Pearson-distance ratio=0.7679
+  负值：min=-73.961；<-40点=0.549711%；<-40光谱=82.000%
+  QQ尾宽/oracle上界：lower=0.7520/1.0885；upper=0.7611/1.1159；overrun=False
+[16/126] CHL-M_water：MSE=424.906；cos=0.981931；r=0.980401；W1raw=8.809949；W1norm=0.032409
+  平均谱：MSE=109.808；cos=0.995375；r=0.994952
+  多样性MSE：train=617.756；generated=502.453；ratio=0.8134；Pearson-distance ratio=0.8093
+  负值：min=-87.166；<-40点=0.716728%；<-40光谱=75.500%
+  QQ尾宽/oracle上界：lower=0.8802/1.1888；upper=0.7619/1.1416；overrun=False
+[17/126] CHL-S_TEB-H_soil：MSE=143.188；cos=0.966341；r=0.962044；W1raw=5.751523；W1norm=0.047884
+  平均谱：MSE=57.6934；cos=0.986554；r=0.984640
+  多样性MSE：train=192.351；generated=137.207；ratio=0.7133；Pearson-distance ratio=0.6904
+  负值：min=-51.998；<-40点=0.006839%；<-40光谱=4.000%
+  QQ尾宽/oracle上界：lower=0.8106/1.0880；upper=0.8822/1.1292；overrun=False
+[18/126] CHL-S_TEB-H_water：MSE=183.324；cos=0.952374；r=0.947609；W1raw=6.019865；W1norm=0.050724
+  平均谱：MSE=46.737；cos=0.987166；r=0.986346
+  多样性MSE：train=273.256；generated=194.592；ratio=0.7121；Pearson-distance ratio=0.6963
+  负值：min=-55.971；<-40点=0.118622%；<-40光谱=22.500%
+  QQ尾宽/oracle上界：lower=0.9180/1.1137；upper=0.8624/1.1180；overrun=False
+[19/126] CHL-S_TEB-M_soil：MSE=124.804；cos=0.967998；r=0.963503；W1raw=4.773494；W1norm=0.040734
+  平均谱：MSE=38.9283；cos=0.989148；r=0.987544
+  多样性MSE：train=139.97；generated=107.219；ratio=0.7660；Pearson-distance ratio=0.7598
+  负值：min=-35.053；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.8900/1.1783；upper=0.9007/1.1351；overrun=False
+[20/126] CHL-S_TEB-M_water：MSE=115.023；cos=0.970049；r=0.965680；W1raw=5.232900；W1norm=0.047156
+  平均谱：MSE=39.1876；cos=0.991189；r=0.989834
+  多样性MSE：train=184.764；generated=137.951；ratio=0.7466；Pearson-distance ratio=0.7435
+  负值：min=-45.710；<-40点=0.002104%；<-40光谱=1.500%
+  QQ尾宽/oracle上界：lower=0.9648/1.1567；upper=0.8298/1.1516；overrun=False
+[21/126] CHL-S_TEB-S_soil：MSE=111.151；cos=0.947931；r=0.941716；W1raw=4.363068；W1norm=0.046524
+  平均谱：MSE=26.1438；cos=0.988078；r=0.986639
+  多样性MSE：train=149.453；generated=140.401；ratio=0.9394；Pearson-distance ratio=0.8766
+  负值：min=-47.769；<-40点=0.012625%；<-40光谱=4.000%
+  QQ尾宽/oracle上界：lower=1.0485/1.1954；upper=1.1793/1.1843；overrun=False
+[22/126] CHL-S_TEB-S_water：MSE=98.4439；cos=0.948909；r=0.941612；W1raw=4.027246；W1norm=0.046272
+  平均谱：MSE=14.7734；cos=0.991188；r=0.989797
+  多样性MSE：train=119.051；generated=107.93；ratio=0.9066；Pearson-distance ratio=0.8034
+  负值：min=-40.697；<-40点=0.000526%；<-40光谱=1.000%
+  QQ尾宽/oracle上界：lower=0.8106/1.1167；upper=0.7231/1.2414；overrun=False
+[23/126] CHL-S_soil：MSE=44.2691；cos=0.991056；r=0.990316；W1raw=2.956082；W1norm=0.024059
+  平均谱：MSE=9.75742；cos=0.998091；r=0.997918
+  多样性MSE：train=74.8947；generated=60.7722；ratio=0.8114；Pearson-distance ratio=0.7997
+  负值：min=-37.065；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.7861/1.1913；upper=0.9732/1.1043；overrun=False
+[24/126] CHL-S_water：MSE=86.545；cos=0.979023；r=0.977161；W1raw=4.331470；W1norm=0.037421
+  平均谱：MSE=31.945；cos=0.991687；r=0.990867
+  多样性MSE：train=115.52；generated=92.8702；ratio=0.8039；Pearson-distance ratio=0.8331
+  负值：min=-48.067；<-40点=0.017885%；<-40光谱=4.500%
+  QQ尾宽/oracle上界：lower=0.9833/1.1230；upper=0.7518/1.1416；overrun=False
+[25/126] DEL-H_CHL-H_soil：MSE=216.882；cos=0.984129；r=0.982006；W1raw=5.888590；W1norm=0.027256
+  平均谱：MSE=30.6173；cos=0.997556；r=0.997198
+  多样性MSE：train=429.308；generated=339.77；ratio=0.7914；Pearson-distance ratio=0.7748
+  负值：min=-73.568；<-40点=0.165176%；<-40光谱=31.000%
+  QQ尾宽/oracle上界：lower=0.7382/1.1576；upper=0.8097/1.1280；overrun=False
+[26/126] DEL-H_CHL-H_water：MSE=301.816；cos=0.980660；r=0.977963；W1raw=7.308410；W1norm=0.034987
+  平均谱：MSE=69.9295；cos=0.994338；r=0.993556
+  多样性MSE：train=409.016；generated=338.865；ratio=0.8285；Pearson-distance ratio=0.7959
+  负值：min=-45.738；<-40点=0.017622%；<-40光谱=7.500%
+  QQ尾宽/oracle上界：lower=0.8141/1.1376；upper=0.8474/1.1239；overrun=False
+[27/126] DEL-H_CHL-M_soil：MSE=213.249；cos=0.983816；r=0.981754；W1raw=5.622915；W1norm=0.028749
+  平均谱：MSE=29.5616；cos=0.997328；r=0.997036
+  多样性MSE：train=320.599；generated=258.52；ratio=0.8064；Pearson-distance ratio=0.7850
+  负值：min=-57.441；<-40点=0.098369%；<-40光谱=21.000%
+  QQ尾宽/oracle上界：lower=0.7643/1.0916；upper=0.7837/1.1272；overrun=False
+[28/126] DEL-H_CHL-M_water：MSE=379.061；cos=0.978449；r=0.975579；W1raw=6.727081；W1norm=0.036379
+  平均谱：MSE=93.8707；cos=0.993887；r=0.993003
+  多样性MSE：train=262.946；generated=221.579；ratio=0.8427；Pearson-distance ratio=0.8719
+  负值：min=-42.724；<-40点=0.004471%；<-40光谱=4.000%
+  QQ尾宽/oracle上界：lower=0.7639/1.1443；upper=0.7383/1.1303；overrun=False
+[29/126] DEL-H_CHL-S_soil：MSE=359.775；cos=0.976693；r=0.973943；W1raw=6.331484；W1norm=0.038103
+  平均谱：MSE=48.2909；cos=0.994422；r=0.993663
+  多样性MSE：train=337.225；generated=260.503；ratio=0.7725；Pearson-distance ratio=0.7331
+  负值：min=-64.026；<-40点=0.121252%；<-40光谱=25.500%
+  QQ尾宽/oracle上界：lower=0.8273/1.1337；upper=0.7817/1.1107；overrun=False
+[30/126] DEL-H_CHL-S_water：MSE=209.162；cos=0.978337；r=0.975395；W1raw=6.196767；W1norm=0.037443
+  平均谱：MSE=48.6205；cos=0.994902；r=0.994199
+  多样性MSE：train=285.607；generated=247.973；ratio=0.8682；Pearson-distance ratio=0.8596
+  负值：min=-43.878；<-40点=0.003156%；<-40光谱=2.500%
+  QQ尾宽/oracle上界：lower=0.8482/1.1086；upper=0.7736/1.1252；overrun=False
+[31/126] DEL-H_TEB-H_CHL-H_soil：MSE=201.471；cos=0.994428；r=0.993500；W1raw=5.271534；W1norm=0.019141
+  平均谱：MSE=26.4114；cos=0.999057；r=0.998906
+  多样性MSE：train=291.451；generated=230.426；ratio=0.7906；Pearson-distance ratio=0.8027
+  负值：min=-47.064；<-40点=0.011310%；<-40光谱=5.500%
+  QQ尾宽/oracle上界：lower=1.1252/1.1699；upper=1.0407/1.2197；overrun=False
+[32/126] DEL-H_TEB-H_CHL-H_water：MSE=177.515；cos=0.994643；r=0.993456；W1raw=5.540903；W1norm=0.019223
+  平均谱：MSE=25.2467；cos=0.999082；r=0.998878
+  多样性MSE：train=261.045；generated=212.333；ratio=0.8134；Pearson-distance ratio=0.7621
+  负值：min=-43.902；<-40点=0.007628%；<-40光谱=4.500%
+  QQ尾宽/oracle上界：lower=0.8022/1.1437；upper=0.9306/1.2210；overrun=False
+[33/126] DEL-H_TEB-H_CHL-M_soil：MSE=467.888；cos=0.993571；r=0.992416；W1raw=6.335431；W1norm=0.022912
+  平均谱：MSE=40.3722；cos=0.998380；r=0.998080
+  多样性MSE：train=346.835；generated=259.728；ratio=0.7489；Pearson-distance ratio=0.8301
+  负值：min=-54.736；<-40点=0.031299%；<-40光谱=10.500%
+  QQ尾宽/oracle上界：lower=1.0554/1.2114；upper=1.1605/1.2600；overrun=False
+[34/126] DEL-H_TEB-H_CHL-M_water：MSE=289.439；cos=0.993567；r=0.992245；W1raw=7.562306；W1norm=0.027291
+  平均谱：MSE=99.2377；cos=0.996821；r=0.996213
+  多样性MSE：train=231.158；generated=191.076；ratio=0.8266；Pearson-distance ratio=0.8013
+  负值：min=-49.724；<-40点=0.016833%；<-40光谱=8.500%
+  QQ尾宽/oracle上界：lower=0.6211/1.0953；upper=0.7560/1.0721；overrun=False
+[35/126] DEL-H_TEB-H_CHL-S_soil：MSE=381.771；cos=0.994016；r=0.993103；W1raw=5.741022；W1norm=0.020677
+  平均谱：MSE=32.6542；cos=0.998325；r=0.998074
+  多样性MSE：train=265.277；generated=235.166；ratio=0.8865；Pearson-distance ratio=0.8046
+  负值：min=-47.378；<-40点=0.016307%；<-40光谱=9.500%
+  QQ尾宽/oracle上界：lower=0.8720/1.0816；upper=0.8826/1.1374；overrun=False
+[36/126] DEL-H_TEB-H_CHL-S_water：MSE=254.695；cos=0.994233；r=0.993055；W1raw=5.735858；W1norm=0.020933
+  平均谱：MSE=31.6872；cos=0.998954；r=0.998751
+  多样性MSE：train=295.71；generated=272.502；ratio=0.9215；Pearson-distance ratio=0.7460
+  负值：min=-50.144；<-40点=0.029984%；<-40光谱=14.500%
+  QQ尾宽/oracle上界：lower=0.9474/1.1472；upper=0.9752/1.2101；overrun=False
+[37/126] DEL-H_TEB-H_soil：MSE=43.1016；cos=0.985470；r=0.984323；W1raw=2.383624；W1norm=0.028467
+  平均谱：MSE=6.45686；cos=0.998299；r=0.998158
+  多样性MSE：train=68.462；generated=59.3989；ratio=0.8676；Pearson-distance ratio=0.8303
+  负值：min=-39.264；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.8520/1.1352；upper=0.6816/1.1471；overrun=False
+[38/126] DEL-H_TEB-H_water：MSE=35.809；cos=0.988290；r=0.987256；W1raw=2.418636；W1norm=0.027055
+  平均谱：MSE=12.0988；cos=0.995920；r=0.995541
+  多样性MSE：train=45.1112；generated=40.9283；ratio=0.9073；Pearson-distance ratio=0.9048
+  负值：min=-27.969；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.9086/1.2044；upper=0.8761/1.1323；overrun=False
+[39/126] DEL-H_TEB-M_CHL-H_soil：MSE=175.343；cos=0.990577；r=0.988914；W1raw=5.131728；W1norm=0.023440
+  平均谱：MSE=24.7623；cos=0.997961；r=0.997595
+  多样性MSE：train=175.832；generated=147.807；ratio=0.8406；Pearson-distance ratio=0.7992
+  负值：min=-42.619；<-40点=0.002367%；<-40光谱=2.000%
+  QQ尾宽/oracle上界：lower=0.7156/1.1039；upper=0.8579/1.1236；overrun=False
+[40/126] DEL-H_TEB-M_CHL-H_water：MSE=270.164；cos=0.992397；r=0.990634；W1raw=6.377531；W1norm=0.027134
+  平均谱：MSE=63.2042；cos=0.997611；r=0.997040
+  多样性MSE：train=220.626；generated=160.353；ratio=0.7268；Pearson-distance ratio=0.7521
+  负值：min=-33.076；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.9387/1.1029；upper=0.7466/1.0895；overrun=False
+[41/126] DEL-H_TEB-M_CHL-M_soil：MSE=220.163；cos=0.988359；r=0.986425；W1raw=6.400297；W1norm=0.030093
+  平均谱：MSE=72.638；cos=0.995293；r=0.994428
+  多样性MSE：train=208.845；generated=160.465；ratio=0.7683；Pearson-distance ratio=0.7594
+  负值：min=-39.464；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.7203/1.1451；upper=0.8199/1.1088；overrun=False
+[42/126] DEL-H_TEB-M_CHL-M_water：MSE=198.179；cos=0.991865；r=0.990086；W1raw=5.852898；W1norm=0.025533
+  平均谱：MSE=43.6305；cos=0.998462；r=0.998106
+  多样性MSE：train=255.895；generated=187.599；ratio=0.7331；Pearson-distance ratio=0.8166
+  负值：min=-41.103；<-40点=0.001315%；<-40光谱=2.000%
+  QQ尾宽/oracle上界：lower=0.9004/1.1393；upper=0.9439/1.1656；overrun=False
+[43/126] DEL-H_TEB-M_CHL-S_soil：MSE=166.493；cos=0.989019；r=0.987085；W1raw=4.978699；W1norm=0.023454
+  平均谱：MSE=27.0425；cos=0.997629；r=0.997240
+  多样性MSE：train=182.966；generated=153.89；ratio=0.8411；Pearson-distance ratio=0.7423
+  负值：min=-36.871；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.8702/1.1071；upper=0.8299/1.1463；overrun=False
+[44/126] DEL-H_TEB-M_CHL-S_water：MSE=232.585；cos=0.990622；r=0.988626；W1raw=5.581540；W1norm=0.024568
+  平均谱：MSE=32.9562；cos=0.998379；r=0.998018
+  多样性MSE：train=314.181；generated=231.695；ratio=0.7375；Pearson-distance ratio=0.8107
+  负值：min=-35.975；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=1.0286/1.2579；upper=0.9095/1.2177；overrun=False
+[45/126] DEL-H_TEB-M_soil：MSE=37.431；cos=0.984761；r=0.983453；W1raw=2.118308；W1norm=0.025845
+  平均谱：MSE=5.26118；cos=0.997633；r=0.997422
+  多样性MSE：train=57.8552；generated=43.5494；ratio=0.7527；Pearson-distance ratio=0.7642
+  负值：min=-35.680；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=1.0219/1.2633；upper=0.7668/1.1122；overrun=False
+[46/126] DEL-H_TEB-M_water：MSE=36.4716；cos=0.986104；r=0.984799；W1raw=2.188178；W1norm=0.024753
+  平均谱：MSE=5.77354；cos=0.997609；r=0.997367
+  多样性MSE：train=56.7881；generated=44.0229；ratio=0.7752；Pearson-distance ratio=0.7842
+  负值：min=-22.240；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.8762/1.1422；upper=0.8838/1.1330；overrun=False
+[47/126] DEL-H_TEB-S_CHL-H_soil：MSE=135.986；cos=0.983159；r=0.980320；W1raw=5.229138；W1norm=0.028963
+  平均谱：MSE=26.601；cos=0.996471；r=0.995866
+  多样性MSE：train=208.091；generated=172.289；ratio=0.8279；Pearson-distance ratio=0.8296
+  负值：min=-57.663；<-40点=0.045502%；<-40光谱=17.500%
+  QQ尾宽/oracle上界：lower=1.0526/1.1929；upper=1.0959/1.1289；overrun=False
+[48/126] DEL-H_TEB-S_CHL-H_water：MSE=179.432；cos=0.987087；r=0.984162；W1raw=6.534773；W1norm=0.033596
+  平均谱：MSE=46.755；cos=0.996553；r=0.995765
+  多样性MSE：train=248.097；generated=182.907；ratio=0.7372；Pearson-distance ratio=0.8098
+  负值：min=-37.761；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.6614/1.1519；upper=0.7059/1.1595；overrun=False
+[49/126] DEL-H_TEB-S_CHL-M_soil：MSE=125.197；cos=0.987235；r=0.985210；W1raw=5.488249；W1norm=0.029487
+  平均谱：MSE=39.3938；cos=0.996037；r=0.995326
+  多样性MSE：train=180.771；generated=143.286；ratio=0.7926；Pearson-distance ratio=0.7871
+  负值：min=-38.713；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.7242/1.0848；upper=0.8799/1.1209；overrun=False
+[50/126] DEL-H_TEB-S_CHL-M_water：MSE=254.476；cos=0.984922；r=0.981632；W1raw=7.135616；W1norm=0.038241
+  平均谱：MSE=60.3717；cos=0.996330；r=0.995494
+  多样性MSE：train=229.127；generated=204.856；ratio=0.8941；Pearson-distance ratio=0.8808
+  负值：min=-36.193；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.6459/1.1512；upper=0.7976/1.2814；overrun=False
+[51/126] DEL-H_TEB-S_CHL-S_soil：MSE=181.981；cos=0.981346；r=0.978212；W1raw=5.448428；W1norm=0.030984
+  平均谱：MSE=34.8007；cos=0.996355；r=0.995700
+  多样性MSE：train=262.555；generated=203.965；ratio=0.7768；Pearson-distance ratio=0.7546
+  负值：min=-44.110；<-40点=0.002893%；<-40光谱=1.500%
+  QQ尾宽/oracle上界：lower=0.9935/1.1228；upper=0.8513/1.1949；overrun=False
+[52/126] DEL-H_TEB-S_CHL-S_water：MSE=230.912；cos=0.985190；r=0.982091；W1raw=6.459895；W1norm=0.034859
+  平均谱：MSE=61.4412；cos=0.996706；r=0.996063
+  多样性MSE：train=244.831；generated=200.779；ratio=0.8201；Pearson-distance ratio=0.7694
+  负值：min=-40.416；<-40点=0.000526%；<-40光谱=0.500%
+  QQ尾宽/oracle上界：lower=0.7628/1.1519；upper=0.7564/1.1086；overrun=False
+[53/126] DEL-H_TEB-S_soil：MSE=41.3771；cos=0.981753；r=0.980253；W1raw=2.424597；W1norm=0.031365
+  平均谱：MSE=11.3716；cos=0.994902；r=0.994455
+  多样性MSE：train=57.5561；generated=46.3377；ratio=0.8051；Pearson-distance ratio=0.7948
+  负值：min=-29.651；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.8749/1.1222；upper=0.8626/1.1794；overrun=False
+[54/126] DEL-H_TEB-S_water：MSE=40.9783；cos=0.981567；r=0.979743；W1raw=2.560017；W1norm=0.030021
+  平均谱：MSE=10.9393；cos=0.995668；r=0.995242
+  多样性MSE：train=65.2821；generated=53.7885；ratio=0.8239；Pearson-distance ratio=0.8268
+  负值：min=-26.274；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.8475/1.2102；upper=0.8196/1.0995；overrun=False
+[55/126] DEL-H_soil：MSE=349.776；cos=0.982689；r=0.979033；W1raw=7.764548；W1norm=0.033833
+  平均谱：MSE=116.228；cos=0.994808；r=0.993883
+  多样性MSE：train=585.45；generated=482.551；ratio=0.8242；Pearson-distance ratio=0.8896
+  负值：min=-70.112；<-40点=0.103498%；<-40光谱=25.000%
+  QQ尾宽/oracle上界：lower=0.6980/1.3363；upper=0.8084/1.2644；overrun=False
+[56/126] DEL-H_water：MSE=1736.12；cos=0.968505；r=0.962682；W1raw=11.825192；W1norm=0.036155
+  平均谱：MSE=153.702；cos=0.995086；r=0.993925
+  多样性MSE：train=3363.77；generated=2151.44；ratio=0.6396；Pearson-distance ratio=0.6699
+  负值：min=-148.184；<-40点=0.309422%；<-40光谱=18.000%
+  QQ尾宽/oracle上界：lower=0.8337/1.3831；upper=0.8033/1.2006；overrun=False
+[57/126] DEL-M_CHL-H_soil：MSE=177.664；cos=0.973738；r=0.970535；W1raw=5.882292；W1norm=0.038383
+  平均谱：MSE=25.9345；cos=0.995618；r=0.995050
+  多样性MSE：train=331.378；generated=247.798；ratio=0.7478；Pearson-distance ratio=0.8184
+  负值：min=-53.918；<-40点=0.035508%；<-40光谱=7.500%
+  QQ尾宽/oracle上界：lower=0.8066/1.1180；upper=0.7592/1.1642；overrun=False
+[58/126] DEL-M_CHL-H_water：MSE=155.31；cos=0.980812；r=0.978681；W1raw=5.373431；W1norm=0.031760
+  平均谱：MSE=22.8354；cos=0.996829；r=0.996510
+  多样性MSE：train=305.126；generated=224.405；ratio=0.7355；Pearson-distance ratio=0.7816
+  负值：min=-75.329；<-40点=0.151762%；<-40光谱=39.500%
+  QQ尾宽/oracle上界：lower=1.0056/1.1517；upper=0.7488/1.1600；overrun=False
+[59/126] DEL-M_CHL-M_soil：MSE=209.044；cos=0.972599；r=0.969108；W1raw=5.679733；W1norm=0.036875
+  平均谱：MSE=43.4693；cos=0.993777；r=0.992921
+  多样性MSE：train=291.103；generated=240.819；ratio=0.8273；Pearson-distance ratio=0.7812
+  负值：min=-48.694；<-40点=0.027880%；<-40光谱=8.500%
+  QQ尾宽/oracle上界：lower=1.0752/1.1241；upper=0.9888/1.1431；overrun=False
+[60/126] DEL-M_CHL-M_water：MSE=254.231；cos=0.960898；r=0.955674；W1raw=6.193783；W1norm=0.044014
+  平均谱：MSE=36.308；cos=0.993777；r=0.992823
+  多样性MSE：train=379.101；generated=305.459；ratio=0.8057；Pearson-distance ratio=0.8491
+  负值：min=-69.812；<-40点=0.042346%；<-40光谱=10.500%
+  QQ尾宽/oracle上界：lower=0.9064/1.1157；upper=1.0176/1.1192；overrun=False
+[61/126] DEL-M_CHL-S_soil：MSE=151.089；cos=0.973741；r=0.970664；W1raw=5.217818；W1norm=0.037133
+  平均谱：MSE=26.3189；cos=0.994882；r=0.994228
+  多样性MSE：train=224.011；generated=191.603；ratio=0.8553；Pearson-distance ratio=0.8086
+  负值：min=-60.623；<-40点=0.066281%；<-40光谱=16.500%
+  QQ尾宽/oracle上界：lower=0.8317/1.0937；upper=0.9472/1.1049；overrun=False
+[62/126] DEL-M_CHL-S_water：MSE=248.254；cos=0.960930；r=0.955967；W1raw=5.823975；W1norm=0.044290
+  平均谱：MSE=25.7707；cos=0.994224；r=0.993424
+  多样性MSE：train=355.551；generated=294.41；ratio=0.8280；Pearson-distance ratio=0.7606
+  负值：min=-60.572；<-40点=0.073382%；<-40光谱=19.000%
+  QQ尾宽/oracle上界：lower=0.8842/1.1146；upper=0.7267/1.1068；overrun=False
+[63/126] DEL-M_TEB-H_CHL-H_soil：MSE=208.284；cos=0.991757；r=0.990295；W1raw=5.240919；W1norm=0.023716
+  平均谱：MSE=35.8542；cos=0.997828；r=0.997449
+  多样性MSE：train=189.477；generated=137.523；ratio=0.7258；Pearson-distance ratio=0.7282
+  负值：min=-50.387；<-40点=0.004471%；<-40光谱=1.500%
+  QQ尾宽/oracle上界：lower=1.0137/1.1360；upper=0.7018/1.1424；overrun=False
+[64/126] DEL-M_TEB-H_CHL-H_water：MSE=178.007；cos=0.992834；r=0.991335；W1raw=5.599021；W1norm=0.023546
+  平均谱：MSE=28.7059；cos=0.998953；r=0.998723
+  多样性MSE：train=221.469；generated=196.768；ratio=0.8885；Pearson-distance ratio=0.8309
+  负值：min=-41.074；<-40点=0.000526%；<-40光谱=0.500%
+  QQ尾宽/oracle上界：lower=0.7808/1.1174；upper=0.8113/1.0958；overrun=False
+[65/126] DEL-M_TEB-H_CHL-M_soil：MSE=153.946；cos=0.990765；r=0.989121；W1raw=5.403688；W1norm=0.024830
+  平均谱：MSE=36.1441；cos=0.997217；r=0.996706
+  多样性MSE：train=155.406；generated=118.267；ratio=0.7610；Pearson-distance ratio=0.7783
+  负值：min=-39.159；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.6790/1.1030；upper=0.8122/1.1186；overrun=False
+[66/126] DEL-M_TEB-H_CHL-M_water：MSE=237.758；cos=0.989523；r=0.987318；W1raw=7.052346；W1norm=0.031199
+  平均谱：MSE=93.5284；cos=0.995756；r=0.994840
+  多样性MSE：train=266.583；generated=214.319；ratio=0.8039；Pearson-distance ratio=0.8199
+  负值：min=-47.357；<-40点=0.018674%；<-40光谱=9.000%
+  QQ尾宽/oracle上界：lower=0.7281/1.1158；upper=0.9849/1.0857；overrun=False
+[67/126] DEL-M_TEB-H_CHL-S_soil：MSE=127.784；cos=0.991353；r=0.989852；W1raw=5.114859；W1norm=0.022968
+  平均谱：MSE=33.6421；cos=0.997319；r=0.996832
+  多样性MSE：train=166.302；generated=136.69；ratio=0.8219；Pearson-distance ratio=0.7612
+  负值：min=-38.930；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.8846/1.1159；upper=0.7578/1.0825；overrun=False
+[68/126] DEL-M_TEB-H_CHL-S_water：MSE=173.419；cos=0.991953；r=0.990348；W1raw=5.869491；W1norm=0.025703
+  平均谱：MSE=51.816；cos=0.997129；r=0.996574
+  多样性MSE：train=247.108；generated=196.757；ratio=0.7962；Pearson-distance ratio=0.7927
+  负值：min=-44.008；<-40点=0.005260%；<-40光谱=3.000%
+  QQ尾宽/oracle上界：lower=0.9517/1.1295；upper=0.9067/1.1045；overrun=False
+[69/126] DEL-M_TEB-H_soil：MSE=38.0602；cos=0.983583；r=0.982178；W1raw=2.415939；W1norm=0.031199
+  平均谱：MSE=9.75282；cos=0.995640；r=0.995254
+  多样性MSE：train=56.4475；generated=46.98；ratio=0.8323；Pearson-distance ratio=0.8150
+  负值：min=-21.794；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.7443/1.1240；upper=0.7925/1.1701；overrun=False
+[70/126] DEL-M_TEB-H_water：MSE=33.673；cos=0.986956；r=0.985736；W1raw=2.381548；W1norm=0.026626
+  平均谱：MSE=11.2366；cos=0.995532；r=0.995113
+  多样性MSE：train=46.0111；generated=39.5649；ratio=0.8599；Pearson-distance ratio=0.8257
+  负值：min=-26.056；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.8703/1.1820；upper=0.8266/1.1016；overrun=False
+[71/126] DEL-M_TEB-M_CHL-H_soil：MSE=157.231；cos=0.982308；r=0.979092；W1raw=5.803807；W1norm=0.031264
+  平均谱：MSE=51.9572；cos=0.993840；r=0.992651
+  多样性MSE：train=222.892；generated=182.377；ratio=0.8182；Pearson-distance ratio=0.8440
+  负值：min=-39.566；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.7895/1.1378；upper=0.9706/1.1428；overrun=False
+[72/126] DEL-M_TEB-M_CHL-H_water：MSE=222.013；cos=0.983981；r=0.980744；W1raw=6.693699；W1norm=0.034662
+  平均谱：MSE=51.0373；cos=0.995685；r=0.994762
+  多样性MSE：train=253.82；generated=202.177；ratio=0.7965；Pearson-distance ratio=0.7915
+  负值：min=-37.729；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.7477/1.1812；upper=0.6897/1.1528；overrun=False
+[73/126] DEL-M_TEB-M_CHL-M_soil：MSE=161.645；cos=0.983411；r=0.980355；W1raw=5.535028；W1norm=0.031777
+  平均谱：MSE=39.9797；cos=0.994788；r=0.993791
+  多样性MSE：train=203.681；generated=155.476；ratio=0.7633；Pearson-distance ratio=0.7279
+  负值：min=-38.398；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.8957/1.1281；upper=0.8319/1.1084；overrun=False
+[74/126] DEL-M_TEB-M_CHL-M_water：MSE=166.117；cos=0.988692；r=0.986537；W1raw=5.374048；W1norm=0.029127
+  平均谱：MSE=24.3899；cos=0.998112；r=0.997785
+  多样性MSE：train=233.986；generated=188.412；ratio=0.8052；Pearson-distance ratio=0.7900
+  负值：min=-41.089；<-40点=0.000526%；<-40光谱=0.500%
+  QQ尾宽/oracle上界：lower=0.9448/1.0749；upper=0.9460/1.1008；overrun=False
+[75/126] DEL-M_TEB-M_CHL-S_soil：MSE=123.07；cos=0.985362；r=0.982788；W1raw=5.154781；W1norm=0.029287
+  平均谱：MSE=36.9836；cos=0.994852；r=0.993883
+  多样性MSE：train=171.445；generated=141.931；ratio=0.8278；Pearson-distance ratio=0.7943
+  负值：min=-34.735；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.8965/1.1030；upper=0.8961/1.1213；overrun=False
+[76/126] DEL-M_TEB-M_CHL-S_water：MSE=213.593；cos=0.985216；r=0.982216；W1raw=6.104986；W1norm=0.033020
+  平均谱：MSE=49.4741；cos=0.996907；r=0.996327
+  多样性MSE：train=306.272；generated=240.264；ratio=0.7845；Pearson-distance ratio=0.8436
+  负值：min=-41.573；<-40点=0.000263%；<-40光谱=0.500%
+  QQ尾宽/oracle上界：lower=0.9076/1.1361；upper=0.9364/1.1953；overrun=False
+[77/126] DEL-M_TEB-M_soil：MSE=37.1466；cos=0.982684；r=0.981246；W1raw=2.151059；W1norm=0.028576
+  平均谱：MSE=5.08662；cos=0.997534；r=0.997326
+  多样性MSE：train=61.6437；generated=49.7073；ratio=0.8064；Pearson-distance ratio=0.7589
+  负值：min=-27.288；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.8666/1.1436；upper=0.8070/1.1515；overrun=False
+[78/126] DEL-M_TEB-M_water：MSE=38.5008；cos=0.983399；r=0.981720；W1raw=2.438758；W1norm=0.027994
+  平均谱：MSE=10.0953；cos=0.995531；r=0.995052
+  多样性MSE：train=57.5829；generated=46.8663；ratio=0.8139；Pearson-distance ratio=0.8150
+  负值：min=-26.787；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=1.0727/1.2319；upper=0.8665/1.1104；overrun=False
+[79/126] DEL-M_TEB-S_CHL-H_soil：MSE=192.508；cos=0.971370；r=0.966522；W1raw=5.631086；W1norm=0.039663
+  平均谱：MSE=38.7844；cos=0.991302；r=0.989698
+  多样性MSE：train=222.001；generated=190.231；ratio=0.8569；Pearson-distance ratio=0.8986
+  负值：min=-39.214；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.8015/1.1380；upper=0.7785/1.1185；overrun=False
+[80/126] DEL-M_TEB-S_CHL-H_water：MSE=166.917；cos=0.981796；r=0.977927；W1raw=5.770836；W1norm=0.036912
+  平均谱：MSE=31.5701；cos=0.995628；r=0.994645
+  多样性MSE：train=281.834；generated=201.474；ratio=0.7149；Pearson-distance ratio=0.9564
+  负值：min=-69.445；<-40点=0.018937%；<-40光谱=6.000%
+  QQ尾宽/oracle上界：lower=0.9678/1.1375；upper=0.8519/1.1128；overrun=False
+[81/126] DEL-M_TEB-S_CHL-M_soil：MSE=147.109；cos=0.973885；r=0.969234；W1raw=5.906630；W1norm=0.044471
+  平均谱：MSE=43.6759；cos=0.989898；r=0.988027
+  多样性MSE：train=161.038；generated=123.855；ratio=0.7691；Pearson-distance ratio=0.7803
+  负值：min=-39.715；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.7075/1.1051；upper=0.8245/1.1775；overrun=False
+[82/126] DEL-M_TEB-S_CHL-M_water：MSE=323.413；cos=0.972674；r=0.966612；W1raw=6.493188；W1norm=0.045639
+  平均谱：MSE=66.8313；cos=0.995037；r=0.993898
+  多样性MSE：train=323.778；generated=242.633；ratio=0.7494；Pearson-distance ratio=0.8014
+  负值：min=-60.788；<-40点=0.014203%；<-40光谱=4.500%
+  QQ尾宽/oracle上界：lower=0.9589/1.1163；upper=0.8461/1.1380；overrun=False
+[83/126] DEL-M_TEB-S_CHL-S_soil：MSE=230.157；cos=0.962692；r=0.956308；W1raw=5.783820；W1norm=0.049499
+  平均谱：MSE=55.6426；cos=0.988677；r=0.986661
+  多样性MSE：train=176.481；generated=141.18；ratio=0.8000；Pearson-distance ratio=0.7753
+  负值：min=-39.586；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.7893/1.0867；upper=0.7496/1.1376；overrun=False
+[84/126] DEL-M_TEB-S_CHL-S_water：MSE=265.407；cos=0.978971；r=0.974561；W1raw=6.931099；W1norm=0.046340
+  平均谱：MSE=69.9915；cos=0.991454；r=0.989629
+  多样性MSE：train=231.474；generated=186.053；ratio=0.8038；Pearson-distance ratio=0.7534
+  负值：min=-30.934；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.7979/1.1240；upper=0.8219/1.1723；overrun=False
+[85/126] DEL-M_TEB-S_soil：MSE=38.7694；cos=0.980729；r=0.979204；W1raw=2.521107；W1norm=0.033182
+  平均谱：MSE=11.0805；cos=0.994181；r=0.993648
+  多样性MSE：train=62.5652；generated=59.0148；ratio=0.9433；Pearson-distance ratio=1.0010
+  负值：min=-29.534；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.9919/1.1375；upper=0.8595/1.1902；overrun=False
+[86/126] DEL-M_TEB-S_water：MSE=39.1117；cos=0.980743；r=0.978880；W1raw=2.891611；W1norm=0.034159
+  平均谱：MSE=20.6835；cos=0.990140；r=0.989101
+  多样性MSE：train=46.5944；generated=39.6656；ratio=0.8513；Pearson-distance ratio=0.8336
+  负值：min=-21.476；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.7241/1.1030；upper=0.8472/1.1540；overrun=False
+[87/126] DEL-M_soil：MSE=520.301；cos=0.956291；r=0.946334；W1raw=11.162622；W1norm=0.075766
+  平均谱：MSE=393.685；cos=0.989903；r=0.987421
+  多样性MSE：train=609.855；generated=490.772；ratio=0.8047；Pearson-distance ratio=0.9105
+  负值：min=-74.424；<-40点=0.144897%；<-40光谱=10.000%
+  QQ尾宽/oracle上界：lower=0.7718/1.2923；upper=0.8080/1.4867；overrun=False
+[88/126] DEL-M_water：MSE=1860.73；cos=0.967203；r=0.960037；W1raw=12.710821；W1norm=0.052063
+  平均谱：MSE=187.646；cos=0.988397；r=0.985858
+  多样性MSE：train=1950；generated=1323.02；ratio=0.6785；Pearson-distance ratio=0.8151
+  负值：min=-128.534；<-40点=0.035332%；<-40光谱=4.000%
+  QQ尾宽/oracle上界：lower=0.8792/1.2220；upper=0.6768/1.1684；overrun=False
+[89/126] DEL-S_CHL-H_soil：MSE=194.63；cos=0.965602；r=0.962011；W1raw=5.941391；W1norm=0.044376
+  平均谱：MSE=42.2738；cos=0.992580；r=0.991677
+  多样性MSE：train=255.223；generated=238.877；ratio=0.9360；Pearson-distance ratio=0.8721
+  负值：min=-47.194；<-40点=0.016570%；<-40光谱=8.500%
+  QQ尾宽/oracle上界：lower=0.8635/1.1757；upper=0.7791/1.1387；overrun=False
+[90/126] DEL-S_CHL-H_water：MSE=250.476；cos=0.965878；r=0.961761；W1raw=6.647218；W1norm=0.050037
+  平均谱：MSE=72.4332；cos=0.989746；r=0.988652
+  多样性MSE：train=278.835；generated=218.437；ratio=0.7834；Pearson-distance ratio=0.7653
+  负值：min=-57.702；<-40点=0.029458%；<-40光谱=10.000%
+  QQ尾宽/oracle上界：lower=0.7480/1.1613；upper=0.7388/1.1028；overrun=False
+[91/126] DEL-S_CHL-M_soil：MSE=155.942；cos=0.959747；r=0.955518；W1raw=5.668040；W1norm=0.049174
+  平均谱：MSE=35.6928；cos=0.989709；r=0.988947
+  多样性MSE：train=252.584；generated=206.274；ratio=0.8167；Pearson-distance ratio=0.7664
+  负值：min=-44.310；<-40点=0.010258%；<-40光谱=6.500%
+  QQ尾宽/oracle上界：lower=0.6949/1.1527；upper=0.9236/1.1800；overrun=False
+[92/126] DEL-S_CHL-M_water：MSE=238.455；cos=0.945671；r=0.940085；W1raw=7.008218；W1norm=0.062765
+  平均谱：MSE=119.73；cos=0.969710；r=0.965824
+  多样性MSE：train=293.192；generated=251.453；ratio=0.8576；Pearson-distance ratio=0.7026
+  负值：min=-71.537；<-40点=0.106260%；<-40光谱=25.500%
+  QQ尾宽/oracle上界：lower=0.9241/1.1238；upper=0.9404/1.2024；overrun=False
+[93/126] DEL-S_CHL-S_soil：MSE=236.039；cos=0.945505；r=0.939713；W1raw=5.984908；W1norm=0.063871
+  平均谱：MSE=47.0199；cos=0.990594；r=0.989594
+  多样性MSE：train=267.606；generated=201.497；ratio=0.7530；Pearson-distance ratio=0.8329
+  负值：min=-63.982；<-40点=0.053919%；<-40光谱=8.500%
+  QQ尾宽/oracle上界：lower=0.7093/1.1501；upper=0.8917/1.1067；overrun=False
+[94/126] DEL-S_CHL-S_water：MSE=196.601；cos=0.934989；r=0.927337；W1raw=5.806743；W1norm=0.065650
+  平均谱：MSE=62.6874；cos=0.980623；r=0.977958
+  多样性MSE：train=273.902；generated=224.327；ratio=0.8190；Pearson-distance ratio=0.8376
+  负值：min=-46.621；<-40点=0.024724%；<-40光谱=7.000%
+  QQ尾宽/oracle上界：lower=0.8848/1.1034；upper=0.8927/1.0718；overrun=False
+[95/126] DEL-S_TEB-H_CHL-H_soil：MSE=167.637；cos=0.982317；r=0.979254；W1raw=5.829479；W1norm=0.031423
+  平均谱：MSE=44.6811；cos=0.995617；r=0.994844
+  多样性MSE：train=239.819；generated=191.306；ratio=0.7977；Pearson-distance ratio=0.9699
+  负值：min=-47.633；<-40点=0.019989%；<-40光谱=8.500%
+  QQ尾宽/oracle上界：lower=0.9745/1.2245；upper=0.7643/1.1611；overrun=False
+[96/126] DEL-S_TEB-H_CHL-H_water：MSE=287.504；cos=0.987166；r=0.984624；W1raw=7.235765；W1norm=0.037230
+  平均谱：MSE=103.684；cos=0.994474；r=0.993304
+  多样性MSE：train=279.189；generated=220.363；ratio=0.7893；Pearson-distance ratio=0.8338
+  负值：min=-49.819；<-40点=0.009995%；<-40光谱=4.500%
+  QQ尾宽/oracle上界：lower=0.9515/1.1374；upper=1.0371/1.1158；overrun=False
+[97/126] DEL-S_TEB-H_CHL-M_soil：MSE=177.572；cos=0.982807；r=0.979750；W1raw=5.646976；W1norm=0.031290
+  平均谱：MSE=31.8831；cos=0.995999；r=0.995211
+  多样性MSE：train=210.78；generated=163.226；ratio=0.7744；Pearson-distance ratio=0.8010
+  负值：min=-38.099；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.8840/1.0825；upper=0.8097/1.1320；overrun=False
+[98/126] DEL-S_TEB-H_CHL-M_water：MSE=152.812；cos=0.989519；r=0.987480；W1raw=5.845280；W1norm=0.031278
+  平均谱：MSE=63.6117；cos=0.994745；r=0.993652
+  多样性MSE：train=214.897；generated=159.983；ratio=0.7445；Pearson-distance ratio=0.7280
+  负值：min=-40.987；<-40点=0.000789%；<-40光谱=1.000%
+  QQ尾宽/oracle上界：lower=0.6270/1.1866；upper=0.9226/1.1221；overrun=False
+[99/126] DEL-S_TEB-H_CHL-S_soil：MSE=177.879；cos=0.982300；r=0.979205；W1raw=5.787193；W1norm=0.034064
+  平均谱：MSE=47.4719；cos=0.996276；r=0.995562
+  多样性MSE：train=231.258；generated=194.965；ratio=0.8431；Pearson-distance ratio=0.8527
+  负值：min=-47.544；<-40点=0.020252%；<-40光谱=9.000%
+  QQ尾宽/oracle上界：lower=0.8755/1.1423；upper=0.8939/1.1350；overrun=False
+[100/126] DEL-S_TEB-H_CHL-S_water：MSE=309.892；cos=0.984639；r=0.981564；W1raw=6.460870；W1norm=0.037537
+  平均谱：MSE=68.3133；cos=0.994574；r=0.993435
+  多样性MSE：train=234.555；generated=193.536；ratio=0.8251；Pearson-distance ratio=0.7439
+  负值：min=-38.329；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.8788/1.1763；upper=0.7249/1.1548；overrun=False
+[101/126] DEL-S_TEB-H_soil：MSE=39.5291；cos=0.982074；r=0.980433；W1raw=2.441539；W1norm=0.032639
+  平均谱：MSE=9.62851；cos=0.995803；r=0.995408
+  多样性MSE：train=57.3686；generated=47.1805；ratio=0.8224；Pearson-distance ratio=0.8447
+  负值：min=-32.245；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.9640/1.2076；upper=0.8155/1.1566；overrun=False
+[102/126] DEL-S_TEB-H_water：MSE=44.6944；cos=0.981358；r=0.979527；W1raw=2.487912；W1norm=0.029667
+  平均谱：MSE=11.6348；cos=0.994947；r=0.994425
+  多样性MSE：train=67.2656；generated=52.7054；ratio=0.7835；Pearson-distance ratio=0.7687
+  负值：min=-20.283；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.8270/1.0984；upper=0.8654/1.1006；overrun=False
+[103/126] DEL-S_TEB-M_CHL-H_soil：MSE=119.322；cos=0.983824；r=0.980739；W1raw=4.894299；W1norm=0.031559
+  平均谱：MSE=28.6328；cos=0.994914；r=0.994052
+  多样性MSE：train=161.888；generated=117.985；ratio=0.7288；Pearson-distance ratio=0.7391
+  负值：min=-39.028；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.7875/1.0826；upper=0.9271/1.1988；overrun=False
+[104/126] DEL-S_TEB-M_CHL-H_water：MSE=211.003；cos=0.981223；r=0.977527；W1raw=5.543957；W1norm=0.034413
+  平均谱：MSE=36.5138；cos=0.995439；r=0.994495
+  多样性MSE：train=227.025；generated=186.621；ratio=0.8220；Pearson-distance ratio=0.7737
+  负值：min=-63.859；<-40点=0.041294%；<-40光谱=13.000%
+  QQ尾宽/oracle上界：lower=0.8384/1.1690；upper=0.9037/1.2204；overrun=False
+[105/126] DEL-S_TEB-M_CHL-M_soil：MSE=153.661；cos=0.973783；r=0.969000；W1raw=5.315948；W1norm=0.038758
+  平均谱：MSE=31.3951；cos=0.993053；r=0.991712
+  多样性MSE：train=184.173；generated=147.648；ratio=0.8017；Pearson-distance ratio=0.8062
+  负值：min=-46.100；<-40点=0.011310%；<-40光谱=5.500%
+  QQ尾宽/oracle上界：lower=0.7710/1.1342；upper=0.8412/1.0906；overrun=False
+[106/126] DEL-S_TEB-M_CHL-M_water：MSE=152.702；cos=0.983656；r=0.980339；W1raw=5.777137；W1norm=0.038198
+  平均谱：MSE=36.6212；cos=0.995162；r=0.994137
+  多样性MSE：train=236.158；generated=180.36；ratio=0.7637；Pearson-distance ratio=0.7564
+  负值：min=-34.691；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.8154/1.1207；upper=0.8750/1.1829；overrun=False
+[107/126] DEL-S_TEB-M_CHL-S_soil：MSE=213.225；cos=0.965782；r=0.960055；W1raw=6.047075；W1norm=0.046327
+  平均谱：MSE=45.2792；cos=0.988922；r=0.986936
+  多样性MSE：train=208.421；generated=153.183；ratio=0.7350；Pearson-distance ratio=0.7293
+  负值：min=-40.281；<-40点=0.000263%；<-40光谱=0.500%
+  QQ尾宽/oracle上界：lower=0.7201/1.1451；upper=0.7035/1.1007；overrun=False
+[108/126] DEL-S_TEB-M_CHL-S_water：MSE=171.445；cos=0.976969；r=0.972903；W1raw=6.120847；W1norm=0.043164
+  平均谱：MSE=59.493；cos=0.990703；r=0.989015
+  多样性MSE：train=230.998；generated=176.527；ratio=0.7642；Pearson-distance ratio=0.7475
+  负值：min=-40.958；<-40点=0.001052%；<-40光谱=1.000%
+  QQ尾宽/oracle上界：lower=0.8216/1.1014；upper=0.7721/1.1946；overrun=False
+[109/126] DEL-S_TEB-M_soil：MSE=29.933；cos=0.985895；r=0.984652；W1raw=2.514631；W1norm=0.033759
+  平均谱：MSE=15.3871；cos=0.992227；r=0.991509
+  多样性MSE：train=58.6869；generated=44.6626；ratio=0.7610；Pearson-distance ratio=0.7581
+  负值：min=-24.494；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.7483/1.1640；upper=0.7830/1.1366；overrun=False
+[110/126] DEL-S_TEB-M_water：MSE=27.8212；cos=0.986570；r=0.985264；W1raw=1.977994；W1norm=0.024709
+  平均谱：MSE=3.96426；cos=0.998102；r=0.997905
+  多样性MSE：train=49.3739；generated=43.8783；ratio=0.8887；Pearson-distance ratio=0.8992
+  负值：min=-20.611；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.9738/1.1339；upper=1.0058/1.1226；overrun=False
+[111/126] DEL-S_TEB-S_CHL-H_soil：MSE=159.379；cos=0.961602；r=0.955537；W1raw=5.199269；W1norm=0.043734
+  平均谱：MSE=29.8698；cos=0.993967；r=0.992974
+  多样性MSE：train=204.583；generated=166.622；ratio=0.8144；Pearson-distance ratio=0.7192
+  负值：min=-51.532；<-40点=0.025776%；<-40光谱=9.500%
+  QQ尾宽/oracle上界：lower=0.9702/1.1595；upper=0.7849/1.1671；overrun=False
+[112/126] DEL-S_TEB-S_CHL-H_water：MSE=207.55；cos=0.961338；r=0.954288；W1raw=5.801174；W1norm=0.050544
+  平均谱：MSE=36.2409；cos=0.991483；r=0.990249
+  多样性MSE：train=259.97；generated=200.297；ratio=0.7705；Pearson-distance ratio=0.7983
+  负值：min=-61.681；<-40点=0.037349%；<-40光谱=12.000%
+  QQ尾宽/oracle上界：lower=0.9676/1.1092；upper=0.8007/1.1351；overrun=False
+[113/126] DEL-S_TEB-S_CHL-M_soil：MSE=165.312；cos=0.947821；r=0.938622；W1raw=5.286076；W1norm=0.055580
+  平均谱：MSE=33.7819；cos=0.992877；r=0.991464
+  多样性MSE：train=249.722；generated=185.263；ratio=0.7419；Pearson-distance ratio=0.6848
+  负值：min=-33.633；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.8314/1.1209；upper=1.0558/1.2151；overrun=False
+[114/126] DEL-S_TEB-S_CHL-M_water：MSE=244.702；cos=0.961328；r=0.954189；W1raw=5.852192；W1norm=0.053866
+  平均谱：MSE=29.2364；cos=0.990919；r=0.989293
+  多样性MSE：train=218.447；generated=176.968；ratio=0.8101；Pearson-distance ratio=0.8112
+  负值：min=-74.793；<-40点=0.057864%；<-40光谱=14.500%
+  QQ尾宽/oracle上界：lower=0.7005/1.1294；upper=0.8091/1.0947；overrun=False
+[115/126] DEL-S_TEB-S_CHL-S_soil：MSE=218.554；cos=0.896783；r=0.882754；W1raw=7.054697；W1norm=0.082355
+  平均谱：MSE=107.338；cos=0.973404；r=0.968630
+  多样性MSE：train=287.149；generated=222.166；ratio=0.7737；Pearson-distance ratio=0.8112
+  负值：min=-43.138；<-40点=0.001578%；<-40光谱=0.500%
+  QQ尾宽/oracle上界：lower=0.9131/1.1332；upper=0.7685/1.1535；overrun=False
+[116/126] DEL-S_TEB-S_CHL-S_water：MSE=200.971；cos=0.956647；r=0.948537；W1raw=5.370712；W1norm=0.049252
+  平均谱：MSE=26.0174；cos=0.992409；r=0.990780
+  多样性MSE：train=239.653；generated=189.874；ratio=0.7923；Pearson-distance ratio=0.7703
+  负值：min=-46.624；<-40点=0.004734%；<-40光谱=2.000%
+  QQ尾宽/oracle上界：lower=0.7896/1.1387；upper=0.8818/1.1188；overrun=False
+[117/126] DEL-S_TEB-S_soil：MSE=16.0093；cos=0.981917；r=0.980428；W1raw=1.379899；W1norm=0.028014
+  平均谱：MSE=2.2568；cos=0.997334；r=0.997093
+  多样性MSE：train=27.5535；generated=21.7812；ratio=0.7905；Pearson-distance ratio=0.7750
+  负值：min=-14.081；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.8687/1.1116；upper=0.7732/1.1696；overrun=False
+[118/126] DEL-S_TEB-S_water：MSE=12.6632；cos=0.985842；r=0.984320；W1raw=1.343312；W1norm=0.025998
+  平均谱：MSE=2.16217；cos=0.997437；r=0.997146
+  多样性MSE：train=22.0678；generated=19.9377；ratio=0.9035；Pearson-distance ratio=0.9210
+  负值：min=-16.617；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.9546/1.2141；upper=1.0836/1.1160；overrun=False
+[119/126] DEL-S_soil：MSE=474.333；cos=0.935040；r=0.920292；W1raw=7.484421；W1norm=0.060949
+  平均谱：MSE=86.4858；cos=0.991778；r=0.990077
+  多样性MSE：train=633.442；generated=504.137；ratio=0.7959；Pearson-distance ratio=0.7080
+  负值：min=-49.331；<-40点=0.015346%；<-40光谱=5.000%
+  QQ尾宽/oracle上界：lower=0.7644/1.1481；upper=0.8679/1.3098；overrun=False
+[120/126] DEL-S_water：MSE=868.033；cos=0.917748；r=0.902030；W1raw=8.415516；W1norm=0.060163
+  平均谱：MSE=100.938；cos=0.978592；r=0.975377
+  多样性MSE：train=1215.97；generated=957.487；ratio=0.7874；Pearson-distance ratio=0.8535
+  负值：min=-99.163；<-40点=0.214847%；<-40光谱=18.000%
+  QQ尾宽/oracle上界：lower=0.8497/1.3110；upper=0.9255/1.1492；overrun=False
+[121/126] TEB-H_soil：MSE=79.7873；cos=0.995726；r=0.995190；W1raw=4.472595；W1norm=0.024187
+  平均谱：MSE=49.6871；cos=0.998558；r=0.998405
+  多样性MSE：train=126.671；generated=108.811；ratio=0.8590；Pearson-distance ratio=0.7798
+  负值：min=-45.480；<-40点=0.008922%；<-40光谱=4.000%
+  QQ尾宽/oracle上界：lower=0.8336/1.1213；upper=0.9175/1.1738；overrun=False
+[122/126] TEB-H_water：MSE=90.7318；cos=0.994616；r=0.993983；W1raw=4.089769；W1norm=0.022874
+  平均谱：MSE=46.555；cos=0.997255；r=0.996919
+  多样性MSE：train=131.554；generated=100.252；ratio=0.7621；Pearson-distance ratio=0.7963
+  负值：min=-44.435；<-40点=0.003926%；<-40光谱=2.500%
+  QQ尾宽/oracle上界：lower=0.9277/1.1292；upper=0.9617/1.1490；overrun=False
+[123/126] TEB-M_soil：MSE=101.921；cos=0.990056；r=0.988744；W1raw=3.806520；W1norm=0.028905
+  平均谱：MSE=25.6411；cos=0.997180；r=0.996784
+  多样性MSE：train=118.056；generated=93.9934；ratio=0.7962；Pearson-distance ratio=0.7806
+  负值：min=-37.429；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.9714/1.1154；upper=0.7828/1.1126；overrun=False
+[124/126] TEB-M_water：MSE=106.727；cos=0.987715；r=0.986212；W1raw=3.639578；W1norm=0.029740
+  平均谱：MSE=19.9881；cos=0.997828；r=0.997545
+  多样性MSE：train=122.381；generated=112.557；ratio=0.9197；Pearson-distance ratio=0.8995
+  负值：min=-35.513；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.9897/1.1004；upper=1.0097/1.1330；overrun=False
+[125/126] TEB-S_soil：MSE=90.7703；cos=0.965069；r=0.959983；W1raw=3.754481；W1norm=0.049216
+  平均谱：MSE=24.0545；cos=0.987703；r=0.985982
+  多样性MSE：train=136.046；generated=112.483；ratio=0.8268；Pearson-distance ratio=0.7552
+  负值：min=-34.603；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=0.8292/1.1501；upper=1.0322/1.1246；overrun=False
+[126/126] TEB-S_water：MSE=128.509；cos=0.939935；r=0.931851；W1raw=4.153213；W1norm=0.070046
+  平均谱：MSE=47.2115；cos=0.992398；r=0.991193
+  多样性MSE：train=135.243；generated=98.3914；ratio=0.7275；Pearson-distance ratio=0.7452
+  负值：min=-31.201；<-40点=0.000000%；<-40光谱=0.000%
+  QQ尾宽/oracle上界：lower=1.0929/1.1155；upper=0.8588/1.1145；overrun=False
+===== 评价完成 =====
+逐条件指标：/home/wqzheng/project/outputs/experiments/d4_3_2_fidelity_tail_control_formal/metrics_all126_from_d431_20260913/condition_metrics.csv
+总体统计：/home/wqzheng/project/outputs/experiments/d4_3_2_fidelity_tail_control_formal/metrics_all126_from_d431_20260913/overall_metric_summary.csv
+QQ图：/home/wqzheng/project/outputs/experiments/d4_3_2_fidelity_tail_control_formal/metrics_all126_from_d431_20260913/qq_plots
+QQ分层汇总：/home/wqzheng/project/outputs/experiments/d4_3_2_fidelity_tail_control_formal/metrics_all126_from_d431_20260913/qq_stratified_summary.csv
+报告：/home/wqzheng/project/outputs/experiments/d4_3_2_fidelity_tail_control_formal/metrics_all126_from_d431_20260913/evaluation_report.txt
