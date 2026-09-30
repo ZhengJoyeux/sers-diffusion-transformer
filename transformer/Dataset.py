@@ -6,8 +6,8 @@ Engineering adaptations only (not paper-method innovations):
 - read D4.24 generated spectra from data/generated
 - fixed 12/4/4 real split per source file
 - generated spectra are training-only
-- unify all model inputs to the common measured range 600-2000 cm^-1 (1401 points)
-- keep valid_mask support for safety, while preventing Raman-length/CHL label leakage
+- use a uniform 600-2500 cm^-1 model axis (1901 points)
+- require every real source spectrum to genuinely cover the full model range
 - preserve negative baseline-corrected SERS values with signed-log1p preprocessing
 
 The output order of pesticide targets is always: [DEL, CHL, TEB].
@@ -16,6 +16,7 @@ The output order of pesticide targets is always: [DEL, CHL, TEB].
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -36,10 +37,31 @@ PESTICIDES = ("DEL", "CHL", "TEB")
 PESTICIDE_TO_INDEX = {name: index for index, name in enumerate(PESTICIDES)}
 LEVEL_TO_CODE = {"S": 1.0, "M": 2.0, "H": 3.0}
 
-MODEL_RAMAN_AXIS = np.arange(600.0, 2000.0 + 1.0, 1.0, dtype=np.float32)
+MODEL_RAMAN_AXIS = np.arange(600.0, 2500.0 + 1.0, 1.0, dtype=np.float32)
 MODEL_LENGTH = int(MODEL_RAMAN_AXIS.size)
-if MODEL_LENGTH != 1401:
-    raise RuntimeError(f"Unexpected common-axis Raman length: {MODEL_LENGTH}")
+if MODEL_LENGTH != 1901:
+    raise RuntimeError(f"Unexpected full-axis Raman length: {MODEL_LENGTH}")
+
+FULL_AXIS_COVERAGE_TOLERANCE_CM1 = 1.0
+DEFAULT_CORE_PEAK_HALF_WIDTH_CM1 = 7.0
+DEFAULT_AUXILIARY_PRIOR_MAX_WEIGHT = 0.35
+DEFAULT_SHARED_CORE_PEAK_WEIGHT = 0.65
+
+# User-specified chemistry anchors.
+# +/-7 cm^-1 is the current initial peak-shift tolerance.
+CHEMISTRY_CORE_PEAKS: dict[str, tuple[dict[str, float | str], ...]] = {
+    "DEL": (
+        {"center_cm-1": 1000.0, "role": "strong"},
+        {"center_cm-1": 1600.0, "role": "shared"},
+    ),
+    "CHL": (
+        {"center_cm-1": 2230.0, "role": "strong"},
+    ),
+    "TEB": (
+        {"center_cm-1": 1090.0, "role": "strong"},
+        {"center_cm-1": 1597.0, "role": "shared"},
+    ),
+}
 
 REAL_TRAIN_INDICES = tuple(range(0, 12))
 REAL_VALIDATION_INDICES = tuple(range(12, 16))
@@ -69,9 +91,9 @@ def load_concentration_map(path: str | Path | None) -> dict[str, dict[str, float
 
     Expected JSON structure:
     {
-      "DEL": {"S": 1.0, "M": 10.0, "H": 100.0},
-      "CHL": {"S": ..., "M": ..., "H": ...},
-      "TEB": {"S": ..., "M": ..., "H": ...}
+        "DEL": {"S": 1.0, "M": 10.0, "H": 100.0},
+        "CHL": {"S": ..., "M": ..., "H": ...},
+        "TEB": {"S": ..., "M": ..., "H": ...}
     }
 
     If path is None, concentration_target uses level codes 0/1/2/3 only.
@@ -240,9 +262,9 @@ def _preprocess_spectrum(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Produce the three SERSFormer2 input branches:
-      raw        : [1, 1401], valid-region min-max after signed-log1p
-      percentile : [4, 1401], 95/85/75/50 percentile feature channels
-      smoothed   : [1, 1401], Hann-smoothed signed-log1p signal
+      raw        : [1, 1901], valid-region min-max after signed-log1p
+      percentile : [4, 1901], 95/85/75/50 percentile feature channels
+      smoothed   : [1, 1901], Hann-smoothed signed-log1p signal
 
     signed-log1p is used instead of the upstream "x>1 else 0.001" rule because
     these baseline-corrected SERS spectra legitimately contain negative values.
@@ -288,6 +310,711 @@ def _preprocess_spectrum(
     return raw[np.newaxis, :], percentile_channels, smoothed[np.newaxis, :]
 
 
+def _stable_noise_seed(
+    source_key: str,
+    spectrum_index: int,
+) -> int:
+    """Return a deterministic seed for one real mapping spectrum."""
+    payload = (
+        f"sersformer-noise-tail-v1|{source_key}|{int(spectrum_index)}"
+    ).encode("utf-8")
+
+    digest = hashlib.sha256(payload).digest()
+
+    return int.from_bytes(
+        digest[:8],
+        byteorder="little",
+        signed=False,
+    )
+
+
+def _estimate_background_noise_sigma(
+    axis: np.ndarray,
+    spectrum: np.ndarray,
+) -> tuple[float, float]:
+    """
+    Estimate background level and noise scale from the measured spectrum.
+
+    The noise scale is estimated from residuals after Savitzky-Golay smoothing.
+    Large residuals and the manually specified chemistry-core regions are
+    excluded so obvious Raman peaks do not inflate the synthetic-tail noise.
+    """
+    axis = np.asarray(axis, dtype=np.float64)
+    spectrum = np.asarray(spectrum, dtype=np.float64)
+
+    if spectrum.size < 31:
+        raise ValueError(
+            "At least 31 measured points are required for "
+            "background-noise estimation."
+        )
+
+    # Smooth only to estimate local background/noise.
+    window = min(51, int(spectrum.size))
+
+    if window % 2 == 0:
+        window -= 1
+
+    window = max(window, 7)
+
+    smooth = signal.savgol_filter(
+        spectrum,
+        window_length=window,
+        polyorder=2,
+        mode="interp",
+    )
+
+    residual = spectrum - smooth
+
+    candidate = np.ones(
+        spectrum.shape,
+        dtype=np.bool_,
+    )
+
+    # Do not use known chemistry-core regions when estimating background noise.
+    for pesticide in PESTICIDES:
+        for item in CHEMISTRY_CORE_PEAKS[pesticide]:
+            center = float(item["center_cm-1"])
+
+            candidate &= ~(
+                (axis >= center - 20.0)
+                & (axis <= center + 20.0)
+            )
+
+    candidate_residual = residual[candidate]
+
+    if candidate_residual.size < 20:
+        candidate_residual = residual
+
+    # Remove strong residual excursions: retain the quieter 60% of points.
+    absolute_residual = np.abs(
+        candidate_residual
+        - np.median(candidate_residual)
+    )
+
+    cutoff = float(
+        np.quantile(
+            absolute_residual,
+            0.60,
+        )
+    )
+
+    quiet = candidate_residual[
+        absolute_residual <= cutoff
+    ]
+
+    if quiet.size < 20:
+        quiet = candidate_residual
+
+    median_residual = float(
+        np.median(quiet)
+    )
+
+    mad = float(
+        np.median(
+            np.abs(
+                quiet - median_residual
+            )
+        )
+    )
+
+    sigma = 1.4826 * mad
+
+    # Numerical fallback only.
+    if not np.isfinite(sigma) or sigma <= 1.0e-8:
+        sigma = float(
+            np.std(quiet)
+        )
+
+    if not np.isfinite(sigma) or sigma <= 1.0e-8:
+        sigma = 1.0e-6
+
+    # Tail background level comes from the final measured region.
+    # This avoids forcing the synthetic tail to zero.
+    trailing_points = min(
+        100,
+        int(smooth.size),
+    )
+
+    background_level = float(
+        np.median(
+            smooth[-trailing_points:]
+        )
+    )
+
+    return background_level, sigma
+
+
+def _impute_missing_2000_2500_tail_with_noise(
+    axis: np.ndarray,
+    spectra: np.ndarray,
+    *,
+    source_key: str,
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """
+    Extend ONLY genuine 600-2000 cm^-1 real spectra to 2500 cm^-1.
+
+    Existing 600-2000 values are preserved.
+    Existing 600-2500 spectra are returned unchanged.
+
+    Missing 2001-2500 points are filled with deterministic correlated
+    background noise whose scale is estimated independently from each
+    measured spectrum.
+
+    Returns:
+        axis_out,
+        spectra_out,
+        tail_imputed
+    """
+    axis = np.asarray(
+        axis,
+        dtype=np.float64,
+    )
+
+    spectra = np.asarray(
+        spectra,
+        dtype=np.float64,
+    )
+
+    if spectra.ndim != 2:
+        raise ValueError(
+            f"Expected spectra matrix [points, spectra], got {spectra.shape}"
+        )
+
+    # --------------------------------------------------------
+    # Case 1:
+    # Already contains genuine 600-2500 data -> DO NOTHING.
+    # --------------------------------------------------------
+    if (
+        float(axis[0])
+        <= 600.0 + FULL_AXIS_COVERAGE_TOLERANCE_CM1
+        and float(axis[-1])
+        >= 2500.0 - FULL_AXIS_COVERAGE_TOLERANCE_CM1
+    ):
+        return (
+            axis.astype(np.float32, copy=False),
+            spectra.astype(np.float32, copy=False),
+            False,
+        )
+
+    # --------------------------------------------------------
+    # Case 2:
+    # The intended special case: genuine 600-2000 data.
+    # Only this case is allowed to use noise-tail imputation.
+    # --------------------------------------------------------
+    if not (
+        float(axis[0])
+        <= 600.0 + FULL_AXIS_COVERAGE_TOLERANCE_CM1
+        and 1999.0
+        <= float(axis[-1])
+        <= 2001.0
+    ):
+        raise RuntimeError(
+            "Noise-tail imputation is only allowed for real spectra "
+            "that genuinely cover approximately 600-2000 cm^-1. "
+            f"Received axis {float(axis[0]):.1f}-"
+            f"{float(axis[-1]):.1f} cm^-1 "
+            f"({int(axis.size)} points)."
+        )
+
+    measured_axis = MODEL_RAMAN_AXIS[
+        MODEL_RAMAN_AXIS <= 2000.0
+    ]
+
+    tail_axis = MODEL_RAMAN_AXIS[
+        MODEL_RAMAN_AXIS > 2000.0
+    ]
+
+    number_of_spectra = int(
+        spectra.shape[1]
+    )
+
+    output = np.empty(
+        (
+            MODEL_LENGTH,
+            number_of_spectra,
+        ),
+        dtype=np.float32,
+    )
+
+    # Preserve/interpolate the genuinely measured 600-2000 range only.
+    for spectrum_index in range(number_of_spectra):
+        measured = np.interp(
+            measured_axis.astype(np.float64),
+            axis,
+            spectra[:, spectrum_index],
+        )
+
+        output[
+            : measured_axis.size,
+            spectrum_index,
+        ] = measured.astype(
+            np.float32
+        )
+
+        background_level, sigma = (
+            _estimate_background_noise_sigma(
+                axis,
+                spectra[:, spectrum_index],
+            )
+        )
+
+        seed = _stable_noise_seed(
+            source_key,
+            spectrum_index,
+        )
+
+        rng = np.random.default_rng(
+            seed
+        )
+
+        # Estimate short-range correlation from measured background residuals.
+        window = min(
+            51,
+            int(axis.size),
+        )
+
+        if window % 2 == 0:
+            window -= 1
+
+        window = max(
+            window,
+            7,
+        )
+
+        smooth = signal.savgol_filter(
+            spectra[:, spectrum_index].astype(
+                np.float64
+            ),
+            window_length=window,
+            polyorder=2,
+            mode="interp",
+        )
+
+        residual = (
+            spectra[:, spectrum_index].astype(
+                np.float64
+            )
+            - smooth
+        )
+
+        if residual.size >= 3:
+            x = residual[:-1]
+            y = residual[1:]
+
+            denominator = float(
+                np.sqrt(
+                    np.sum(x * x)
+                    * np.sum(y * y)
+                )
+            )
+
+            if denominator > 1.0e-12:
+                rho = float(
+                    np.sum(x * y)
+                    / denominator
+                )
+            else:
+                rho = 0.0
+        else:
+            rho = 0.0
+
+        # Avoid producing unrealistic long-memory random walks.
+        rho = float(
+            np.clip(
+                rho,
+                -0.60,
+                0.60,
+            )
+        )
+
+        white_sigma = float(
+            sigma
+            * np.sqrt(
+                max(
+                    1.0 - rho * rho,
+                    1.0e-6,
+                )
+            )
+        )
+
+        tail_noise = np.zeros(
+            tail_axis.size,
+            dtype=np.float64,
+        )
+
+        tail_noise[0] = rng.normal(
+            0.0,
+            sigma,
+        )
+
+        for point_index in range(
+            1,
+            tail_noise.size,
+        ):
+            tail_noise[point_index] = (
+                rho
+                * tail_noise[
+                    point_index - 1
+                ]
+                + rng.normal(
+                    0.0,
+                    white_sigma,
+                )
+            )
+
+        # Blend the baseline from the measured 2000 cm^-1 end point
+        # toward the estimated local background. This avoids a sharp
+        # discontinuity exactly at 2000/2001 cm^-1.
+        measured_end = float(
+            measured[-1]
+        )
+
+        blend_length = min(
+            30,
+            int(tail_axis.size),
+        )
+
+        baseline = np.full(
+            tail_axis.size,
+            background_level,
+            dtype=np.float64,
+        )
+
+        if blend_length > 0:
+            baseline[:blend_length] = np.linspace(
+                measured_end,
+                background_level,
+                blend_length,
+                endpoint=True,
+            )
+
+        synthetic_tail = (
+            baseline
+            + tail_noise
+        )
+
+        output[
+            measured_axis.size:,
+            spectrum_index,
+        ] = synthetic_tail.astype(
+            np.float32
+        )
+
+    return (
+        MODEL_RAMAN_AXIS.copy(),
+        output,
+        True,
+    )
+
+
+
+
+def _classify_raw_axis_coverage(
+    axis: np.ndarray,
+) -> str:
+    """
+    Classify the ORIGINAL file Raman coverage before runtime imputation.
+
+    Returns:
+        "full_2500"  : approximately 600-2500 cm^-1
+        "short_2000" : approximately 600-2000 cm^-1
+        "other"      : unexpected range; never silently imputed
+    """
+    axis = np.asarray(
+        axis,
+        dtype=np.float64,
+    )
+
+    if axis.size < 2:
+        return "other"
+
+    start = float(axis[0])
+    end = float(axis[-1])
+
+    start_ok = (
+        abs(
+            start
+            - float(MODEL_RAMAN_AXIS[0])
+        )
+        <= FULL_AXIS_COVERAGE_TOLERANCE_CM1
+    )
+
+    if (
+        start_ok
+        and end
+        >= float(MODEL_RAMAN_AXIS[-1])
+        - FULL_AXIS_COVERAGE_TOLERANCE_CM1
+    ):
+        return "full_2500"
+
+    if (
+        start_ok
+        and 1999.0
+        <= end
+        <= 2001.0
+    ):
+        return "short_2000"
+
+    return "other"
+
+
+def _audit_raw_input_root(
+    root: Path,
+    source_name: str,
+) -> dict[str, Any]:
+    """
+    Scan every ORIGINAL input table before runtime completion.
+
+    Important:
+    - every spectrum column is counted;
+    - nothing is written back to disk;
+    - this audit happens before any 2001-2500 tail is synthesized.
+    """
+    root = Path(root)
+
+    if not root.exists():
+        raise FileNotFoundError(
+            f"{source_name} data root does not exist: {root}"
+        )
+
+    files = _collect_table_files(root)
+
+    file_count = 0
+    spectrum_count = 0
+
+    short_file_count = 0
+    short_spectrum_count = 0
+
+    full_file_count = 0
+    full_spectrum_count = 0
+
+    point_count_distribution: dict[int, int] = {}
+    short_files: list[str] = []
+    unexpected_files: list[str] = []
+
+    for file_path in files:
+        axis, spectra, _ = _read_table(
+            file_path
+        )
+
+        number_of_spectra = int(
+            spectra.shape[1]
+        )
+
+        file_count += 1
+        spectrum_count += number_of_spectra
+
+        points = int(axis.size)
+
+        point_count_distribution[points] = (
+            point_count_distribution.get(
+                points,
+                0,
+            )
+            + 1
+        )
+
+        coverage = (
+            _classify_raw_axis_coverage(
+                axis
+            )
+        )
+
+        if coverage == "short_2000":
+            short_file_count += 1
+            short_spectrum_count += (
+                number_of_spectra
+            )
+
+            short_files.append(
+                f"{file_path}: "
+                f"{float(axis[0]):.1f}-"
+                f"{float(axis[-1]):.1f} cm^-1, "
+                f"{points} points, "
+                f"{number_of_spectra} spectra"
+            )
+
+        elif coverage == "full_2500":
+            full_file_count += 1
+            full_spectrum_count += (
+                number_of_spectra
+            )
+
+        else:
+            unexpected_files.append(
+                f"{file_path}: "
+                f"{float(axis[0]):.1f}-"
+                f"{float(axis[-1]):.1f} cm^-1, "
+                f"{points} points, "
+                f"{number_of_spectra} spectra"
+            )
+
+    return {
+        "source": source_name,
+        "root": str(root),
+        "file_count": int(file_count),
+        "spectrum_count": int(
+            spectrum_count
+        ),
+        "short_axis_file_count": int(
+            short_file_count
+        ),
+        "short_axis_spectrum_count": int(
+            short_spectrum_count
+        ),
+        "full_axis_file_count": int(
+            full_file_count
+        ),
+        "full_axis_spectrum_count": int(
+            full_spectrum_count
+        ),
+        "point_count_distribution": {
+            str(key): int(value)
+            for key, value
+            in sorted(
+                point_count_distribution.items()
+            )
+        },
+        "short_files": short_files,
+        "unexpected_files": (
+            unexpected_files
+        ),
+    }
+
+
+def audit_input_axis_coverage(
+    real_root: str | Path = REAL_DATA_ROOT,
+    generated_root: str | Path = GENERATED_DATA_ROOT,
+) -> dict[str, Any]:
+    """
+    Audit ALL real and generated RAW spectra before training.
+
+    Short 600-2000 spectra are only reported here.
+    Actual completion happens later during Dataset loading.
+    """
+    real_summary = (
+        _audit_raw_input_root(
+            Path(real_root),
+            "real",
+        )
+    )
+
+    generated_summary = (
+        _audit_raw_input_root(
+            Path(generated_root),
+            "generated",
+        )
+    )
+
+    print()
+    print(
+        "========================================"
+    )
+    print(
+        "RAW INPUT AXIS AUDIT BEFORE "
+        "RUNTIME TAIL IMPUTATION"
+    )
+    print(
+        "========================================"
+    )
+
+    for summary in (
+        real_summary,
+        generated_summary,
+    ):
+        print()
+        print(
+            f"[{summary['source'].upper()}]"
+        )
+
+        print(
+            "files                 =",
+            summary["file_count"],
+        )
+
+        print(
+            "spectra               =",
+            summary["spectrum_count"],
+        )
+
+        print(
+            "point counts          =",
+            summary[
+                "point_count_distribution"
+            ],
+        )
+
+        print(
+            "full-axis files       =",
+            summary[
+                "full_axis_file_count"
+            ],
+        )
+
+        print(
+            "full-axis spectra     =",
+            summary[
+                "full_axis_spectrum_count"
+            ],
+        )
+
+        print(
+            "short-axis files      =",
+            summary[
+                "short_axis_file_count"
+            ],
+        )
+
+        print(
+            "short-axis spectra    =",
+            summary[
+                "short_axis_spectrum_count"
+            ],
+        )
+
+        print(
+            "spectra needing tail  =",
+            summary[
+                "short_axis_spectrum_count"
+            ],
+        )
+
+    unexpected = (
+        real_summary["unexpected_files"]
+        + generated_summary[
+            "unexpected_files"
+        ]
+    )
+
+    if unexpected:
+        preview = "\n".join(
+            f"  - {item}"
+            for item in unexpected[:50]
+        )
+
+        raise RuntimeError(
+            "Found Raman-axis ranges other than "
+            "approximately 600-2000 or 600-2500 cm^-1. "
+            "These files will NOT be silently completed:\n"
+            + preview
+        )
+
+    print()
+    print(
+        "RAW INPUT AXIS AUDIT: PASS"
+    )
+    print(
+        "No Excel/CSV file has been modified."
+    )
+    print(
+        "========================================"
+    )
+
+    return {
+        "real": real_summary,
+        "generated": generated_summary,
+    }
+
 class SERSDataRepository:
     """Load and validate real/generated condition tables once."""
 
@@ -302,8 +1029,30 @@ class SERSDataRepository:
         self.concentration_map = concentration_map
         self.target_mode = "physical" if concentration_map is not None else "level_code"
 
+        # ----------------------------------------------------
+        # RAW audit BEFORE any runtime tail imputation.
+        # This runs every time training constructs a repository.
+        # ----------------------------------------------------
+        self.input_axis_audit = audit_input_axis_coverage(
+            real_root=self.real_root,
+            generated_root=self.generated_root,
+        )
+
         self.real_data: dict[str, dict[str, Any]] = {}
         self.generated_data: dict[str, dict[str, Any]] | None = None
+
+        self.generated_tail_imputation_summary: dict[str, Any] = {
+            "method": "deterministic_background_noise_tail",
+            "range_cm-1": [2001.0, 2500.0],
+            "imputed_file_count": 0,
+            "imputed_spectrum_count": 0,
+            "note": (
+                "Generated short-axis spectra are completed "
+                "in memory during dataset loading. "
+                "Original files remain unchanged."
+            ),
+        }
+
         self._load_real_data()
 
     def _load_real_data(self) -> None:
@@ -311,12 +1060,37 @@ class SERSDataRepository:
         if len(files) != 126:
             raise RuntimeError(f"Expected 126 real source files, found {len(files)}")
 
+        imputed_full_axis: list[str] = []
+
         for path in files:
             condition = _condition_from_real_path(path)
             if condition in self.real_data:
                 raise RuntimeError(f"Duplicate real condition: {condition}")
 
             axis, spectra, names = _read_table(path)
+
+            original_axis_start = float(axis[0])
+            original_axis_end = float(axis[-1])
+            original_axis_points = int(axis.size)
+
+            axis, spectra, tail_imputed = (
+                _impute_missing_2000_2500_tail_with_noise(
+                    axis,
+                    spectra,
+                    source_key=str(path),
+                )
+            )
+
+            if tail_imputed:
+                imputed_full_axis.append(
+                    f"{path}: "
+                    f"{original_axis_start:.1f}-"
+                    f"{original_axis_end:.1f} cm^-1 "
+                    f"({original_axis_points} points) "
+                    f"-> 600.0-2500.0 cm^-1 "
+                    f"({MODEL_LENGTH} points)"
+                )
+
             if spectra.shape[1] != 20:
                 raise RuntimeError(
                     f"Each real source file must contain 20 spectra: {path}; "
@@ -333,6 +1107,31 @@ class SERSDataRepository:
                 "condition_info": info,
             }
 
+        self.tail_imputation_summary = {
+            "method": "deterministic_background_noise_tail",
+            "range_cm-1": [2001.0, 2500.0],
+            "imputed_file_count": int(len(imputed_full_axis)),
+            "imputed_files": list(imputed_full_axis),
+            "note": (
+                "Only real source files ending near 2000 cm^-1 are extended. "
+                "Existing genuine 600-2500 cm^-1 files are unchanged."
+            ),
+        }
+
+        if imputed_full_axis:
+            print(
+                "===== Real-spectrum noise-tail imputation ====="
+            )
+            print(
+                f"imputed files: {len(imputed_full_axis)}"
+            )
+            print(
+                "range: 2001-2500 cm^-1"
+            )
+            print(
+                "method: deterministic background-matched noise"
+            )
+
     def load_generated_data(self, require_complete: bool = True) -> None:
         if self.generated_data is not None:
             if require_complete and len(self.generated_data) != 126:
@@ -344,6 +1143,9 @@ class SERSDataRepository:
         files = _collect_table_files(self.generated_root)
         generated: dict[str, dict[str, Any]] = {}
 
+        imputed_generated_files = 0
+        imputed_generated_spectra = 0
+
         for path in files:
             condition = _condition_from_generated_path(path)
             if condition not in self.real_data:
@@ -354,15 +1156,81 @@ class SERSDataRepository:
                 raise RuntimeError(f"Duplicate generated condition: {condition}")
 
             axis, spectra, names = _read_table(path)
+
+            original_coverage = (
+                _classify_raw_axis_coverage(
+                    axis
+                )
+            )
+
+            original_number_of_spectra = int(
+                spectra.shape[1]
+            )
+
+            axis, spectra, tail_imputed = (
+                _impute_missing_2000_2500_tail_with_noise(
+                    axis,
+                    spectra,
+                    source_key=f"generated|{path}",
+                )
+            )
+
+            if tail_imputed:
+                imputed_generated_files += 1
+                imputed_generated_spectra += (
+                    original_number_of_spectra
+                )
+
             generated[condition] = {
                 "path": path,
                 "axis": axis,
                 "spectra": spectra,
                 "names": names,
+                "original_axis_coverage": original_coverage,
+                "tail_imputed": bool(
+                    tail_imputed
+                ),
             }
 
         if require_complete and len(generated) != 126:
             raise RuntimeError(f"Generated set incomplete: {len(generated)}/126 conditions")
+
+        self.generated_tail_imputation_summary = {
+            "method": "deterministic_background_noise_tail",
+            "range_cm-1": [2001.0, 2500.0],
+            "imputed_file_count": int(
+                imputed_generated_files
+            ),
+            "imputed_spectrum_count": int(
+                imputed_generated_spectra
+            ),
+            "note": (
+                "Only generated source files ending near "
+                "2000 cm^-1 were completed. "
+                "Existing 600-2500 cm^-1 generated spectra "
+                "were left unchanged."
+            ),
+        }
+
+        print()
+        print(
+            "===== Generated-spectrum runtime "
+            "noise-tail imputation ====="
+        )
+        print(
+            "imputed files   =",
+            imputed_generated_files,
+        )
+        print(
+            "imputed spectra =",
+            imputed_generated_spectra,
+        )
+        print(
+            "range           = 2001-2500 cm^-1"
+        )
+        print(
+            "disk files      = unchanged"
+        )
 
         self.generated_data = generated
 
@@ -394,9 +1262,10 @@ def build_axis_label_audit(repository: SERSDataRepository) -> dict[str, Any]:
         "model_axis_end_cm-1": float(MODEL_RAMAN_AXIS[-1]),
         "model_axis_points": int(MODEL_LENGTH),
         "mitigation": (
-            "All model inputs are cropped/interpolated to the common 600-2000 cm^-1 "
-            "range, so source-axis length and the 2000-2500 cm^-1 acquisition tail "
-            "cannot be used as a pesticide-class cue."
+            "Before training, all raw real/generated source axes are audited. "
+            "Files genuinely ending near 2000 cm^-1 are completed only in memory "
+            "for 2001-2500 cm^-1 using deterministic background-matched noise. "
+            "Existing 600-2500 cm^-1 spectra are left unchanged."
         ),
     }
 
@@ -418,7 +1287,7 @@ def build_training_peak_priors(
     - validation/test spectra are never read for prior fitting;
     - generated spectra are never used for prior fitting.
 
-    The prior is not a hard spectral mask. It is a [3, 1401] non-negative
+    The prior is not a hard spectral mask. It is a [3, 1901] non-negative
     guidance map later added to attention logits. Consequently a pesticide
     query can still use every valid non-peak region.
 
@@ -610,10 +1479,683 @@ def build_training_peak_priors(
     return priors, summary
 
 
+def _training_condition_representative(
+    record: Mapping[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build one robust representative from the 12 real training mappings.
+
+    Mapping spectra from the same source condition are aggregated before any
+    cross-condition comparison. This avoids treating highly related mappings as
+    independent evidence when constructing a pesticide-specific spectral prior.
+    """
+    signals: list[np.ndarray] = []
+    masks: list[np.ndarray] = []
+
+    for spectrum_index in REAL_TRAIN_INDICES:
+        adapted, valid_mask = _adapt_spectrum_to_model_axis(
+            record["axis"],
+            record["spectra"][:, spectrum_index],
+        )
+        raw, _, _ = _preprocess_spectrum(adapted, valid_mask)
+        signals.append(raw[0].astype(np.float32, copy=False))
+        masks.append(valid_mask.astype(np.bool_, copy=False))
+
+    signal_matrix = np.stack(signals, axis=0).astype(np.float64)
+    valid_matrix = np.stack(masks, axis=0)
+    masked = np.where(valid_matrix, signal_matrix, np.nan)
+    with np.errstate(invalid="ignore"):
+        representative = np.nanmedian(masked, axis=0)
+    representative = np.nan_to_num(representative, nan=0.0).astype(np.float32)
+    valid = valid_matrix.any(axis=0)
+    return representative, valid
+
+
+def build_matched_condition_peak_priors(
+    repository: SERSDataRepository,
+    *,
+    top_k: int = 8,
+    min_peak_distance_cm1: float = 20.0,
+    peak_prominence: float = 0.02,
+    peak_half_width_cm1: float = 15.0,
+    min_matched_pairs: int = 4,
+    shared_peak_floor: float = 0.35,
+    excluded_intervals_cm1: tuple[tuple[float, float], ...] | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """
+    Build shared-aware soft priors from matched training conditions.
+
+    For pesticide p, a present condition is compared only with an available
+    condition having the same matrix and the same concentrations of the other
+    pesticides, but p=absent. Thus the spectral difference is much less
+    confounded by co-occurring pesticides than an all-positive vs all-negative
+    average.
+
+    The result is deliberately *not* an exclusive peak assignment. A Raman
+    region can be informative for DEL and TEB simultaneously. Specificity only
+    attenuates heavily shared regions; ``shared_peak_floor`` guarantees that a
+    genuinely shared/overlapping region can still guide multiple queries.
+
+    Leakage rules:
+    - only the 12 real training mappings are used;
+    - each source condition is first collapsed to one median representative;
+    - validation, test and generated spectra are never used.
+    """
+    if top_k <= 0:
+        raise ValueError("top_k must be positive")
+    if min_peak_distance_cm1 <= 0.0:
+        raise ValueError("min_peak_distance_cm1 must be positive")
+    if peak_prominence < 0.0:
+        raise ValueError("peak_prominence must be non-negative")
+    if peak_half_width_cm1 <= 0.0:
+        raise ValueError("peak_half_width_cm1 must be positive")
+    if min_matched_pairs <= 0:
+        raise ValueError("min_matched_pairs must be positive")
+    if not (0.0 <= shared_peak_floor <= 1.0):
+        raise ValueError("shared_peak_floor must be in [0, 1]")
+
+    excluded_intervals_cm1 = tuple(excluded_intervals_cm1 or ())
+
+    for lower, upper in excluded_intervals_cm1:
+        if not (
+            np.isfinite(lower)
+            and np.isfinite(upper)
+            and lower <= upper
+        ):
+            raise ValueError(
+                f"Invalid excluded Raman interval: {(lower, upper)}"
+            )
+
+    # One representative per condition, built from training mappings only.
+    representatives: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    condition_lookup: dict[tuple[str, tuple[int, ...]], str] = {}
+    for condition, record in repository.real_data.items():
+        info: ConditionInfo = record["condition_info"]
+        levels = tuple(int(round(float(v))) for v in info.level_codes.tolist())
+        key = (info.matrix_name, levels)
+        if key in condition_lookup:
+            raise RuntimeError(
+                "Matched-condition prior requires unique matrix/level conditions; "
+                f"duplicate key={key}"
+            )
+        condition_lookup[key] = condition
+        representatives[condition] = _training_condition_representative(record)
+
+    delta_profiles: list[np.ndarray] = []
+    valid_profiles: list[np.ndarray] = []
+    pair_descriptions: list[list[dict[str, Any]]] = []
+
+    for pesticide_index, pesticide in enumerate(PESTICIDES):
+        pesticide_deltas: list[np.ndarray] = []
+        pesticide_valids: list[np.ndarray] = []
+        pesticide_pairs: list[dict[str, Any]] = []
+
+        for present_condition, present_record in sorted(repository.real_data.items()):
+            present_info: ConditionInfo = present_record["condition_info"]
+            present_levels = np.asarray(present_info.level_codes, dtype=np.int64)
+            target_level = int(present_levels[pesticide_index])
+            if target_level <= 0:
+                continue
+
+            absent_levels = present_levels.copy()
+            absent_levels[pesticide_index] = 0
+
+            # The current 126-condition dataset has no all-absent blank. A
+            # single-pesticide condition therefore cannot form a matched pair
+            # and is intentionally omitted instead of using an unmatched blank.
+            absent_key = (
+                present_info.matrix_name,
+                tuple(int(v) for v in absent_levels.tolist()),
+            )
+            absent_condition = condition_lookup.get(absent_key)
+            if absent_condition is None:
+                continue
+
+            present_rep, present_valid = representatives[present_condition]
+            absent_rep, absent_valid = representatives[absent_condition]
+            common_valid = present_valid & absent_valid
+            if int(common_valid.sum()) < 2:
+                continue
+
+            delta = np.zeros(MODEL_LENGTH, dtype=np.float32)
+            delta[common_valid] = (
+                present_rep[common_valid] - absent_rep[common_valid]
+            )
+            pesticide_deltas.append(delta)
+            pesticide_valids.append(common_valid)
+            pesticide_pairs.append(
+                {
+                    "present_condition": present_condition,
+                    "matched_absent_condition": absent_condition,
+                    "target_level_code": target_level,
+                    "matrix": present_info.matrix_name,
+                }
+            )
+
+        if len(pesticide_deltas) < int(min_matched_pairs):
+            raise RuntimeError(
+                f"Only {len(pesticide_deltas)} matched pairs are available for "
+                f"{pesticide}; require at least {min_matched_pairs}."
+            )
+
+        delta_profiles.append(np.stack(pesticide_deltas, axis=0))
+        valid_profiles.append(np.stack(pesticide_valids, axis=0))
+        pair_descriptions.append(pesticide_pairs)
+
+    # First pass: robust target-sensitive effect and direction consistency.
+    effect_profiles = np.zeros((len(PESTICIDES), MODEL_LENGTH), dtype=np.float64)
+    consistency_profiles = np.zeros_like(effect_profiles)
+    support_profiles = np.zeros_like(effect_profiles)
+
+    for pesticide_index in range(len(PESTICIDES)):
+        deltas = delta_profiles[pesticide_index].astype(np.float64)
+        valids = valid_profiles[pesticide_index]
+        masked_abs = np.where(valids, np.abs(deltas), np.nan)
+        with np.errstate(invalid="ignore"):
+            effect = np.nanmedian(masked_abs, axis=0)
+        effect = np.nan_to_num(effect, nan=0.0)
+
+        valid_count = valids.sum(axis=0).astype(np.float64)
+        support = valid_count / float(max(deltas.shape[0], 1))
+
+        signs = np.sign(deltas)
+        signed_sum = (signs * valids).sum(axis=0, dtype=np.float64)
+        direction_consistency = np.divide(
+            np.abs(signed_sum),
+            valid_count,
+            out=np.zeros(MODEL_LENGTH, dtype=np.float64),
+            where=valid_count > 0,
+        )
+
+        effect_profiles[pesticide_index] = effect
+        consistency_profiles[pesticide_index] = direction_consistency
+        support_profiles[pesticide_index] = support
+
+    # Normalize each pesticide effect independently before estimating whether a
+    # region is pesticide-specific or shared. This prevents one globally
+    # stronger pesticide from suppressing all other priors.
+    effect_norm = np.zeros_like(effect_profiles)
+    for pesticide_index in range(len(PESTICIDES)):
+        maximum = float(effect_profiles[pesticide_index].max())
+        if maximum > 0.0:
+            effect_norm[pesticide_index] = effect_profiles[pesticide_index] / maximum
+
+    total_effect = effect_norm.sum(axis=0)
+    specificity = np.divide(
+        effect_norm,
+        total_effect[np.newaxis, :],
+        out=np.zeros_like(effect_norm),
+        where=total_effect[np.newaxis, :] > 1e-12,
+    )
+
+    axis_step = float(np.median(np.diff(MODEL_RAMAN_AXIS)))
+    distance_points = max(
+        1, int(round(float(min_peak_distance_cm1) / max(axis_step, 1e-8)))
+    )
+    gaussian_sigma = max(
+        float(peak_half_width_cm1) / 2.0 / max(axis_step, 1e-8), 1.0
+    )
+    gaussian_radius = max(2, int(round(3.0 * gaussian_sigma)))
+    kernel_x = np.arange(-gaussian_radius, gaussian_radius + 1, dtype=np.float64)
+    kernel = np.exp(-0.5 * (kernel_x / gaussian_sigma) ** 2)
+    kernel /= kernel.sum()
+    point_index = np.arange(MODEL_LENGTH, dtype=np.float64)
+
+    priors = np.zeros((len(PESTICIDES), MODEL_LENGTH), dtype=np.float32)
+    summary: dict[str, Any] = {
+        "method": "matched_condition_shared_aware",
+        "fit_source": "real training mappings only; one median representative per condition",
+        "real_training_indices": list(REAL_TRAIN_INDICES),
+        "parameters": {
+            "top_k": int(top_k),
+            "min_peak_distance_cm-1": float(min_peak_distance_cm1),
+            "peak_prominence": float(peak_prominence),
+            "peak_half_width_cm-1": float(peak_half_width_cm1),
+            "min_matched_pairs": int(min_matched_pairs),
+            "shared_peak_floor": float(shared_peak_floor),
+            "excluded_intervals_cm-1": [
+                [float(lower), float(upper)]
+                for lower, upper in excluded_intervals_cm1
+            ],
+        },
+        "interpretation": (
+            "Selected regions are pesticide-sensitive spectral evidence, not "
+            "chemically exclusive peak assignments. Shared regions remain usable "
+            "by multiple pesticide queries."
+        ),
+        "pesticides": {},
+    }
+
+    for pesticide_index, pesticide in enumerate(PESTICIDES):
+        smooth_effect = np.convolve(
+            effect_norm[pesticide_index], kernel, mode="same"
+        )
+        candidates, _ = signal.find_peaks(
+            smooth_effect,
+            distance=distance_points,
+            prominence=float(peak_prominence),
+        )
+        if candidates.size == 0:
+            candidates, _ = signal.find_peaks(
+                smooth_effect,
+                distance=distance_points,
+            )
+        if candidates.size == 0:
+            candidates = np.asarray(
+                [int(np.argmax(smooth_effect))], dtype=np.int64
+            )
+
+        if excluded_intervals_cm1:
+            candidate_shifts = MODEL_RAMAN_AXIS[candidates].astype(
+                np.float64
+            )
+            keep = np.ones(
+                candidates.shape,
+                dtype=np.bool_,
+            )
+
+            for lower, upper in excluded_intervals_cm1:
+                keep &= ~(
+                    (candidate_shifts >= float(lower))
+                    & (candidate_shifts <= float(upper))
+                )
+
+            candidates = candidates[keep]
+
+            if candidates.size == 0:
+                allowed = np.ones(
+                    MODEL_LENGTH,
+                    dtype=np.bool_,
+                )
+
+                for lower, upper in excluded_intervals_cm1:
+                    allowed &= ~(
+                        (MODEL_RAMAN_AXIS >= float(lower))
+                        & (MODEL_RAMAN_AXIS <= float(upper))
+                    )
+
+                if not bool(allowed.any()):
+                    raise RuntimeError(
+                        "All Raman positions were excluded "
+                        "from auxiliary peak search"
+                    )
+
+                masked_effect = np.where(
+                    allowed,
+                    smooth_effect,
+                    -np.inf,
+                )
+
+                candidates = np.asarray(
+                    [int(np.argmax(masked_effect))],
+                    dtype=np.int64,
+                )
+
+        prominences = signal.peak_prominences(
+            smooth_effect,
+            candidates,
+        )[0]
+        consistency_factor = 0.5 + 0.5 * consistency_profiles[
+            pesticide_index, candidates
+        ]
+        specificity_factor = (
+            float(shared_peak_floor)
+            + (1.0 - float(shared_peak_floor))
+            * specificity[pesticide_index, candidates]
+        )
+        ranking = (
+            prominences
+            * effect_norm[pesticide_index, candidates]
+            * consistency_factor
+            * specificity_factor
+            * support_profiles[pesticide_index, candidates]
+        )
+
+        order = np.argsort(ranking)[::-1][: int(top_k)]
+        selected = candidates[order]
+        selected_scores = ranking[order]
+        score_max = float(selected_scores.max()) if selected_scores.size else 0.0
+        if score_max > 0.0:
+            selected_weights = selected_scores / score_max
+        else:
+            selected_weights = np.ones_like(selected_scores, dtype=np.float64)
+
+        prior = np.zeros(MODEL_LENGTH, dtype=np.float64)
+        selected_evidence: list[dict[str, Any]] = []
+        for rank, (center_index, weight) in enumerate(
+            zip(selected, selected_weights, strict=True), start=1
+        ):
+            gaussian = np.exp(
+                -0.5 * ((point_index - float(center_index)) / gaussian_sigma) ** 2
+            )
+            prior = np.maximum(prior, float(weight) * gaussian)
+            selected_evidence.append(
+                {
+                    "rank": int(rank),
+                    "raman_shift_cm-1": float(MODEL_RAMAN_AXIS[center_index]),
+                    "prior_weight": float(weight),
+                    "matched_effect": float(effect_norm[pesticide_index, center_index]),
+                    "direction_consistency": float(
+                        consistency_profiles[pesticide_index, center_index]
+                    ),
+                    "specificity": float(specificity[pesticide_index, center_index]),
+                    "sharedness": float(1.0 - specificity[pesticide_index, center_index]),
+                    "support_fraction": float(
+                        support_profiles[pesticide_index, center_index]
+                    ),
+                }
+            )
+
+        prior_max = float(prior.max())
+        if prior_max > 0.0:
+            prior /= prior_max
+        priors[pesticide_index] = prior.astype(np.float32)
+
+        summary["pesticides"][pesticide] = {
+            "matched_pair_count": int(delta_profiles[pesticide_index].shape[0]),
+            "matched_pairs": pair_descriptions[pesticide_index],
+            "peak_centers_cm-1": [
+                float(MODEL_RAMAN_AXIS[index]) for index in selected.tolist()
+            ],
+            "peak_weights": [float(value) for value in selected_weights.tolist()],
+            "selected_evidence": selected_evidence,
+        }
+
+    return priors, summary
+
+
+def _chemistry_core_intervals(
+    half_width_cm1: float,
+) -> tuple[tuple[float, float], ...]:
+    intervals: list[tuple[float, float]] = []
+
+    for pesticide in PESTICIDES:
+        for item in CHEMISTRY_CORE_PEAKS[pesticide]:
+            center = float(item["center_cm-1"])
+            intervals.append(
+                (
+                    center - float(half_width_cm1),
+                    center + float(half_width_cm1),
+                )
+            )
+
+    return tuple(intervals)
+
+
+def _truncated_core_gaussian(
+    center_cm1: float,
+    half_width_cm1: float,
+    weight: float,
+) -> np.ndarray:
+    if half_width_cm1 <= 0.0:
+        raise ValueError("core half-width must be positive")
+
+    sigma = max(
+        float(half_width_cm1) / 2.0,
+        1e-6,
+    )
+
+    distance = (
+        MODEL_RAMAN_AXIS.astype(np.float64)
+        - float(center_cm1)
+    )
+
+    inside = (
+        np.abs(distance)
+        <= float(half_width_cm1)
+    )
+
+    values = np.zeros(
+        MODEL_LENGTH,
+        dtype=np.float64,
+    )
+
+    values[inside] = np.exp(
+        -0.5
+        * np.square(
+            distance[inside] / sigma
+        )
+    )
+
+    maximum = float(values.max())
+
+    if maximum > 0.0:
+        values /= maximum
+
+    return (
+        float(weight) * values
+    ).astype(np.float32)
+
+
+def build_chemistry_hybrid_peak_priors(
+    repository: SERSDataRepository,
+    *,
+    core_half_width_cm1: float = DEFAULT_CORE_PEAK_HALF_WIDTH_CM1,
+    auxiliary_max_weight: float = DEFAULT_AUXILIARY_PRIOR_MAX_WEIGHT,
+    shared_core_weight: float = DEFAULT_SHARED_CORE_PEAK_WEIGHT,
+    top_k: int = 4,
+    min_peak_distance_cm1: float = 20.0,
+    peak_prominence: float = 0.02,
+    auxiliary_peak_half_width_cm1: float = 15.0,
+    min_matched_pairs: int = 4,
+    shared_peak_floor: float = 0.35,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """
+    Combine manually specified chemistry core peaks with
+    training-derived matched-condition auxiliary regions.
+
+    Core peaks:
+      DEL: 1000 and 1600 cm^-1
+      CHL: 2230 cm^-1
+      TEB: 1090 and 1597 cm^-1
+
+    The current permitted peak displacement is +/-7 cm^-1.
+
+    DEL ~1600 and TEB ~1597 are overlapping/shared evidence,
+    so their core prior uses shared_core_weight rather than 1.0.
+
+    matched_shared regions are only secondary data-driven
+    discriminative regions and are not treated as chemically
+    assigned characteristic peaks.
+    """
+    if core_half_width_cm1 <= 0.0:
+        raise ValueError(
+            "core_half_width_cm1 must be positive"
+        )
+
+    if not (
+        0.0
+        <= auxiliary_max_weight
+        <= 1.0
+    ):
+        raise ValueError(
+            "auxiliary_max_weight must be in [0, 1]"
+        )
+
+    if not (
+        0.0
+        <= shared_core_weight
+        <= 1.0
+    ):
+        raise ValueError(
+            "shared_core_weight must be in [0, 1]"
+        )
+
+    excluded_intervals = (
+        tuple(_chemistry_core_intervals(core_half_width_cm1))
+        + ((2000.000001, float(MODEL_RAMAN_AXIS[-1])),)
+    )
+
+    auxiliary_prior, auxiliary_summary = (
+        build_matched_condition_peak_priors(
+            repository,
+            top_k=top_k,
+            min_peak_distance_cm1=min_peak_distance_cm1,
+            peak_prominence=peak_prominence,
+            peak_half_width_cm1=auxiliary_peak_half_width_cm1,
+            min_matched_pairs=min_matched_pairs,
+            shared_peak_floor=shared_peak_floor,
+            excluded_intervals_cm1=excluded_intervals,
+        )
+    )
+
+    core_prior = np.zeros(
+        (len(PESTICIDES), MODEL_LENGTH),
+        dtype=np.float32,
+    )
+
+    hybrid_prior = np.zeros_like(
+        core_prior
+    )
+
+    pesticide_summary: dict[str, Any] = {}
+
+    for pesticide_index, pesticide in enumerate(
+        PESTICIDES
+    ):
+        core_entries: list[dict[str, Any]] = []
+
+        for item in CHEMISTRY_CORE_PEAKS[pesticide]:
+            center = float(
+                item["center_cm-1"]
+            )
+
+            role = str(
+                item["role"]
+            )
+
+            weight = float(
+                shared_core_weight
+                if role == "shared"
+                else 1.0
+            )
+
+            component = _truncated_core_gaussian(
+                center_cm1=center,
+                half_width_cm1=core_half_width_cm1,
+                weight=weight,
+            )
+
+            core_prior[pesticide_index] = np.maximum(
+                core_prior[pesticide_index],
+                component,
+            )
+
+            core_entries.append(
+                {
+                    "center_cm-1": center,
+                    "window_cm-1": [
+                        center
+                        - float(core_half_width_cm1),
+                        center
+                        + float(core_half_width_cm1),
+                    ],
+                    "role": role,
+                    "prior_weight": weight,
+                }
+            )
+
+        scaled_auxiliary = (
+            float(auxiliary_max_weight)
+            * auxiliary_prior[pesticide_index]
+        ).astype(np.float32)
+
+        hybrid_prior[pesticide_index] = np.maximum(
+            core_prior[pesticide_index],
+            scaled_auxiliary,
+        )
+
+        aux_info = auxiliary_summary[
+            "pesticides"
+        ][pesticide]
+
+        auxiliary_centers = [
+            float(value)
+            for value in aux_info[
+                "peak_centers_cm-1"
+            ]
+        ]
+
+        core_centers = [
+            float(item["center_cm-1"])
+            for item in core_entries
+        ]
+
+        pesticide_summary[pesticide] = {
+            "core_peaks": core_entries,
+            "core_peak_centers_cm-1": (
+                core_centers
+            ),
+            "auxiliary_peak_centers_cm-1": (
+                auxiliary_centers
+            ),
+            "peak_centers_cm-1": (
+                core_centers
+                + auxiliary_centers
+            ),
+            "matched_pair_count": int(
+                aux_info[
+                    "matched_pair_count"
+                ]
+            ),
+            "matched_pairs": aux_info[
+                "matched_pairs"
+            ],
+            "auxiliary_selected_evidence": (
+                aux_info[
+                    "selected_evidence"
+                ]
+            ),
+        }
+
+    summary: dict[str, Any] = {
+        "method": (
+            "chemistry_core_plus_"
+            "matched_auxiliary"
+        ),
+        "fit_source": (
+            "chemistry core centers are user-specified; "
+            "auxiliary regions use real training mappings "
+            "only; validation/test/generated excluded"
+        ),
+        "model_axis_cm-1": [
+            float(MODEL_RAMAN_AXIS[0]),
+            float(MODEL_RAMAN_AXIS[-1]),
+        ],
+        "parameters": {
+            "core_half_width_cm-1": float(
+                core_half_width_cm1
+            ),
+            "auxiliary_max_weight": float(
+                auxiliary_max_weight
+            ),
+            "shared_core_weight": float(
+                shared_core_weight
+            ),
+            "auxiliary_top_k": int(
+                top_k
+            ),
+            "auxiliary_peak_half_width_cm-1": float(
+                auxiliary_peak_half_width_cm1
+            ),
+        },
+        "interpretation": (
+            "Chemically specified core peaks are primary "
+            "soft anchors. Matched-condition peaks are "
+            "secondary data-driven discriminative regions "
+            "and are not asserted to be chemically assigned "
+            "characteristic peaks."
+        ),
+        "pesticides": pesticide_summary,
+        "auxiliary_summary": auxiliary_summary,
+    }
+
+    return hybrid_prior, summary
+
+
 class SERSDataset(Dataset):
     """
     Real-only validation/test; generated spectra may be added only to training.
-    All samples returned to the model use the common 600-2000 cm^-1 axis (1401 points).
+    All samples returned to the model use the full 600-2500 cm^-1 axis (1901 points).
     """
 
     def __init__(

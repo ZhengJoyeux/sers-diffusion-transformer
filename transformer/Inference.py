@@ -101,6 +101,38 @@ def _regression_metric_block(
     }
 
 
+def _safe_binary_auc(
+    truth: np.ndarray,
+    probability: np.ndarray,
+) -> float:
+    """Return NaN without sklearn warnings when a subset has only one class."""
+    truth = np.asarray(truth, dtype=np.int64).reshape(-1)
+    probability = np.asarray(probability, dtype=np.float64).reshape(-1)
+    if truth.size == 0 or np.unique(truth).size < 2:
+        return float("nan")
+    return float(roc_auc_score(truth, probability))
+
+
+def _safe_multilabel_auc(
+    y_true: np.ndarray,
+    probabilities: np.ndarray,
+    average: str,
+) -> float:
+    y_true = np.asarray(y_true, dtype=np.int64)
+    probabilities = np.asarray(probabilities, dtype=np.float64)
+    if average == "micro":
+        return _safe_binary_auc(y_true.reshape(-1), probabilities.reshape(-1))
+    if average != "macro":
+        raise ValueError(f"Unsupported AUROC average: {average}")
+
+    values = [
+        _safe_binary_auc(y_true[:, index], probabilities[:, index])
+        for index in range(y_true.shape[1])
+    ]
+    finite = [value for value in values if np.isfinite(value)]
+    return float(np.mean(finite)) if finite else float("nan")
+
+
 def _classification_metrics(
     y_true: np.ndarray,
     probabilities: np.ndarray,
@@ -132,18 +164,12 @@ def _classification_metrics(
         result[f"recall_{average}"] = float(recall)
         result[f"f1_{average}"] = float(f1)
 
-    try:
-        result["auroc_macro"] = float(
-            roc_auc_score(y_true, probabilities, average="macro")
-        )
-    except ValueError:
-        result["auroc_macro"] = float("nan")
-    try:
-        result["auroc_micro"] = float(
-            roc_auc_score(y_true, probabilities, average="micro")
-        )
-    except ValueError:
-        result["auroc_micro"] = float("nan")
+    result["auroc_macro"] = _safe_multilabel_auc(
+        y_true, probabilities, average="macro"
+    )
+    result["auroc_micro"] = _safe_multilabel_auc(
+        y_true, probabilities, average="micro"
+    )
 
     per_pesticide_rows: list[dict[str, Any]] = []
     for index, pesticide in enumerate(PESTICIDES):
@@ -157,10 +183,7 @@ def _classification_metrics(
             average="binary",
             zero_division=0,
         )
-        try:
-            label_auc = float(roc_auc_score(truth, prob))
-        except ValueError:
-            label_auc = float("nan")
+        label_auc = _safe_binary_auc(truth, prob)
         specificity = float(tn / (tn + fp)) if (tn + fp) else float("nan")
         per_pesticide_rows.append(
             {
@@ -242,6 +265,128 @@ def _regression_metrics(
             metrics = _regression_metric_block(y_reg[mask, index], prediction[mask])
             rows.append({"pesticide": pesticide, "scope": scope, **metrics})
     return overall, pd.DataFrame(rows)
+
+
+def _ordinal_level_metrics(
+    y_reg: np.ndarray,
+    ordinal_probability: np.ndarray,
+    y_class: np.ndarray,
+    y_pred_class: np.ndarray,
+    frame: pd.DataFrame,
+    threshold: float = 0.5,
+) -> tuple[dict[str, Any], pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame]]:
+    """Evaluate present-only pesticide-specific ordered S/M/H predictions.
+
+    ``ordinal_probability[...,0]`` is P(level>=M) and ``[...,1]`` is
+    P(level>=H). Classification is used only for the final 0/S/M/H profile;
+    present-target S/M/H accuracy is measured independently of presence gating.
+    """
+    y_reg = np.asarray(y_reg, dtype=np.float64)
+    ordinal_probability = np.asarray(ordinal_probability, dtype=np.float64)
+    y_class = np.asarray(y_class, dtype=np.int64)
+    y_pred_class = np.asarray(y_pred_class, dtype=np.int64)
+
+    if ordinal_probability.shape != (*y_reg.shape, 2):
+        raise ValueError(
+            "ordinal_probability must be [samples,pesticides,2], got "
+            f"{ordinal_probability.shape} for y_reg {y_reg.shape}"
+        )
+
+    true_level = np.rint(y_reg).astype(np.int64)
+    present = y_class > 0
+    predicted_present_level = 1 + (
+        ordinal_probability >= float(threshold)
+    ).sum(axis=-1).astype(np.int64)
+    final_predicted_level = np.where(
+        y_pred_class > 0, predicted_present_level, 0
+    )
+
+    if present.any():
+        present_accuracy = float(
+            np.mean(predicted_present_level[present] == true_level[present])
+        )
+    else:
+        present_accuracy = float("nan")
+    profile_exact = np.all(final_predicted_level == true_level, axis=1)
+
+    per_rows: list[dict[str, Any]] = []
+    confusion_tables: dict[str, pd.DataFrame] = {}
+    level_names = {1: "S", 2: "M", 3: "H"}
+    for index, pesticide in enumerate(PESTICIDES):
+        mask = present[:, index]
+        truth = true_level[mask, index]
+        pred = predicted_present_level[mask, index]
+        row: dict[str, Any] = {
+            "pesticide": pesticide,
+            "n_present": int(mask.sum()),
+            "accuracy": float(np.mean(truth == pred)) if truth.size else float("nan"),
+        }
+        cm = confusion_matrix(truth, pred, labels=[1, 2, 3])
+        confusion_tables[pesticide] = pd.DataFrame(
+            cm,
+            index=["True_S", "True_M", "True_H"],
+            columns=["Pred_S", "Pred_M", "Pred_H"],
+        )
+        for level, name in level_names.items():
+            level_mask = truth == level
+            n_level = int(level_mask.sum())
+            correct = int(np.sum(pred[level_mask] == level)) if n_level else 0
+            row[f"{name}_n"] = n_level
+            row[f"{name}_correct"] = correct
+            row[f"{name}_accuracy"] = (
+                float(correct / n_level) if n_level else float("nan")
+            )
+        per_rows.append(row)
+
+    mixture_count = y_class.sum(axis=1)
+    mixture_rows: list[dict[str, Any]] = []
+    for count, name in ((1, "single"), (2, "binary"), (3, "ternary")):
+        mask = mixture_count == count
+        n = int(mask.sum())
+        correct = int(profile_exact[mask].sum()) if n else 0
+        mixture_rows.append(
+            {
+                "group": name,
+                "n": n,
+                "correct": correct,
+                "exact_concentration_accuracy": (
+                    float(correct / n) if n else float("nan")
+                ),
+            }
+        )
+
+    matrix_rows: list[dict[str, Any]] = []
+    matrix_values = frame["matrix"].astype(str).to_numpy()
+    for matrix in sorted(pd.unique(matrix_values)):
+        mask = matrix_values == matrix
+        n = int(mask.sum())
+        correct = int(profile_exact[mask].sum()) if n else 0
+        matrix_rows.append(
+            {
+                "matrix": matrix,
+                "n": n,
+                "correct": correct,
+                "exact_concentration_accuracy": (
+                    float(correct / n) if n else float("nan")
+                ),
+            }
+        )
+
+    overall = {
+        "ordinal_threshold": float(threshold),
+        "present_target_accuracy": present_accuracy,
+        "present_target_n": int(present.sum()),
+        "full_0_S_M_H_profile_exact_accuracy": float(profile_exact.mean()),
+        "full_profile_correct": int(profile_exact.sum()),
+        "samples": int(len(profile_exact)),
+    }
+    return (
+        overall,
+        pd.DataFrame(per_rows),
+        pd.DataFrame(mixture_rows),
+        pd.DataFrame(matrix_rows),
+        confusion_tables,
+    )
 
 
 def _plot_matrix(
@@ -535,12 +680,136 @@ def _query_token_raman_axis(token_length: int) -> np.ndarray:
     return np.asarray(MODEL_RAMAN_AXIS, dtype=np.float64)[centers]
 
 
+def _attention_specialization_tables(
+    attention: np.ndarray,
+    y_true: np.ndarray,
+    top_k: int = 10,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Quantify whether pesticide queries are selective and mutually distinct.
+
+    Uniform attention over T tokens has normalized entropy=1 and top-k mass=k/T.
+    Pairwise cosine similarity close to 1 means two pesticide queries use nearly
+    the same attention distribution. Jensen-Shannon divergence near 0 likewise
+    indicates highly similar query distributions.
+    """
+    attention = np.asarray(attention, dtype=np.float64)
+    y_true = np.asarray(y_true, dtype=np.int64)
+    if attention.ndim != 3 or attention.shape[1] != len(PESTICIDES):
+        raise ValueError(
+            "attention must be [samples, pesticides, tokens], got "
+            f"{attention.shape}"
+        )
+
+    eps = 1e-12
+    token_count = int(attention.shape[-1])
+    k = max(1, min(int(top_k), token_count))
+    distributions = attention / np.clip(
+        attention.sum(axis=-1, keepdims=True), eps, None
+    )
+    entropy = -np.sum(
+        distributions * np.log(np.clip(distributions, eps, None)), axis=-1
+    ) / math.log(float(token_count))
+    sorted_attention = np.sort(distributions, axis=-1)
+    topk_mass = sorted_attention[..., -k:].sum(axis=-1)
+    max_attention = distributions.max(axis=-1)
+
+    summary_rows: list[dict[str, Any]] = []
+    sample_rows: list[dict[str, Any]] = []
+    for pesticide_index, pesticide in enumerate(PESTICIDES):
+        masks = {
+            "all": np.ones(attention.shape[0], dtype=bool),
+            "present": y_true[:, pesticide_index] > 0,
+            "absent": y_true[:, pesticide_index] == 0,
+        }
+        for scope, mask in masks.items():
+            if not mask.any():
+                continue
+            summary_rows.append(
+                {
+                    "pesticide": pesticide,
+                    "scope": scope,
+                    "n": int(mask.sum()),
+                    "normalized_entropy_mean": float(
+                        entropy[mask, pesticide_index].mean()
+                    ),
+                    "normalized_entropy_median": float(
+                        np.median(entropy[mask, pesticide_index])
+                    ),
+                    "top_k": int(k),
+                    "top_k_mass_mean": float(
+                        topk_mass[mask, pesticide_index].mean()
+                    ),
+                    "uniform_top_k_mass": float(k / token_count),
+                    "max_attention_mean": float(
+                        max_attention[mask, pesticide_index].mean()
+                    ),
+                    "uniform_attention": float(1.0 / token_count),
+                }
+            )
+
+        for sample_index in range(attention.shape[0]):
+            sample_rows.append(
+                {
+                    "sample_index": int(sample_index),
+                    "pesticide": pesticide,
+                    "target_present": int(y_true[sample_index, pesticide_index] > 0),
+                    "normalized_entropy": float(
+                        entropy[sample_index, pesticide_index]
+                    ),
+                    "top_k_mass": float(topk_mass[sample_index, pesticide_index]),
+                    "max_attention": float(
+                        max_attention[sample_index, pesticide_index]
+                    ),
+                }
+            )
+
+    pair_rows: list[dict[str, Any]] = []
+    for left_index, right_index in combinations(range(len(PESTICIDES)), 2):
+        left = distributions[:, left_index, :]
+        right = distributions[:, right_index, :]
+        denominator = (
+            np.linalg.norm(left, axis=1) * np.linalg.norm(right, axis=1)
+        )
+        cosine = np.divide(
+            np.sum(left * right, axis=1),
+            denominator,
+            out=np.zeros(attention.shape[0], dtype=np.float64),
+            where=denominator > eps,
+        )
+        mixture = 0.5 * (left + right)
+        kl_left = np.sum(
+            left * np.log(np.clip(left, eps, None) / np.clip(mixture, eps, None)),
+            axis=1,
+        )
+        kl_right = np.sum(
+            right * np.log(np.clip(right, eps, None) / np.clip(mixture, eps, None)),
+            axis=1,
+        )
+        js = 0.5 * (kl_left + kl_right)
+        pair_rows.append(
+            {
+                "query_pair": f"{PESTICIDES[left_index]}__{PESTICIDES[right_index]}",
+                "n": int(attention.shape[0]),
+                "cosine_similarity_mean": float(cosine.mean()),
+                "cosine_similarity_median": float(np.median(cosine)),
+                "jensen_shannon_divergence_mean": float(js.mean()),
+                "jensen_shannon_divergence_median": float(np.median(js)),
+            }
+        )
+
+    return (
+        pd.DataFrame(summary_rows),
+        pd.DataFrame(pair_rows),
+        pd.DataFrame(sample_rows),
+    )
+
+
 def _save_query_attention_profiles(
     attention: np.ndarray,
     y_true: np.ndarray,
     output_directory: Path,
 ) -> None:
-    """Export interpretable pesticide-query attention without changing predictions."""
+    """Export Raman-region profiles plus query-specialization diagnostics."""
     attention = np.asarray(attention, dtype=np.float64)
     y_true = np.asarray(y_true, dtype=np.int64)
     if attention.ndim != 3 or attention.shape[1] != len(PESTICIDES):
@@ -610,6 +879,19 @@ def _save_query_attention_profiles(
         output_directory / "query_attention_top_regions.csv", index=False
     )
 
+    specialization, pairwise, sample_details = _attention_specialization_tables(
+        attention, y_true, top_k=10
+    )
+    specialization.to_csv(
+        output_directory / "query_attention_specialization.csv", index=False
+    )
+    pairwise.to_csv(
+        output_directory / "query_attention_pairwise_similarity.csv", index=False
+    )
+    sample_details.to_csv(
+        output_directory / "query_attention_sample_diagnostics.csv", index=False
+    )
+
 
 def _collect_predictions(
     checkpoint: dict[str, Any],
@@ -617,7 +899,15 @@ def _collect_predictions(
     device: torch.device,
     batch_size: int,
     num_workers: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, pd.DataFrame]:
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray | None,
+    np.ndarray,
+    pd.DataFrame,
+]:
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -637,6 +927,12 @@ def _collect_predictions(
     concentration_targets: list[np.ndarray] = []
     concentration_predictions: list[np.ndarray] = []
     query_attentions: list[np.ndarray] = []
+    ordinal_probabilities: list[np.ndarray] = []
+    concentration_head_mode = str(
+        checkpoint.get("model_config", {}).get(
+            "concentration_head_mode", "continuous"
+        )
+    )
     rows: list[dict[str, Any]] = []
 
     with torch.no_grad():
@@ -647,9 +943,17 @@ def _collect_predictions(
                 "smoothed": batch["smoothed"].to(device, non_blocking=True),
                 "valid_mask": batch["valid_mask"].to(device, non_blocking=True),
             }
-            class_pred, reg_pred, attention = model(
-                model_batch, return_attention=True
-            )
+            if concentration_head_mode == "ordinal":
+                class_pred, reg_pred, attention, ordinal_probability = model(
+                    model_batch, return_attention=True, return_ordinal=True
+                )
+                ordinal_probability_np = ordinal_probability.cpu().numpy()
+                ordinal_probabilities.append(ordinal_probability_np)
+            else:
+                class_pred, reg_pred, attention = model(
+                    model_batch, return_attention=True
+                )
+                ordinal_probability_np = None
             class_true_np = batch["class_target"].numpy()
             class_prob_np = class_pred.cpu().numpy()
             reg_true_np = batch["concentration_target"].numpy()
@@ -684,13 +988,26 @@ def _collect_predictions(
                     row[f"pred_concentration_{pesticide}"] = float(
                         reg_pred_np[row_index, pesticide_index]
                     )
+                    if ordinal_probability_np is not None:
+                        row[f"prob_level_ge_M_{pesticide}"] = float(
+                            ordinal_probability_np[row_index, pesticide_index, 0]
+                        )
+                        row[f"prob_level_ge_H_{pesticide}"] = float(
+                            ordinal_probability_np[row_index, pesticide_index, 1]
+                        )
                 rows.append(row)
 
+    ordinal_output = (
+        np.concatenate(ordinal_probabilities, axis=0)
+        if ordinal_probabilities
+        else None
+    )
     return (
         np.concatenate(class_targets, axis=0),
         np.concatenate(class_probabilities, axis=0),
         np.concatenate(concentration_targets, axis=0),
         np.concatenate(concentration_predictions, axis=0),
+        ordinal_output,
         np.concatenate(query_attentions, axis=0),
         pd.DataFrame(rows),
     )
@@ -710,7 +1027,15 @@ def evaluate_split(
     split_dir = output_directory / split
     split_dir.mkdir(parents=True, exist_ok=True)
 
-    y_class, p_class, y_reg, p_reg, query_attention, frame = _collect_predictions(
+    (
+        y_class,
+        p_class,
+        y_reg,
+        p_reg,
+        ordinal_probability,
+        query_attention,
+        frame,
+    ) = _collect_predictions(
         checkpoint,
         dataset,
         device,
@@ -729,13 +1054,63 @@ def evaluate_split(
         y_pred,
     )
 
+    ordinal_result: dict[str, Any] | None = None
+    ordinal_per_pesticide: pd.DataFrame | None = None
+    ordinal_by_mixture: pd.DataFrame | None = None
+    ordinal_by_matrix: pd.DataFrame | None = None
+    ordinal_confusions: dict[str, pd.DataFrame] | None = None
+    if ordinal_probability is not None:
+        (
+            ordinal_result,
+            ordinal_per_pesticide,
+            ordinal_by_mixture,
+            ordinal_by_matrix,
+            ordinal_confusions,
+        ) = _ordinal_level_metrics(
+            y_reg,
+            ordinal_probability,
+            y_class,
+            y_pred,
+            frame,
+            threshold=0.5,
+        )
+
     for index, pesticide in enumerate(PESTICIDES):
         frame[f"pred_class_{pesticide}"] = y_pred[:, index]
+        if ordinal_probability is not None:
+            present_level = 1 + (
+                ordinal_probability[:, index, :] >= 0.5
+            ).sum(axis=-1).astype(np.int64)
+            frame[f"pred_level_{pesticide}"] = np.where(
+                y_pred[:, index] > 0, present_level, 0
+            )
     frame.to_csv(split_dir / "predictions.csv", index=False)
     per_pesticide.to_csv(split_dir / "classification_per_pesticide.csv", index=False)
     regression_per_pesticide.to_csv(
         split_dir / "regression_per_pesticide.csv", index=False
     )
+    if ordinal_result is not None:
+        ordinal_per_pesticide.to_csv(
+            split_dir / "ordinal_per_pesticide.csv", index=False
+        )
+        ordinal_by_mixture.to_csv(
+            split_dir / "ordinal_by_mixture_complexity.csv", index=False
+        )
+        ordinal_by_matrix.to_csv(
+            split_dir / "ordinal_by_matrix.csv", index=False
+        )
+        ordinal_confusion_dir = split_dir / "ordinal_confusion_matrices"
+        ordinal_confusion_dir.mkdir(parents=True, exist_ok=True)
+        for pesticide, table in ordinal_confusions.items():
+            table.to_csv(
+                ordinal_confusion_dir / f"{pesticide}_S_M_H_confusion.csv"
+            )
+        with (split_dir / "ordinal_metrics.json").open(
+            "w", encoding="utf-8"
+        ) as handle:
+            json.dump(
+                ordinal_result, handle, ensure_ascii=False, indent=2, allow_nan=True
+            )
 
     complexity, matrix_metrics, combination_metrics = _stratified_metrics(
         frame, classification_threshold
@@ -778,6 +1153,12 @@ def evaluate_split(
         ),
         "classification": classification,
         "regression": regression,
+        "concentration_head_mode": str(
+            checkpoint.get("model_config", {}).get(
+                "concentration_head_mode", "continuous"
+            )
+        ),
+        "ordinal_concentration": ordinal_result,
     }
     with (split_dir / "metrics.json").open("w", encoding="utf-8") as handle:
         json.dump(result, handle, ensure_ascii=False, indent=2, allow_nan=True)
@@ -794,6 +1175,10 @@ def evaluate_split(
     lines.extend(["", "[Regression]"])
     for scope, values in regression.items():
         lines.append(f"{scope}: {values}")
+    if ordinal_result is not None:
+        lines.extend(["", "[Ordinal S/M/H concentration levels]"])
+        for key, value in ordinal_result.items():
+            lines.append(f"{key}: {value}")
     if target_mode != "physical":
         lines.extend(
             [
@@ -820,6 +1205,13 @@ def evaluate_split(
         f"MAE={present_metrics['mae']}, RMSE={present_metrics['rmse']}, "
         f"R2={present_metrics['r2']}"
     )
+    if ordinal_result is not None:
+        print(
+            "ordinal S/M/H: "
+            f"present_acc={ordinal_result['present_target_accuracy']:.4f}, "
+            f"full_profile_exact="
+            f"{ordinal_result['full_0_S_M_H_profile_exact_accuracy']:.4f}"
+        )
     print(f"saved: {split_dir}")
     return result
 

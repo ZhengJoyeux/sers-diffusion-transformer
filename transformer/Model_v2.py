@@ -12,12 +12,14 @@ Model path:
 Key design points:
 - DEL, CHL and TEB each own a learnable query vector.
 - Every query can attend to every *valid* Raman token.
-- Training-data-derived peak priors add a positive soft bias to attention logits;
-  they never delete non-peak regions.
+- Chemistry-core + training-derived auxiliary priors add a positive soft bias
+  to attention logits; they never delete non-peak regions.
 - valid_mask remains authoritative for any unavailable Raman positions.
-- The formal downstream model uses the common 600-2000 cm^-1 range to prevent
-  source-axis length from leaking the CHL label.
-- The public forward interface remains [classification_probability, concentration].
+- The formal downstream model uses the complete 600-2500 cm^-1 range. Every
+  real source must genuinely cover that range, so axis availability cannot leak labels.
+- The default public forward interface remains [classification_probability, concentration].
+- T3.1 optionally uses pesticide-specific ordered S/M/H concentration heads while
+  preserving the T1/T2 continuous-regression checkpoint path.
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 
-DEFAULT_MODEL_LENGTH = 1401
+DEFAULT_MODEL_LENGTH = 1901
 
 
 def _conv_pool_output_length(length: int) -> int:
@@ -104,6 +106,141 @@ def _sinusoidal_position_encoding(length: int, dimension: int) -> Tensor:
     if dimension > 1:
         encoding[:, 1::2] = torch.cos(position * div_term[: encoding[:, 1::2].shape[1]])
     return encoding.unsqueeze(0)
+
+
+def level_codes_to_ordinal_targets(concentration_target: Tensor) -> Tensor:
+    """Convert 0/S/M/H codes to cumulative ordinal targets.
+
+    Present levels are encoded as S=1->[0,0], M=2->[1,0], H=3->[1,1].
+    Absent entries (0) are intentionally handled by a separate presence mask.
+    """
+    if concentration_target.ndim != 2:
+        raise ValueError(
+            "concentration_target must be [B,P], got "
+            f"{tuple(concentration_target.shape)}"
+        )
+    ge_m = (concentration_target >= 2.0).to(concentration_target.dtype)
+    ge_h = (concentration_target >= 3.0).to(concentration_target.dtype)
+    return torch.stack((ge_m, ge_h), dim=-1)
+
+
+def present_only_ordinal_bce(
+    ordinal_probability: Tensor,
+    concentration_target: Tensor,
+    presence_target: Tensor,
+) -> Tensor:
+    """Cumulative BCE evaluated only where the pesticide is truly present."""
+    if ordinal_probability.ndim != 3 or ordinal_probability.shape[-1] != 2:
+        raise ValueError(
+            "ordinal_probability must be [B,P,2], got "
+            f"{tuple(ordinal_probability.shape)}"
+        )
+    if concentration_target.shape != ordinal_probability.shape[:2]:
+        raise ValueError("concentration_target shape does not match ordinal probabilities")
+    if presence_target.shape != ordinal_probability.shape[:2]:
+        raise ValueError("presence_target shape does not match ordinal probabilities")
+
+    target = level_codes_to_ordinal_targets(concentration_target)
+    present = presence_target > 0.5
+    if not bool(present.any()):
+        return ordinal_probability.sum() * 0.0
+    return F.binary_cross_entropy(ordinal_probability[present], target[present])
+
+
+def present_only_corn_ordinal_loss(
+    ordinal_logits: Tensor,
+    concentration_target: Tensor,
+    presence_target: Tensor,
+) -> Tensor:
+    """CORN-style conditional ordinal loss for present pesticides only.
+
+    For S/M/H level codes 1/2/3:
+
+    task 0:
+        P(level >= M)
+        trained on all present S/M/H targets.
+
+    task 1:
+        P(level >= H | level >= M)
+        trained only on present M/H targets.
+
+    The loss is normalized by the total number of valid conditional
+    training entries, following the CORN conditional-training-set
+    formulation.
+    """
+    if ordinal_logits.ndim != 3 or ordinal_logits.shape[-1] != 2:
+        raise ValueError(
+            "ordinal_logits must be [B,P,2], got "
+            f"{tuple(ordinal_logits.shape)}"
+        )
+
+    if concentration_target.shape != ordinal_logits.shape[:2]:
+        raise ValueError(
+            "concentration_target shape does not match ordinal logits"
+        )
+
+    if presence_target.shape != ordinal_logits.shape[:2]:
+        raise ValueError(
+            "presence_target shape does not match ordinal logits"
+        )
+
+    present = presence_target > 0.5
+
+    if not bool(present.any()):
+        return ordinal_logits.sum() * 0.0
+
+    # --------------------------------------------------------
+    # Conditional task 0:
+    # S versus {M,H}
+    #
+    # All truly present pesticides participate.
+    # --------------------------------------------------------
+    target_ge_m = (
+        concentration_target >= 2.0
+    ).to(ordinal_logits.dtype)
+
+    first_logits = ordinal_logits[..., 0][present]
+    first_target = target_ge_m[present]
+
+    loss_sum = F.binary_cross_entropy_with_logits(
+        first_logits,
+        first_target,
+        reduction="sum",
+    )
+
+    valid_count = int(first_logits.numel())
+
+    # --------------------------------------------------------
+    # Conditional task 1:
+    # M versus H
+    #
+    # S samples must NOT train this conditional boundary.
+    # --------------------------------------------------------
+    second_mask = (
+        present
+        & (concentration_target >= 2.0)
+    )
+
+    if bool(second_mask.any()):
+        target_h_given_ge_m = (
+            concentration_target >= 3.0
+        ).to(ordinal_logits.dtype)
+
+        second_logits = ordinal_logits[..., 1][second_mask]
+        second_target = target_h_given_ge_m[second_mask]
+
+        loss_sum = (
+            loss_sum
+            + F.binary_cross_entropy_with_logits(
+                second_logits,
+                second_target,
+                reduction="sum",
+            )
+        )
+
+        valid_count += int(second_logits.numel())
+
+    return loss_sum / float(valid_count)
 
 
 class regression_features(nn.Module):
@@ -308,6 +445,429 @@ class PeakGuidedQueryAttention(nn.Module):
         return query_features, attention_mean
 
 
+class MixtureAwareQueryFusion(nn.Module):
+    """
+    Lightweight cross-pesticide query fusion for ordinal concentration
+    prediction.
+
+    query_features:
+        [B, P, D], P = DEL / CHL / TEB.
+
+    presence_probability:
+        [B, P], pesticide-presence probabilities from the classification
+        branch.
+
+    Classification itself is not changed. The fused representation is used
+    only by the concentration branch.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        n_queries: int,
+        n_heads: int,
+        dropout: float = 0.1,
+        gate_init: float = 0.10,
+        use_adaptive_gate: bool = False,
+        use_boundary_specific_gate: bool = False,
+    ) -> None:
+        super().__init__()
+
+        if n_queries < 2:
+            raise ValueError(
+                "MixtureAwareQueryFusion requires at least two queries"
+            )
+
+        if d_model % n_heads != 0:
+            raise ValueError(
+                f"d_model={d_model} must be divisible by n_heads={n_heads}"
+            )
+
+        if not 0.0 < gate_init < 1.0:
+            raise ValueError(
+                "gate_init must satisfy 0 < gate_init < 1"
+            )
+
+        self.d_model = int(d_model)
+        self.n_queries = int(n_queries)
+        self.n_heads = int(n_heads)
+
+        self.use_adaptive_gate = bool(
+            use_adaptive_gate
+        )
+
+        self.use_boundary_specific_gate = bool(
+            use_boundary_specific_gate
+        )
+
+        if (
+            self.use_boundary_specific_gate
+            and not self.use_adaptive_gate
+        ):
+            raise ValueError(
+                "use_boundary_specific_gate=True requires "
+                "use_adaptive_gate=True"
+            )
+
+        self.cross_query_attention = nn.MultiheadAttention(
+            embed_dim=self.d_model,
+            num_heads=self.n_heads,
+            dropout=dropout,
+            bias=False,
+            batch_first=True,
+        )
+
+        self.attention_norm = nn.LayerNorm(
+            self.d_model
+        )
+
+        self.ffn = nn.Sequential(
+            nn.Linear(
+                self.d_model,
+                self.d_model * 2,
+            ),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(
+                self.d_model * 2,
+                self.d_model,
+            ),
+            nn.Dropout(dropout),
+        )
+
+        self.ffn_norm = nn.LayerNorm(
+            self.d_model
+        )
+
+        gate_logit = math.log(
+            float(gate_init)
+            / (1.0 - float(gate_init))
+        )
+
+        self.gate_logit = nn.Parameter(
+            torch.full(
+                (self.n_queries,),
+                gate_logit,
+                dtype=torch.float32,
+            )
+        )
+
+        # T3.11:
+        # The T3.10 gate is one learnable scalar for each pesticide.
+        # T3.11 optionally adds a sample-specific correction using:
+        #
+        #   original pesticide query       [D]
+        #   cross-query residual           [D]
+        #   presence probability           [1]
+        #   mixture strength               [1]
+        #
+        # The final layer is initialized to zero. Therefore the
+        # adaptive correction is initially zero and the model starts
+        # from exactly the T3.10 fusion behavior.
+        self.adaptive_gate = None
+        self.adaptive_gate_sm = None
+        self.adaptive_gate_mh = None
+
+        if self.use_adaptive_gate:
+            adaptive_input_dim = (
+                self.d_model * 2
+                + 2
+            )
+
+            adaptive_hidden_dim = max(
+                16,
+                self.d_model // 2,
+            )
+
+            def make_adaptive_gate() -> nn.Sequential:
+                module = nn.Sequential(
+                    nn.Linear(
+                        adaptive_input_dim,
+                        adaptive_hidden_dim,
+                    ),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(
+                        adaptive_hidden_dim,
+                        1,
+                    ),
+                )
+
+                # Zero initialization means T3.11/T3.12 start
+                # from the same T3.10 base pesticide gate.
+                nn.init.zeros_(
+                    module[-1].weight
+                )
+                nn.init.zeros_(
+                    module[-1].bias
+                )
+
+                return module
+
+            if self.use_boundary_specific_gate:
+                self.adaptive_gate_sm = (
+                    make_adaptive_gate()
+                )
+
+                self.adaptive_gate_mh = (
+                    make_adaptive_gate()
+                )
+
+            else:
+                # Preserve the original T3.11 structure.
+                self.adaptive_gate = (
+                    make_adaptive_gate()
+                )
+
+    @property
+    def gate(self) -> Tensor:
+        return torch.sigmoid(
+            self.gate_logit
+        )
+
+    def forward(
+        self,
+        query_features: Tensor,
+        presence_probability: Tensor,
+    ) -> Tensor | tuple[Tensor, Tensor]:
+
+        if query_features.ndim != 3:
+            raise ValueError(
+                "query_features must be [B,P,D], got "
+                f"{tuple(query_features.shape)}"
+            )
+
+        batch_size = query_features.shape[0]
+
+        expected_query_shape = (
+            batch_size,
+            self.n_queries,
+            self.d_model,
+        )
+
+        if tuple(query_features.shape) != expected_query_shape:
+            raise ValueError(
+                f"query_features must be {expected_query_shape}, "
+                f"got {tuple(query_features.shape)}"
+            )
+
+        expected_presence_shape = (
+            batch_size,
+            self.n_queries,
+        )
+
+        if tuple(presence_probability.shape) != expected_presence_shape:
+            raise ValueError(
+                "presence_probability must be "
+                f"{expected_presence_shape}, got "
+                f"{tuple(presence_probability.shape)}"
+            )
+
+        if not torch.isfinite(query_features).all():
+            raise ValueError(
+                "query_features contains NaN or Inf"
+            )
+
+        if not torch.isfinite(presence_probability).all():
+            raise ValueError(
+                "presence_probability contains NaN or Inf"
+            )
+
+        presence_probability = (
+            presence_probability.to(
+                dtype=query_features.dtype,
+                device=query_features.device,
+            )
+            .clamp(0.0, 1.0)
+        )
+
+        # A pesticide predicted absent contributes less K/V context.
+        context_source = (
+            query_features
+            * presence_probability.unsqueeze(-1)
+        )
+
+        # Diagonal=True masks self-attention:
+        # DEL reads CHL/TEB, CHL reads DEL/TEB, etc.
+        cross_query_mask = torch.eye(
+            self.n_queries,
+            dtype=torch.bool,
+            device=query_features.device,
+        )
+
+        attended, _ = self.cross_query_attention(
+            query=query_features,
+            key=context_source,
+            value=context_source,
+            attn_mask=cross_query_mask,
+            need_weights=False,
+        )
+
+        contextual = self.attention_norm(
+            query_features + attended
+        )
+
+        contextual = self.ffn_norm(
+            contextual
+            + self.ffn(contextual)
+        )
+
+        # Soft mixture complexity.
+        #
+        # For 3 pesticides:
+        # single  -> approximately 0
+        # binary  -> approximately 0.5
+        # ternary -> approximately 1
+        mixture_strength = (
+            (
+                presence_probability.sum(
+                    dim=1,
+                    keepdim=True,
+                )
+                - 1.0
+            )
+            / float(self.n_queries - 1)
+        ).clamp(
+            0.0,
+            1.0,
+        )
+
+        mixture_strength = (
+            mixture_strength.unsqueeze(-1)
+        )
+
+        base_gate_logit = (
+            self.gate_logit.view(
+                1,
+                self.n_queries,
+                1,
+            )
+        )
+
+        cross_query_residual = (
+            contextual
+            - query_features
+        )
+
+        # ====================================================
+        # T3.12:
+        # S/M and M/H boundaries use separate adaptive gates.
+        # ====================================================
+        if self.use_boundary_specific_gate:
+
+            mixture_feature = (
+                mixture_strength.expand(
+                    -1,
+                    self.n_queries,
+                    -1,
+                )
+            )
+
+            gate_features = torch.cat(
+                (
+                    query_features,
+                    cross_query_residual,
+                    presence_probability.unsqueeze(-1),
+                    mixture_feature,
+                ),
+                dim=-1,
+            )
+
+            adjustment_sm = (
+                self.adaptive_gate_sm(
+                    gate_features
+                )
+            )
+
+            adjustment_mh = (
+                self.adaptive_gate_mh(
+                    gate_features
+                )
+            )
+
+            gate_sm = torch.sigmoid(
+                base_gate_logit
+                + adjustment_sm
+            )
+
+            gate_mh = torch.sigmoid(
+                base_gate_logit
+                + adjustment_mh
+            )
+
+            fused_sm = (
+                query_features
+                + gate_sm
+                * mixture_strength
+                * cross_query_residual
+            )
+
+            fused_mh = (
+                query_features
+                + gate_mh
+                * mixture_strength
+                * cross_query_residual
+            )
+
+            return (
+                fused_sm,
+                fused_mh,
+            )
+
+        # ====================================================
+        # Legacy T3.10 / T3.11 paths
+        # ====================================================
+        if self.adaptive_gate is None:
+            # Exact T3.10 path.
+            gate = torch.sigmoid(
+                base_gate_logit
+            )
+
+        else:
+            # Exact T3.11 path.
+            mixture_feature = (
+                mixture_strength.expand(
+                    -1,
+                    self.n_queries,
+                    -1,
+                )
+            )
+
+            gate_features = torch.cat(
+                (
+                    query_features,
+                    cross_query_residual,
+                    presence_probability.unsqueeze(-1),
+                    mixture_feature,
+                ),
+                dim=-1,
+            )
+
+            gate_adjustment = (
+                self.adaptive_gate(
+                    gate_features
+                )
+            )
+
+            gate = torch.sigmoid(
+                base_gate_logit
+                + gate_adjustment
+            )
+
+        effective_gate = (
+            gate
+            * mixture_strength
+        )
+
+        fused = (
+            query_features
+            + effective_gate
+            * cross_query_residual
+        )
+
+        return fused
+
+
 class TransformerClassifyRegress_sep(nn.Module):
     def __init__(
         self,
@@ -321,6 +881,11 @@ class TransformerClassifyRegress_sep(nn.Module):
         model_length: int = DEFAULT_MODEL_LENGTH,
         peak_guidance_strength_init: float = 1.5,
         use_peak_guidance: bool = True,
+        concentration_head_mode: str = "continuous",
+        ordinal_head_hidden: int | None = None,
+        use_mixture_aware_query_fusion: bool = False,
+        use_adaptive_mixture_gate: bool = False,
+        use_boundary_specific_mixture_gate: bool = False,
     ) -> None:
         super().__init__()
 
@@ -334,6 +899,42 @@ class TransformerClassifyRegress_sep(nn.Module):
         self.dim_model = int(dim_model)
         self.n_labels = int(n_labels)
         self.model_length = int(model_length)
+        self.concentration_head_mode = str(concentration_head_mode)
+        self.use_mixture_aware_query_fusion = bool(
+            use_mixture_aware_query_fusion
+        )
+
+        self.use_adaptive_mixture_gate = bool(
+            use_adaptive_mixture_gate
+        )
+
+        self.use_boundary_specific_mixture_gate = bool(
+            use_boundary_specific_mixture_gate
+        )
+
+        if (
+            self.use_adaptive_mixture_gate
+            and not self.use_mixture_aware_query_fusion
+        ):
+            raise ValueError(
+                "use_adaptive_mixture_gate=True requires "
+                "use_mixture_aware_query_fusion=True"
+            )
+
+        if (
+            self.use_boundary_specific_mixture_gate
+            and not self.use_adaptive_mixture_gate
+        ):
+            raise ValueError(
+                "use_boundary_specific_mixture_gate=True requires "
+                "use_adaptive_mixture_gate=True"
+            )
+
+        if self.concentration_head_mode not in {"continuous", "ordinal"}:
+            raise ValueError(
+                "concentration_head_mode must be 'continuous' or 'ordinal', "
+                f"got {self.concentration_head_mode!r}"
+            )
         self.token_length = _conv_pool_output_length(self.model_length)
         feature_dim = self.dim_model * 2
 
@@ -389,7 +990,28 @@ class TransformerClassifyRegress_sep(nn.Module):
             use_peak_guidance=use_peak_guidance,
         )
 
-        head_hidden = max(self.dim_model, feature_dim // 2)
+        head_hidden = max(
+            self.dim_model,
+            feature_dim // 2,
+        )
+
+        if ordinal_head_hidden is None:
+            resolved_ordinal_head_hidden = head_hidden
+        else:
+            resolved_ordinal_head_hidden = int(
+                ordinal_head_hidden
+            )
+
+            if resolved_ordinal_head_hidden <= 0:
+                raise ValueError(
+                    "ordinal_head_hidden must be > 0, "
+                    f"got {resolved_ordinal_head_hidden}"
+                )
+
+        self.ordinal_head_hidden = (
+            resolved_ordinal_head_hidden
+        )
+
         self.classification_heads = nn.ModuleList(
             [
                 nn.Sequential(
@@ -402,22 +1024,112 @@ class TransformerClassifyRegress_sep(nn.Module):
                 for _ in range(self.n_labels)
             ]
         )
-        self.regression_heads = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Linear(feature_dim, head_hidden),
-                    nn.GELU(),
-                    nn.Dropout(drop),
-                    nn.Linear(head_hidden, 1),
-                    nn.ReLU(),
+        if self.concentration_head_mode == "continuous":
+            # T2-compatible scalar regression heads. Keeping these keys only in
+            # continuous mode preserves strict loading of existing T1/T2 checkpoints.
+            self.regression_heads = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.Linear(feature_dim, head_hidden),
+                        nn.GELU(),
+                        nn.Dropout(drop),
+                        nn.Linear(head_hidden, 1),
+                        nn.ReLU(),
+                    )
+                    for _ in range(self.n_labels)
+                ]
+            )
+        else:
+            # T3.1: one pesticide-specific ordinal head per query. Each head
+            # predicts two ordered cumulative events: level >= M and level >= H.
+            # The second probability is parameterized conditionally so that
+            # P(level>=H) <= P(level>=M) by construction.
+            self.ordinal_heads = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.Linear(
+                            feature_dim,
+                            self.ordinal_head_hidden,
+                        ),
+                        nn.GELU(),
+                        nn.Dropout(drop),
+                        nn.Linear(
+                            self.ordinal_head_hidden,
+                            2,
+                        ),
+                    )
+                    for _ in range(self.n_labels)
+                ]
+            )
+
+        self.mixture_aware_query_fusion = None
+
+        if self.use_mixture_aware_query_fusion:
+            if self.concentration_head_mode != "ordinal":
+                raise ValueError(
+                    "Mixture-aware query fusion currently requires "
+                    "concentration_head_mode='ordinal'"
                 )
-                for _ in range(self.n_labels)
-            ]
-        )
+
+            self.mixture_aware_query_fusion = (
+                MixtureAwareQueryFusion(
+                    d_model=feature_dim,
+                    n_queries=self.n_labels,
+                    n_heads=attn_head,
+                    dropout=drop,
+                    gate_init=0.10,
+                    use_adaptive_gate=(
+                        self.use_adaptive_mixture_gate
+                    ),
+                    use_boundary_specific_gate=(
+                        self.use_boundary_specific_mixture_gate
+                    ),
+                )
+            )
 
     def set_peak_prior(self, peak_prior: Tensor) -> None:
         """Install [DEL, CHL, TEB] point-level soft priors into the model."""
         self.peak_guided_attention.set_peak_prior(peak_prior)
+
+    @staticmethod
+    def _ordered_probabilities_from_logits(logits: Tensor) -> Tensor:
+        """Convert two raw ordinal logits to monotonic cumulative probabilities.
+
+        Output order is [P(level>=M), P(level>=H)]. Multiplicative
+        parameterization guarantees the chemically sensible ordering
+        P(level>=H) <= P(level>=M) without a hard post-hoc correction.
+        """
+        if logits.shape[-1] != 2:
+            raise ValueError(
+                f"ordinal logits must end with dimension 2, got {tuple(logits.shape)}"
+            )
+        probability_ge_m = torch.sigmoid(logits[..., 0])
+        probability_h_given_ge_m = torch.sigmoid(logits[..., 1])
+        probability_ge_h = probability_ge_m * probability_h_given_ge_m
+        return torch.stack((probability_ge_m, probability_ge_h), dim=-1)
+
+    @staticmethod
+    def ordinal_probabilities_to_expected_level(probabilities: Tensor) -> Tensor:
+        """Decode cumulative probabilities to a differentiable expected level in [1,3]."""
+        if probabilities.shape[-1] != 2:
+            raise ValueError(
+                "ordinal probabilities must end with dimension 2, "
+                f"got {tuple(probabilities.shape)}"
+            )
+        return 1.0 + probabilities.sum(dim=-1)
+
+    @staticmethod
+    def ordinal_probabilities_to_level(
+        probabilities: Tensor,
+        threshold: float = 0.5,
+    ) -> Tensor:
+        """Decode cumulative probabilities to discrete S/M/H codes 1/2/3."""
+        if probabilities.shape[-1] != 2:
+            raise ValueError(
+                "ordinal probabilities must end with dimension 2, "
+                f"got {tuple(probabilities.shape)}"
+            )
+        return 1 + (probabilities >= float(threshold)).to(torch.long).sum(dim=-1)
 
     @staticmethod
     def _unpack_data(
@@ -488,6 +1200,8 @@ class TransformerClassifyRegress_sep(nn.Module):
         data: Mapping[str, Tensor] | Sequence[Tensor],
         valid_mask: Tensor | None = None,
         return_attention: bool = False,
+        return_ordinal: bool = False,
+        return_ordinal_logits: bool = False,
     ) -> list[Tensor]:
         raw, percentile, smoothed, valid_mask = self._unpack_data(data, valid_mask)
         valid_mask = self._validate_inputs(raw, percentile, smoothed, valid_mask)
@@ -528,13 +1242,194 @@ class TransformerClassifyRegress_sep(nn.Module):
             head(query_features[:, pesticide_index, :])
             for pesticide_index, head in enumerate(self.classification_heads)
         ]
-        regression_columns = [
-            head(query_features[:, pesticide_index, :])
-            for pesticide_index, head in enumerate(self.regression_heads)
-        ]
         classify = torch.cat(class_columns, dim=1)
-        regress = torch.cat(regression_columns, dim=1)
+
+        # Classification remains on the original pesticide-specific query
+        # representations. Only concentration prediction receives the
+        # mixture-aware cross-query representation.
+        concentration_query_features = query_features
+
+        concentration_query_features_sm: Tensor | None = None
+        concentration_query_features_mh: Tensor | None = None
+
+        if self.mixture_aware_query_fusion is not None:
+
+            fusion_output = (
+                self.mixture_aware_query_fusion(
+                    query_features,
+                    classify.detach(),
+                )
+            )
+
+            if self.use_boundary_specific_mixture_gate:
+
+                if (
+                    not isinstance(fusion_output, tuple)
+                    or len(fusion_output) != 2
+                ):
+                    raise RuntimeError(
+                        "Boundary-specific mixture fusion must return "
+                        "(S/M features, M/H features)"
+                    )
+
+                (
+                    concentration_query_features_sm,
+                    concentration_query_features_mh,
+                ) = fusion_output
+
+            else:
+
+                if isinstance(fusion_output, tuple):
+                    raise RuntimeError(
+                        "Legacy mixture fusion unexpectedly returned "
+                        "boundary-specific features"
+                    )
+
+                concentration_query_features = (
+                    fusion_output
+                )
+
+        ordinal_probabilities: Tensor | None = None
+        ordinal_logits: Tensor | None = None
+
+        if self.concentration_head_mode == "continuous":
+            regression_columns = [
+                head(concentration_query_features[:, pesticide_index, :])
+                for pesticide_index, head in enumerate(self.regression_heads)
+            ]
+            regress = torch.cat(regression_columns, dim=1)
+        else:
+            if self.use_boundary_specific_mixture_gate:
+
+                if (
+                    concentration_query_features_sm is None
+                    or concentration_query_features_mh is None
+                ):
+                    raise RuntimeError(
+                        "Boundary-specific ordinal features are unavailable"
+                    )
+
+                boundary_logits = []
+
+                for pesticide_index, head in enumerate(
+                    self.ordinal_heads
+                ):
+
+                    sm_outputs = head(
+                        concentration_query_features_sm[
+                            :,
+                            pesticide_index,
+                            :,
+                        ]
+                    )
+
+                    mh_outputs = head(
+                        concentration_query_features_mh[
+                            :,
+                            pesticide_index,
+                            :,
+                        ]
+                    )
+
+                    boundary_logits.append(
+                        torch.stack(
+                            (
+                                sm_outputs[:, 0],
+                                mh_outputs[:, 1],
+                            ),
+                            dim=-1,
+                        )
+                    )
+
+                ordinal_logits = torch.stack(
+                    boundary_logits,
+                    dim=1,
+                )
+
+            else:
+
+                ordinal_logits = torch.stack(
+                    [
+                        head(
+                            concentration_query_features[
+                                :,
+                                pesticide_index,
+                                :,
+                            ]
+                        )
+                        for pesticide_index, head in enumerate(
+                            self.ordinal_heads
+                        )
+                    ],
+                    dim=1,
+                )
+
+            ordinal_probabilities = self._ordered_probabilities_from_logits(
+                ordinal_logits
+            )
+            # Keep the public concentration tensor [B,3] so the existing
+            # evaluation/plotting pipeline can still report level-code MAE/RMSE.
+            # This is the conditional expected S/M/H code, not a physical concentration.
+            regress = self.ordinal_probabilities_to_expected_level(
+                ordinal_probabilities
+            )
+
+        if return_ordinal_logits and not return_ordinal:
+            raise RuntimeError(
+                "return_ordinal_logits=True also requires return_ordinal=True"
+            )
+
+        if return_attention and return_ordinal:
+            if ordinal_probabilities is None:
+                raise RuntimeError(
+                    "return_ordinal=True requires concentration_head_mode='ordinal'"
+                )
+
+            if return_ordinal_logits:
+                if ordinal_logits is None:
+                    raise RuntimeError(
+                        "ordinal logits are unavailable in continuous mode"
+                    )
+                return [
+                    classify,
+                    regress,
+                    attention,
+                    ordinal_probabilities,
+                    ordinal_logits,
+                ]
+
+            return [
+                classify,
+                regress,
+                attention,
+                ordinal_probabilities,
+            ]
 
         if return_attention:
             return [classify, regress, attention]
+
+        if return_ordinal:
+            if ordinal_probabilities is None:
+                raise RuntimeError(
+                    "return_ordinal=True requires concentration_head_mode='ordinal'"
+                )
+
+            if return_ordinal_logits:
+                if ordinal_logits is None:
+                    raise RuntimeError(
+                        "ordinal logits are unavailable in continuous mode"
+                    )
+                return [
+                    classify,
+                    regress,
+                    ordinal_probabilities,
+                    ordinal_logits,
+                ]
+
+            return [
+                classify,
+                regress,
+                ordinal_probabilities,
+            ]
+
         return [classify, regress]
