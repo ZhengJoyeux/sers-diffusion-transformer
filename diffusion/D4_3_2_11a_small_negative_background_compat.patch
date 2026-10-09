@@ -1,0 +1,31 @@
+diff --git a/src/spectrum_generator.py b/src/spectrum_generator.py
+--- a/src/spectrum_generator.py
++++ b/src/spectrum_generator.py
+@@ -1256,7 +1256,16 @@ def apply_condition_intensity_envelope_guard(
+     # support below that boundary is exempted and retains its pointwise floor.
+     negative_training = training[training < 0.0]
+     used_negative_background = negative_training.size >= minimum_negative_count
+-    if used_negative_background:
++    # ``minimum_negative_count`` is the preferred production sample size, not
++    # a reason to mix positive peaks into the negative-background estimate.
++    # Small smoke/unit-test conditions can still provide a valid lower-tail
++    # reference when at least four genuine negative observations are present.
++    # Falling back to all intensities too early makes peak heights inflate the
++    # IQR and can hide even an isolated -200-style numerical deformation.
++    used_small_negative_background = (
++        4 <= negative_training.size < minimum_negative_count
++    )
++    if used_negative_background or used_small_negative_background:
+         background_q = float(
+             np.quantile(negative_training, background_quantile)
+         )
+@@ -1406,6 +1415,9 @@ def apply_condition_intensity_envelope_guard(
+         "used_condition_negative_background": bool(
+             used_negative_background
+         ),
++        "used_small_sample_negative_background": bool(
++            used_small_negative_background
++        ),
+         "minimum_negative_valley_contiguous_points": int(
+             minimum_contiguous_points
+         ),

@@ -1,0 +1,383 @@
+--- src/conditional_diversity_constraints.py
++++ src/conditional_diversity_constraints.py
+@@ -152,6 +152,14 @@
+         or {}
+     )
+ 
++    high_noise_recovery_configuration = (
++        quality_configuration.get(
++            "high_noise_standardized_recovery",
++            {},
++        )
++        or {}
++    )
++
+     if not isinstance(
+         variance_profile_configuration,
+         dict,
+@@ -168,6 +176,14 @@
+             "condition_full_spectrum_group_variance必须是字典。"
+         )
+ 
++    if not isinstance(
++        high_noise_recovery_configuration,
++        dict,
++    ):
++        raise TypeError(
++            "high_noise_standardized_recovery必须是字典。"
++        )
++
+     # D4.3.2.16和D4.3.2.17共用完全相同的
+     # train-only condition-specific Raman variance reference。
+     #
+@@ -183,6 +199,10 @@
+             "enabled",
+             False,
+         )
++        or high_noise_recovery_configuration.get(
++            "enabled",
++            False,
++        )
+     )
+ 
+     full_spectrum_scale_floor_quantile = float(
+--- src/masked_diffusion.py
++++ src/masked_diffusion.py
+@@ -68,6 +68,9 @@
+ 
+     high_noise_sampling = source.get("high_noise_sampling", {}) or {}
+     high_noise = source.get("high_noise_weighting", {}) or {}
++    high_noise_recovery = (
++        source.get("high_noise_standardized_recovery", {}) or {}
++    )
+     derivative = source.get("first_derivative", {}) or {}
+     multiscale = source.get("multiscale_shape", {}) or {}
+     multiscale_variance = source.get(
+@@ -97,6 +100,7 @@
+         for item in (
+             high_noise_sampling,
+             high_noise,
++            high_noise_recovery,
+             derivative,
+             multiscale,
+             multiscale_variance,
+@@ -174,6 +178,49 @@
+     ):
+         raise ValueError("high_noise_weighting要求maximum_weight位于[1,4]且power>0。")
+ 
++    normalized["high_noise_standardized_recovery"] = {
++        "enabled": bool(high_noise_recovery.get("enabled", False)),
++        "minimum_timestep_fraction": float(
++            high_noise_recovery.get("minimum_timestep_fraction", 0.50)
++        ),
++        "full_strength_timestep_fraction": float(
++            high_noise_recovery.get("full_strength_timestep_fraction", 0.85)
++        ),
++        "gate_power": float(high_noise_recovery.get("gate_power", 1.5)),
++        "smooth_l1_beta": float(
++            high_noise_recovery.get("smooth_l1_beta", 0.10)
++        ),
++        "total_weight": float(high_noise_recovery.get("total_weight", 0.05)),
++        "maximum_total_ratio_to_ddpm": float(
++            high_noise_recovery.get("maximum_total_ratio_to_ddpm", 0.05)
++        ),
++        "epsilon": float(high_noise_recovery.get("epsilon", 1.0e-6)),
++    }
++    recovery = normalized["high_noise_standardized_recovery"]
++    if recovery["enabled"]:
++        if not (
++            0.0 <= recovery["minimum_timestep_fraction"] < 1.0
++            and recovery["minimum_timestep_fraction"]
++            < recovery["full_strength_timestep_fraction"] <= 1.0
++        ):
++            raise ValueError(
++                "high_noise_standardized_recovery要求"
++                "0<=minimum_timestep_fraction<"
++                "full_strength_timestep_fraction<=1。"
++            )
++        if (
++            recovery["gate_power"] <= 0.0
++            or recovery["smooth_l1_beta"] <= 0.0
++            or recovery["total_weight"] <= 0.0
++            or not 0.0 < recovery["maximum_total_ratio_to_ddpm"] <= 0.25
++            or recovery["epsilon"] <= 0.0
++        ):
++            raise ValueError(
++                "high_noise_standardized_recovery的gate_power、"
++                "smooth_l1_beta、total_weight、epsilon必须大于0，"
++                "maximum_total_ratio_to_ddpm必须位于(0,0.25]。"
++            )
++
+     normalized["first_derivative"] = {
+         "enabled": bool(derivative.get("enabled", False)),
+         "smooth_l1_beta": float(derivative.get("smooth_l1_beta", 0.05)),
+@@ -671,6 +718,10 @@
+             | None
+         ) = None
+ 
++        # D4.3.2.20：高噪声恢复使用的train-only condition reference。
++        self.high_noise_recovery_condition_vectors: torch.Tensor | None = None
++        self.high_noise_recovery_full_spectrum_scale: torch.Tensor | None = None
++
+ 
+         # D4.3.2.18 train-only tail reference。
+         self.full_spectrum_tail_reference_condition_vectors: (
+@@ -727,6 +778,134 @@
+         power = float(configuration["power"])
+         return 1.0 + (maximum - 1.0) * fraction.pow(power)
+ 
++    def _high_noise_standardized_recovery_losses(
++        self,
++        *,
++        prediction: torch.Tensor,
++        target: torch.Tensor,
++        valid_mask: torch.Tensor,
++        condition: torch.Tensor | None,
++        timesteps: torch.Tensor,
++        local_inverse_slope: torch.Tensor | None,
++    ) -> dict[str, torch.Tensor]:
++        """D4.3.2.20：直接约束高噪声pred_x0恢复。
++
++        不在高噪声区执行完整robust-asinh反变换，而把真实target处的
++        local inverse slope作为Jacobian，将模型空间x0预测误差换算成近似
++        full-spectrum intensity误差，再除以condition train-only pointwise
++        scale。低自然方差Raman点因此得到更强的恢复约束，高方差峰区则
++        保留更大的允许变化范围。
++        """
++
++        zero = prediction.sum() * 0.0
++        configuration = self.quality_fidelity_configuration.get(
++            "high_noise_standardized_recovery", {}
++        )
++        if not bool(configuration.get("enabled", False)):
++            return {
++                "raw_loss": zero,
++                "active_fraction": zero,
++                "mean_gate": zero,
++                "mean_abs_standardized_error": zero,
++            }
++        if condition is None:
++            raise RuntimeError("D4.3.2.20高噪声恢复缺少condition。")
++        if local_inverse_slope is None:
++            raise RuntimeError(
++                "D4.3.2.20高噪声恢复缺少local_inverse_slope。"
++            )
++        if self.objective != "pred_x0":
++            raise RuntimeError("D4.3.2.20当前只支持objective=pred_x0。")
++        if (
++            self.high_noise_recovery_condition_vectors is None
++            or self.high_noise_recovery_full_spectrum_scale is None
++        ):
++            raise RuntimeError(
++                "D4.3.2.20高噪声恢复train-only reference尚未配置。"
++            )
++
++        epsilon = float(configuration["epsilon"])
++        reference_conditions = self.high_noise_recovery_condition_vectors
++        reference_scale = self.high_noise_recovery_full_spectrum_scale
++
++        # 首次调用时一次性搬到GPU；之后保持缓存，避免CPU<->GPU同步。
++        if (
++            reference_conditions.device != prediction.device
++            or reference_conditions.dtype != prediction.dtype
++        ):
++            reference_conditions = reference_conditions.to(
++                device=prediction.device, dtype=prediction.dtype
++            )
++            self.high_noise_recovery_condition_vectors = reference_conditions
++        if (
++            reference_scale.device != prediction.device
++            or reference_scale.dtype != prediction.dtype
++        ):
++            reference_scale = reference_scale.to(
++                device=prediction.device, dtype=prediction.dtype
++            )
++            self.high_noise_recovery_full_spectrum_scale = reference_scale
++
++        condition_distance = torch.sum(
++            torch.square(
++                condition.unsqueeze(1) - reference_conditions.unsqueeze(0)
++            ),
++            dim=2,
++        )
++        condition_index = torch.argmin(condition_distance, dim=1)
++
++        length = prediction.shape[-1]
++        if reference_scale.shape[1] < length:
++            raise RuntimeError(
++                "D4.3.2.20 high-noise reference长度小于prediction长度。"
++            )
++        selected_scale = reference_scale[
++            condition_index, :length
++        ].unsqueeze(1).clamp_min(epsilon)
++
++        standardized_error = (
++            local_inverse_slope
++            * (prediction - target)
++            / selected_scale
++        ) * valid_mask
++        pointwise = F.smooth_l1_loss(
++            standardized_error,
++            torch.zeros_like(standardized_error),
++            reduction="none",
++            beta=float(configuration["smooth_l1_beta"]),
++        )
++        valid_count = valid_mask.flatten(start_dim=1).sum(dim=1).clamp_min(1.0)
++        per_sample = (
++            (pointwise * valid_mask).flatten(start_dim=1).sum(dim=1)
++            / valid_count
++        )
++
++        fraction = timesteps.to(dtype=prediction.dtype) / float(
++            max(self.num_timesteps - 1, 1)
++        )
++        minimum = float(configuration["minimum_timestep_fraction"])
++        full_strength = float(configuration["full_strength_timestep_fraction"])
++        gate = ((fraction - minimum) / max(full_strength - minimum, epsilon))
++        gate = gate.clamp(0.0, 1.0).pow(float(configuration["gate_power"]))
++        gate_sum = gate.sum().clamp_min(epsilon)
++
++        raw_loss = (per_sample * gate).sum() / gate_sum
++        active_fraction = (gate > 0.0).to(dtype=prediction.dtype).mean()
++        mean_abs_error_per_sample = (
++            (standardized_error.abs() * valid_mask)
++            .flatten(start_dim=1)
++            .sum(dim=1)
++            / valid_count
++        )
++        mean_abs_error = (mean_abs_error_per_sample * gate).sum() / gate_sum
++
++        return {
++            "raw_loss": raw_loss,
++            "active_fraction": active_fraction,
++            "mean_gate": gate.mean(),
++            "mean_abs_standardized_error": mean_abs_error,
++        }
++
+     def _sample_training_timesteps(
+         self,
+         count: int,
+@@ -1928,6 +2107,33 @@
+                     )
+                 )
+ 
++        high_noise_recovery = self.quality_fidelity_configuration.get(
++            "high_noise_standardized_recovery", {}
++        )
++        if bool(high_noise_recovery.get("enabled", False)):
++            required_recovery_keys = (
++                "condition_vectors",
++                "full_spectrum_scale",
++            )
++            missing_recovery_keys = [
++                name
++                for name in required_recovery_keys
++                if name not in diversity_constraint_state
++            ]
++            if missing_recovery_keys:
++                raise ValueError(
++                    "D4.3.2.20高噪声恢复state缺少字段："
++                    + ", ".join(missing_recovery_keys)
++                )
++            self.high_noise_recovery_condition_vectors = torch.as_tensor(
++                diversity_constraint_state["condition_vectors"],
++                dtype=torch.float32,
++            )
++            self.high_noise_recovery_full_spectrum_scale = torch.as_tensor(
++                diversity_constraint_state["full_spectrum_scale"],
++                dtype=torch.float32,
++            )
++
+         variance_profile = (
+             self.quality_fidelity_configuration.get(
+                 "condition_full_spectrum_variance_profile",
+@@ -2279,6 +2485,47 @@
+         )
+         zero = torch.zeros_like(ddpm_loss)
+ 
++        high_noise_recovery = self._high_noise_standardized_recovery_losses(
++            prediction=model_out,
++            target=target,
++            valid_mask=mask,
++            condition=prepared_condition,
++            timesteps=t,
++            local_inverse_slope=local_inverse_slope,
++        )
++        high_noise_recovery_configuration = (
++            self.quality_fidelity_configuration.get(
++                "high_noise_standardized_recovery", {}
++            )
++        )
++        if bool(high_noise_recovery_configuration.get("enabled", False)):
++            uncapped_high_noise_recovery = (
++                float(high_noise_recovery_configuration["total_weight"])
++                * high_noise_recovery["raw_loss"]
++            )
++            high_noise_recovery_cap = (
++                ddpm_loss.detach()
++                * float(
++                    high_noise_recovery_configuration[
++                        "maximum_total_ratio_to_ddpm"
++                    ]
++                )
++            )
++            high_noise_recovery_scale = torch.clamp(
++                high_noise_recovery_cap
++                / uncapped_high_noise_recovery.detach()
++                .abs()
++                .clamp_min(1.0e-12),
++                max=1.0,
++            )
++            weighted_high_noise_recovery = (
++                uncapped_high_noise_recovery * high_noise_recovery_scale
++            )
++        else:
++            uncapped_high_noise_recovery = zero
++            weighted_high_noise_recovery = zero
++            high_noise_recovery_scale = zero
++
+         if self.diversity_enabled:
+             if self.diversity_loss_module is None:
+                 raise RuntimeError(
+@@ -2487,7 +2734,12 @@
+             uncapped_quality = zero
+             weighted_quality = zero
+ 
+-        reduced = ddpm_loss + weighted_diversity + weighted_quality
++        reduced = (
++            ddpm_loss
++            + weighted_high_noise_recovery
++            + weighted_diversity
++            + weighted_quality
++        )
+         timestep_fraction = t.to(dtype=torch.float32) / float(
+             max(self.num_timesteps - 1, 1)
+         )
+@@ -2506,6 +2758,27 @@
+             "high_noise_training_sample_fraction": (
+                 timestep_fraction >= high_threshold
+             ).to(dtype=torch.float32).mean().detach(),
++            "high_noise_recovery_raw_loss": (
++                high_noise_recovery["raw_loss"].detach()
++            ),
++            "high_noise_recovery_uncapped_loss": (
++                uncapped_high_noise_recovery.detach()
++            ),
++            "high_noise_recovery_loss": (
++                weighted_high_noise_recovery.detach()
++            ),
++            "high_noise_recovery_scale": high_noise_recovery_scale.detach(),
++            "high_noise_recovery_active_fraction": (
++                high_noise_recovery["active_fraction"].detach()
++            ),
++            "high_noise_recovery_mean_gate": (
++                high_noise_recovery["mean_gate"].detach()
++            ),
++            "high_noise_recovery_mean_abs_standardized_error": (
++                high_noise_recovery[
++                    "mean_abs_standardized_error"
++                ].detach()
++            ),
+             "physics_loss": zero,
+             "diversity_loss": weighted_diversity.detach(),
+             "diversity_uncapped_loss": uncapped_diversity.detach(),

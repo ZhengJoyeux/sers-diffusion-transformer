@@ -1,0 +1,668 @@
+From 9a6d18c05f216309801ec25d72c3788665f147e9 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Sun, 13 Sep 2026 23:37:29 +0900
+Subject: [PATCH] D4.3.2.7 piecewise QQ balance across all conditions
+
+---
+ config/ddpm_training_d4_3_formal.yaml   |  47 ++---
+ scripts/evaluate_d4_2_generation.py     | 136 ++++++++++++++
+ scripts/generate_conditional_spectra.py |  31 +++-
+ src/spectrum_generator.py               | 226 +++++++++++++++++++++++-
+ tests/test_sers_generation_evaluator.py |   7 +
+ tests/test_spectrum_generation.py       |  44 +++++
+ 6 files changed, 462 insertions(+), 29 deletions(-)
+
+diff --git a/config/ddpm_training_d4_3_formal.yaml b/config/ddpm_training_d4_3_formal.yaml
+index 0539015..7b2c281 100644
+--- a/config/ddpm_training_d4_3_formal.yaml
++++ b/config/ddpm_training_d4_3_formal.yaml
+@@ -1,9 +1,8 @@
+ project:
+-  # D4.3.2.4基于全部126条件的分层评价继续修复系统性欠离散：
+-  # 训练端提高多尺度方差floor，生成端仅在training-PCA支持子空间
+-  # 内补足整体pairwise spread，并严格阻止超出同条件training极值。
++  # D4.3.2.7针对全部126条件QQ的S形弯曲：限制全局PCA扩展，并用
++  # training-only oracle门控的四段单调映射分别修正内段和外尾。
+   # 扩散训练链由100增加到200；DDIM生成由50增加到100步。
+-  name: d4_3_2_4_global_distribution_balance_formal
++  name: d4_3_2_7_piecewise_qq_balance_formal
+   random_seed: 2026
+ diagnostic_overfit:
+   enabled: false
+@@ -300,11 +299,11 @@ training:
+   maximum_validation_batches: 0
+   validation_random_seed: 2026001
+ output:
+-  output_directory: outputs/experiments/d4_3_2_4_global_distribution_balance_formal
+-  checkpoint_directory: outputs/experiments/d4_3_2_4_global_distribution_balance_formal/checkpoints
+-  log_directory: outputs/experiments/d4_3_2_4_global_distribution_balance_formal/logs
+-  generated_spectrum_directory: outputs/experiments/d4_3_2_4_global_distribution_balance_formal/generated
+-  preview_plot_directory: outputs/experiments/d4_3_2_4_global_distribution_balance_formal/plots
++  output_directory: outputs/experiments/d4_3_2_7_piecewise_qq_balance_formal
++  checkpoint_directory: outputs/experiments/d4_3_2_7_piecewise_qq_balance_formal/checkpoints
++  log_directory: outputs/experiments/d4_3_2_7_piecewise_qq_balance_formal/logs
++  generated_spectrum_directory: outputs/experiments/d4_3_2_7_piecewise_qq_balance_formal/generated
++  preview_plot_directory: outputs/experiments/d4_3_2_7_piecewise_qq_balance_formal/plots
+   latest_checkpoint_name: latest.pt
+   best_checkpoint_name: best.pt
+   training_log_name: training_log.csv
+@@ -329,27 +328,34 @@ generation:
+     minimum_maximum_correction_intensity: 1.0
+     maximum_modified_raman_fraction: 1.00
+   # 只扩展生成批次在同条件12条training主变化方向上不足的标准差。
+-  # 不改变生成均值、不压缩已经足够宽的PC，也不创造training以外的方向；
+-  # 随后的QQ过冲控制与逐点强度包络仍负责拦截异常峰/负谷。
++  # 全126条件结果显示0.90的整体floor把10--90%中段平均扩到1.107，
++  # 因此把目标收回0.85并限制二级扩展，给分段QQ校准保留调整空间。
+   pca_spread_calibration:
+     enabled: true
+     maximum_components: 6
+     explained_variance_ratio: 0.95
+     minimum_component_variance_fraction: 0.01
+-    minimum_component_std_ratio: 0.90
+-    maximum_scale_factor: 1.45
++    minimum_component_std_ratio: 0.85
++    maximum_scale_factor: 1.35
+     # 分量逐个补足后，再检查整批谱的平均pairwise-MSE。若仍偏窄，
+     # 只沿上述training PCA子空间做第二级小幅扩展；正交方向保持不变。
+-    minimum_pairwise_mse_ratio: 0.90
+-    maximum_global_scale_factor: 1.15
+-    maximum_correction_range_fraction: 0.10
++    minimum_pairwise_mse_ratio: 0.85
++    maximum_global_scale_factor: 1.08
++    maximum_correction_range_fraction: 0.08
+     minimum_generated_count: 20
+     epsilon: 1.0e-12
+-  # 先用12条training构造real-vs-real oracle范围。只有生成QQ尾宽既
+-  # 超过oracle上界、又达到明显过冲阈值1.50时，才压缩最外侧5%。
+-  # 这样只处理1.5--1.8倍的异常尾部，不再把正常尾宽整体压到约0.86。
++  # 用12条training构造real-vs-real oracle范围，分别检查1--10%、
++  # 10--50%、50--90%和90--99%四段。只有显著越出oracle带的段才
++  # 双向软校准；单调映射保留强度排序，中位数保持不变。后续逐点
++  # training包络仍拦截扩展尾部可能产生的异常峰和深谷。
+   tail_calibration:
+     enabled: true
++    strategy: oracle_piecewise_quantile
++    piecewise_probabilities: [0.01, 0.10, 0.50, 0.90, 0.99]
++    minimum_segment_span_ratio: 0.90
++    maximum_segment_span_ratio: 1.10
++    correction_strength: 0.60
++    maximum_absolute_correction_z: 0.40
+     lower_probability: 0.01
+     upper_probability: 0.99
+     lower_anchor_probability: 0.05
+@@ -360,7 +366,8 @@ generation:
+     minimum_allowed_tail_ratio: 1.15
+     minimum_trigger_tail_ratio: 1.50
+     minimum_compression_factor: 0.25
+-    maximum_modified_fraction: 0.10
++    maximum_modified_fraction: 1.00
++    epsilon: 1.0e-12
+     random_seed: 2026
+   # 反归一化后、导出前，按同条件逐Raman点训练分布处理极端深谷
+   # 和过强峰。training决定允许边界，生成批次只判断是否属于同位置
+diff --git a/scripts/evaluate_d4_2_generation.py b/scripts/evaluate_d4_2_generation.py
+index 2c87f62..ced7f1f 100644
+--- a/scripts/evaluate_d4_2_generation.py
++++ b/scripts/evaluate_d4_2_generation.py
+@@ -385,6 +385,74 @@ def _qq_agreement_metrics(
+     }
+ 
+ 
++def _qq_piecewise_shape_metrics(
++    probabilities: np.ndarray,
++    reference_quantiles: np.ndarray,
++    generated_quantiles: np.ndarray,
++    oracle_lower: np.ndarray,
++    oracle_upper: np.ndarray,
++) -> dict[str, float]:
++    """Measure QQ curvature that a single R2 or 1--99 span can hide."""
++
++    probabilities = np.asarray(probabilities, dtype=np.float64)
++    reference = np.asarray(reference_quantiles, dtype=np.float64)
++    generated = np.asarray(generated_quantiles, dtype=np.float64)
++    lower = np.asarray(oracle_lower, dtype=np.float64)
++    upper = np.asarray(oracle_upper, dtype=np.float64)
++    if not (
++        probabilities.shape
++        == reference.shape
++        == generated.shape
++        == lower.shape
++        == upper.shape
++    ):
++        raise ValueError("QQ分段形状数组长度不一致。")
++
++    anchor_indices = [
++        int(np.argmin(np.abs(probabilities - value)))
++        for value in (0.01, 0.10, 0.50, 0.90, 0.99)
++    ]
++    reference_anchors = reference[anchor_indices]
++    generated_anchors = generated[anchor_indices]
++    segment_ratios = np.diff(generated_anchors) / np.maximum(
++        np.diff(reference_anchors), EPSILON
++    )
++    central = np.logical_and(probabilities >= 0.10, probabilities <= 0.90)
++    lower_tail = probabilities <= 0.10
++    upper_tail = probabilities >= 0.90
++    slope, intercept = np.polyfit(reference[central], generated[central], 1)
++    continuation = slope * reference + intercept
++    curve_residual = generated - continuation
++    outside = np.logical_or(generated < lower, generated > upper)
++
++    def fraction(mask: np.ndarray) -> float:
++        return float(np.mean(outside[mask])) if np.any(mask) else np.nan
++
++    return {
++        "qq_lower_outer_01_10_span_ratio": float(segment_ratios[0]),
++        "qq_lower_inner_10_50_span_ratio": float(segment_ratios[1]),
++        "qq_upper_inner_50_90_span_ratio": float(segment_ratios[2]),
++        "qq_upper_outer_90_99_span_ratio": float(segment_ratios[3]),
++        "qq_central_fit_slope": float(slope),
++        "qq_lower_tail_signed_curvature": float(
++            np.mean(curve_residual[lower_tail])
++        ),
++        "qq_upper_tail_signed_curvature": float(
++            np.mean(curve_residual[upper_tail])
++        ),
++        "qq_lower_tail_curve_rmse": float(
++            np.sqrt(np.mean(np.square(curve_residual[lower_tail])))
++        ),
++        "qq_upper_tail_curve_rmse": float(
++            np.sqrt(np.mean(np.square(curve_residual[upper_tail])))
++        ),
++        "qq_oracle_outside_fraction": float(np.mean(outside)),
++        "qq_oracle_outside_lower_tail_fraction": fraction(lower_tail),
++        "qq_oracle_outside_central_fraction": fraction(central),
++        "qq_oracle_outside_upper_tail_fraction": fraction(upper_tail),
++    }
++
++
+ def _peak_morphology_diversity(
+     *,
+     condition: str,
+@@ -853,6 +921,13 @@ def _qq_table(
+         "qq_lower_tail_oracle_upper": lower_tail_oracle_upper,
+         "qq_upper_tail_oracle_lower": upper_tail_oracle_lower,
+         "qq_upper_tail_oracle_upper": upper_tail_oracle_upper,
++        **_qq_piecewise_shape_metrics(
++            probabilities,
++            reference_z_q,
++            generated_z_q,
++            table["oracle_standardized_lower"].to_numpy(dtype=np.float64),
++            table["oracle_standardized_upper"].to_numpy(dtype=np.float64),
++        ),
+     }
+     metrics["qq_lower_tail_overrun"] = bool(
+         metrics["qq_lower_tail_span_ratio"] > lower_tail_oracle_upper
+@@ -1331,6 +1406,27 @@ def _qq_stratified_summary(frame: pd.DataFrame) -> pd.DataFrame:
+                     "central_10_90_ratio_mean": float(
+                         group["qq_central_10_90_span_ratio"].mean()
+                     ),
++                    "lower_outer_01_10_ratio_mean": float(
++                        group["qq_lower_outer_01_10_span_ratio"].mean()
++                    ),
++                    "lower_inner_10_50_ratio_mean": float(
++                        group["qq_lower_inner_10_50_span_ratio"].mean()
++                    ),
++                    "upper_inner_50_90_ratio_mean": float(
++                        group["qq_upper_inner_50_90_span_ratio"].mean()
++                    ),
++                    "upper_outer_90_99_ratio_mean": float(
++                        group["qq_upper_outer_90_99_span_ratio"].mean()
++                    ),
++                    "lower_tail_curve_rmse_mean": float(
++                        group["qq_lower_tail_curve_rmse"].mean()
++                    ),
++                    "upper_tail_curve_rmse_mean": float(
++                        group["qq_upper_tail_curve_rmse"].mean()
++                    ),
++                    "oracle_outside_fraction_mean": float(
++                        group["qq_oracle_outside_fraction"].mean()
++                    ),
+                     "raw_r2_mean": float(group["qq_raw_r2"].mean()),
+                     "raw_rmse_mean": float(group["qq_raw_rmse"].mean()),
+                     "model_normalized_r2_mean": float(
+@@ -1428,6 +1524,19 @@ def _quality_stratified_summary(frame: pd.DataFrame) -> pd.DataFrame:
+         "qq_lower_tail_span_ratio",
+         "qq_central_10_90_span_ratio",
+         "qq_upper_tail_span_ratio",
++        "qq_lower_outer_01_10_span_ratio",
++        "qq_lower_inner_10_50_span_ratio",
++        "qq_upper_inner_50_90_span_ratio",
++        "qq_upper_outer_90_99_span_ratio",
++        "qq_central_fit_slope",
++        "qq_lower_tail_signed_curvature",
++        "qq_upper_tail_signed_curvature",
++        "qq_lower_tail_curve_rmse",
++        "qq_upper_tail_curve_rmse",
++        "qq_oracle_outside_fraction",
++        "qq_oracle_outside_lower_tail_fraction",
++        "qq_oracle_outside_central_fraction",
++        "qq_oracle_outside_upper_tail_fraction",
+         "qq_raw_r2",
+         "qq_raw_rmse",
+         "qq_model_normalized_r2",
+@@ -1904,6 +2013,18 @@ def main() -> None:
+             f"overrun={bool(row['qq_any_tail_overrun'])}；"
+             f"underrun={bool(row['qq_any_tail_underrun'])}"
+         )
++        print(
++            "  QQ四段比率[1-10,10-50,50-90,90-99]="
++            f"[{row['qq_lower_outer_01_10_span_ratio']:.4f},"
++            f"{row['qq_lower_inner_10_50_span_ratio']:.4f},"
++            f"{row['qq_upper_inner_50_90_span_ratio']:.4f},"
++            f"{row['qq_upper_outer_90_99_span_ratio']:.4f}]；"
++            "尾部曲率RMSE(lower/upper)="
++            f"{row['qq_lower_tail_curve_rmse']:.4f}/"
++            f"{row['qq_upper_tail_curve_rmse']:.4f}；"
++            "oracle外分位点="
++            f"{row['qq_oracle_outside_fraction']:.2%}"
++        )
+ 
+     condition_summary = pd.DataFrame(summary_rows)
+     nearest_details = pd.concat(nearest_frames, ignore_index=True)
+@@ -2026,6 +2147,21 @@ def main() -> None:
+         f"qq_lower_tail_span_ratio: {overall_mean['qq_lower_tail_span_ratio']:.9g}",
+         f"qq_upper_tail_span_ratio: {overall_mean['qq_upper_tail_span_ratio']:.9g}",
+         f"qq_central_10_90_span_ratio: {overall_mean['qq_central_10_90_span_ratio']:.9g}",
++        "qq_lower_outer_01_10_span_ratio: "
++        f"{overall_mean['qq_lower_outer_01_10_span_ratio']:.9g}",
++        "qq_lower_inner_10_50_span_ratio: "
++        f"{overall_mean['qq_lower_inner_10_50_span_ratio']:.9g}",
++        "qq_upper_inner_50_90_span_ratio: "
++        f"{overall_mean['qq_upper_inner_50_90_span_ratio']:.9g}",
++        "qq_upper_outer_90_99_span_ratio: "
++        f"{overall_mean['qq_upper_outer_90_99_span_ratio']:.9g}",
++        f"qq_central_fit_slope: {overall_mean['qq_central_fit_slope']:.9g}",
++        "qq_lower_tail_curve_rmse: "
++        f"{overall_mean['qq_lower_tail_curve_rmse']:.9g}",
++        "qq_upper_tail_curve_rmse: "
++        f"{overall_mean['qq_upper_tail_curve_rmse']:.9g}",
++        "qq_oracle_outside_fraction: "
++        f"{overall_mean['qq_oracle_outside_fraction']:.9g}",
+         f"qq_raw_r2: {overall_mean['qq_raw_r2']:.9g}",
+         f"qq_raw_rmse: {overall_mean['qq_raw_rmse']:.9g}",
+         f"qq_model_normalized_r2: {overall_mean['qq_model_normalized_r2']:.9g}",
+diff --git a/scripts/generate_conditional_spectra.py b/scripts/generate_conditional_spectra.py
+index 670d7f2..525fc37 100644
+--- a/scripts/generate_conditional_spectra.py
++++ b/scripts/generate_conditional_spectra.py
+@@ -438,14 +438,6 @@ def main() -> None:
+                 source_file=source_file,
+                 output_axis=output_axis,
+             )
+-        if mean_enabled:
+-            spectra, mean_diagnostics = (
+-                apply_condition_mean_fidelity_calibration(
+-                    spectra,
+-                    condition_training,
+-                    configuration=mean_configuration,
+-                )
+-            )
+         if spread_enabled:
+             spectra, spread_diagnostics = (
+                 apply_condition_pca_spread_calibration(
+@@ -466,6 +458,17 @@ def main() -> None:
+                     configuration=condition_tail_configuration,
+                 )
+             )
++        # Shape/spread changes can reintroduce a small pointwise mean bias.
++        # Run the bounded translation-only mean correction afterwards; it
++        # leaves pairwise differences unchanged and improves final fidelity.
++        if mean_enabled:
++            spectra, mean_diagnostics = (
++                apply_condition_mean_fidelity_calibration(
++                    spectra,
++                    condition_training,
++                    configuration=mean_configuration,
++                )
++            )
+         if envelope_enabled:
+             spectra, envelope_diagnostics = (
+                 apply_condition_intensity_envelope_guard(
+@@ -559,6 +562,18 @@ def main() -> None:
+                 "修改点比例="
+                 f"{tail_diagnostics['modified_point_fraction']:.4%}"
+             )
++            if tail_diagnostics.get("strategy") == "oracle_piecewise_quantile":
++                before = tail_diagnostics["segment_span_ratio_before"]
++                after = tail_diagnostics["segment_span_ratio_after"]
++                active = tail_diagnostics["segment_calibration_activated"]
++                print(
++                    "  QQ四段比率[1-10,10-50,50-90,90-99]："
++                    f"{[round(float(value), 4) for value in before]} -> "
++                    f"{[round(float(value), 4) for value in after]}；"
++                    f"触发={active}；"
++                    "最大|delta-z|="
++                    f"{tail_diagnostics['maximum_absolute_correction_z_used']:.4f}"
++                )
+         if envelope_diagnostics is not None:
+             print(
+                 "  逐点强度包络：lower/upper修改点="
+diff --git a/src/spectrum_generator.py b/src/spectrum_generator.py
+index 80e2f62..5349b32 100644
+--- a/src/spectrum_generator.py
++++ b/src/spectrum_generator.py
+@@ -352,7 +352,10 @@ def apply_condition_oracle_tail_calibration(
+     training_spectra: np.ndarray,
+     *,
+     configuration: dict,
+-) -> tuple[np.ndarray, dict[str, float | int | bool]]:
++) -> tuple[
++    np.ndarray,
++    dict[str, float | int | bool | list[float] | str],
++]:
+     """Compress only QQ tails exceeding train-only real-vs-real uncertainty.
+ 
+     The middle distribution is unchanged.  The threshold is not a hand-picked
+@@ -364,6 +367,19 @@ def apply_condition_oracle_tail_calibration(
+     if not isinstance(configuration, dict):
+         raise ValueError("tail_calibration配置必须是字典。")
+ 
++    strategy = str(configuration.get("strategy", "severe_tail_compression"))
++    if strategy == "oracle_piecewise_quantile":
++        return _apply_condition_oracle_piecewise_quantile_calibration(
++            generated,
++            training,
++            configuration=configuration,
++        )
++    if strategy != "severe_tail_compression":
++        raise ValueError(
++            "tail_calibration.strategy必须是severe_tail_compression或"
++            "oracle_piecewise_quantile。"
++        )
++
+     lower_probability = float(configuration.get("lower_probability", 0.01))
+     upper_probability = float(configuration.get("upper_probability", 0.99))
+     lower_anchor = float(configuration.get("lower_anchor_probability", 0.05))
+@@ -524,6 +540,214 @@ def apply_condition_oracle_tail_calibration(
+     return corrected.astype(np.float32, copy=False), diagnostics
+ 
+ 
++def _apply_condition_oracle_piecewise_quantile_calibration(
++    generated: np.ndarray,
++    training: np.ndarray,
++    *,
++    configuration: dict,
++) -> tuple[np.ndarray, dict[str, float | int | bool | list[float] | str]]:
++    """Correct significant QQ curvature with a monotone train-only mapping.
++
++    Four spans (1--10, 10--50, 50--90 and 90--99 percent) are handled
++    independently.  A span is changed only when its generated/training ratio
++    lies outside the real-vs-real bootstrap interval.  The mapping is
++    monotone, preserves the generated median and is capped in standardized
++    units.  The pointwise training envelope guard still runs afterwards.
++    """
++
++    probabilities = np.asarray(
++        configuration.get(
++            "piecewise_probabilities", [0.01, 0.10, 0.50, 0.90, 0.99]
++        ),
++        dtype=np.float64,
++    )
++    reference_count = int(configuration.get("oracle_reference_count", 4))
++    repeats = int(configuration.get("oracle_bootstrap_repeats", 256))
++    confidence = float(configuration.get("oracle_confidence", 0.975))
++    minimum_ratio = float(configuration.get("minimum_segment_span_ratio", 0.90))
++    maximum_ratio = float(configuration.get("maximum_segment_span_ratio", 1.10))
++    correction_strength = float(configuration.get("correction_strength", 0.60))
++    maximum_correction_z = float(
++        configuration.get("maximum_absolute_correction_z", 0.40)
++    )
++    maximum_modified_fraction = float(
++        configuration.get("maximum_modified_fraction", 1.0)
++    )
++    random_seed = int(configuration.get("random_seed", 2026))
++    epsilon = float(configuration.get("epsilon", 1.0e-12))
++
++    if probabilities.shape != (5,) or not np.all(np.diff(probabilities) > 0.0):
++        raise ValueError("piecewise_probabilities必须是5个严格递增分位数。")
++    if not (
++        0.0 < probabilities[0]
++        < probabilities[1]
++        < probabilities[2]
++        < probabilities[3]
++        < probabilities[4]
++        < 1.0
++    ):
++        raise ValueError("piecewise_probabilities必须位于(0,1)。")
++    if not 2 <= reference_count < training.shape[0] - 1:
++        raise ValueError("oracle_reference_count必须小于训练谱数且至少为2。")
++    if repeats < 32 or not 0.90 <= confidence < 1.0:
++        raise ValueError("oracle_bootstrap_repeats至少32且confidence位于[0.90,1)。")
++    if not 0.50 <= minimum_ratio <= 1.0:
++        raise ValueError("minimum_segment_span_ratio必须位于[0.50,1]。")
++    if not 1.0 <= maximum_ratio <= 1.50 or minimum_ratio >= maximum_ratio:
++        raise ValueError("maximum_segment_span_ratio必须位于[1,1.50]且大于下界。")
++    if not 0.0 < correction_strength <= 1.0:
++        raise ValueError("correction_strength必须位于(0,1]。")
++    if maximum_correction_z <= 0.0:
++        raise ValueError("maximum_absolute_correction_z必须为正数。")
++    if not 0.0 < maximum_modified_fraction <= 1.0 or epsilon <= 0.0:
++        raise ValueError("maximum_modified_fraction或epsilon无效。")
++
++    generated_z, training_z, center, scale = _training_standardized_values(
++        generated, training
++    )
++    training_q = np.quantile(training_z.reshape(-1), probabilities)
++    generated_q = np.quantile(generated_z.reshape(-1), probabilities)
++    training_spans = np.maximum(np.diff(training_q), epsilon)
++    generated_spans = np.maximum(np.diff(generated_q), epsilon)
++    ratios_before = generated_spans / training_spans
++
++    random_generator = np.random.default_rng(random_seed)
++    indices = np.arange(training.shape[0], dtype=np.int64)
++    oracle_ratios: list[np.ndarray] = []
++    cache: dict[tuple[int, ...], np.ndarray] = {}
++    for _ in range(repeats):
++        shuffled = random_generator.permutation(indices)
++        reference_indices = tuple(
++            sorted(int(value) for value in shuffled[:reference_count])
++        )
++        cached = cache.get(reference_indices)
++        if cached is not None:
++            oracle_ratios.append(cached)
++            continue
++        reference_array = np.asarray(reference_indices, dtype=np.int64)
++        population_array = np.asarray(
++            [value for value in indices if int(value) not in reference_indices],
++            dtype=np.int64,
++        )
++        reference_q = np.quantile(
++            training_z[reference_array].reshape(-1), probabilities
++        )
++        population_q = np.quantile(
++            training_z[population_array].reshape(-1), probabilities
++        )
++        ratio = np.diff(population_q) / np.maximum(
++            np.diff(reference_q), epsilon
++        )
++        cache[reference_indices] = ratio
++        oracle_ratios.append(ratio)
++
++    oracle_array = np.stack(oracle_ratios, axis=0)
++    oracle_lower = np.quantile(oracle_array, 1.0 - confidence, axis=0)
++    oracle_upper = np.quantile(oracle_array, confidence, axis=0)
++    outside_oracle = np.logical_or(
++        ratios_before < oracle_lower,
++        ratios_before > oracle_upper,
++    )
++    outside_target_band = np.logical_or(
++        ratios_before < minimum_ratio,
++        ratios_before > maximum_ratio,
++    )
++    significant = np.logical_and(outside_oracle, outside_target_band)
++    desired_ratios = np.clip(ratios_before, minimum_ratio, maximum_ratio)
++    desired_ratios = np.where(significant, desired_ratios, ratios_before)
++    target_spans = generated_spans + correction_strength * (
++        desired_ratios * training_spans - generated_spans
++    )
++
++    target_q = np.empty_like(generated_q)
++    target_q[2] = generated_q[2]
++    target_q[1] = target_q[2] - target_spans[1]
++    target_q[0] = target_q[1] - target_spans[0]
++    target_q[3] = target_q[2] + target_spans[2]
++    target_q[4] = target_q[3] + target_spans[3]
++
++    flat = generated_z.reshape(-1)
++    if np.any(significant):
++        mapped = np.interp(flat, generated_q, target_q)
++        left = flat < generated_q[0]
++        right = flat > generated_q[-1]
++        left_slope = target_spans[0] / generated_spans[0]
++        right_slope = target_spans[-1] / generated_spans[-1]
++        mapped[left] = target_q[0] + left_slope * (flat[left] - generated_q[0])
++        mapped[right] = target_q[-1] + right_slope * (
++            flat[right] - generated_q[-1]
++        )
++        delta = np.clip(
++            mapped - flat, -maximum_correction_z, maximum_correction_z
++        )
++    else:
++        delta = np.zeros_like(flat)
++    corrected_z = (flat + delta).reshape(generated_z.shape)
++    modified = np.abs(delta) > 1.0e-12
++    modified_fraction = float(np.mean(modified))
++    if modified_fraction > maximum_modified_fraction + 1.0e-12:
++        raise RuntimeError(
++            "分段QQ校准修改比例超过安全上限："
++            f"{modified_fraction:.6%} > {maximum_modified_fraction:.6%}。"
++        )
++
++    corrected_q = np.quantile(corrected_z.reshape(-1), probabilities)
++    ratios_after = np.diff(corrected_q) / training_spans
++    corrected = center[np.newaxis, :] + scale[np.newaxis, :] * corrected_z
++    lower_before = float(
++        (generated_q[2] - generated_q[0])
++        / max(float(training_q[2] - training_q[0]), epsilon)
++    )
++    upper_before = float(
++        (generated_q[4] - generated_q[2])
++        / max(float(training_q[4] - training_q[2]), epsilon)
++    )
++    lower_after = float(
++        (corrected_q[2] - corrected_q[0])
++        / max(float(training_q[2] - training_q[0]), epsilon)
++    )
++    upper_after = float(
++        (corrected_q[4] - corrected_q[2])
++        / max(float(training_q[4] - training_q[2]), epsilon)
++    )
++    lower_active = bool(np.any(significant[:2]))
++    upper_active = bool(np.any(significant[2:]))
++    diagnostics: dict[str, float | int | bool | list[float] | str] = {
++        "enabled": True,
++        "strategy": "oracle_piecewise_quantile",
++        "training_only": True,
++        "preserves_generated_median": True,
++        "oracle_bootstrap_repeats": repeats,
++        "piecewise_probabilities": probabilities.tolist(),
++        "segment_span_ratio_before": ratios_before.tolist(),
++        "segment_span_ratio_after": ratios_after.tolist(),
++        "segment_oracle_lower": oracle_lower.tolist(),
++        "segment_oracle_upper": oracle_upper.tolist(),
++        "segment_calibration_activated": significant.tolist(),
++        "active_segment_count": int(np.sum(significant)),
++        "lower_tail_ratio_before": lower_before,
++        "upper_tail_ratio_before": upper_before,
++        "lower_tail_ratio_after": lower_after,
++        "upper_tail_ratio_after": upper_after,
++        "lower_compression_factor": min(lower_after / max(lower_before, epsilon), 1.0),
++        "upper_compression_factor": min(upper_after / max(upper_before, epsilon), 1.0),
++        "lower_tail_calibration_activated": lower_active,
++        "upper_tail_calibration_activated": upper_active,
++        "lower_tail_expansion_activated": bool(
++            np.any(np.logical_and(significant[:2], ratios_after[:2] > ratios_before[:2]))
++        ),
++        "upper_tail_expansion_activated": bool(
++            np.any(np.logical_and(significant[2:], ratios_after[2:] > ratios_before[2:]))
++        ),
++        "modified_point_fraction": modified_fraction,
++        "modified_spectrum_count": int(
++            np.sum(np.any(modified.reshape(generated_z.shape), axis=1))
++        ),
++        "maximum_absolute_correction_z_used": float(np.max(np.abs(delta))),
++    }
++    return corrected.astype(np.float32, copy=False), diagnostics
++
++
+ def apply_condition_intensity_envelope_guard(
+     generated_spectra: np.ndarray,
+     training_spectra: np.ndarray,
+diff --git a/tests/test_sers_generation_evaluator.py b/tests/test_sers_generation_evaluator.py
+index aa900be..a77023b 100644
+--- a/tests/test_sers_generation_evaluator.py
++++ b/tests/test_sers_generation_evaluator.py
+@@ -318,6 +318,13 @@ def test_core_generation_metrics_and_qq_are_finite():
+     assert qq_metrics["qq_upper_tail_span_ratio"] > 0.0
+     assert np.isfinite(qq_metrics["qq_model_normalized_r2"])
+     assert np.isfinite(qq_metrics["qq_model_normalized_rmse"])
++    assert qq_metrics["qq_lower_outer_01_10_span_ratio"] > 0.0
++    assert qq_metrics["qq_lower_inner_10_50_span_ratio"] > 0.0
++    assert qq_metrics["qq_upper_inner_50_90_span_ratio"] > 0.0
++    assert qq_metrics["qq_upper_outer_90_99_span_ratio"] > 0.0
++    assert qq_metrics["qq_lower_tail_curve_rmse"] >= 0.0
++    assert qq_metrics["qq_upper_tail_curve_rmse"] >= 0.0
++    assert 0.0 <= qq_metrics["qq_oracle_outside_fraction"] <= 1.0
+     assert (
+         qq_metrics["qq_lower_tail_oracle_lower"]
+         < qq_metrics["qq_lower_tail_oracle_upper"]
+diff --git a/tests/test_spectrum_generation.py b/tests/test_spectrum_generation.py
+index 55b4ec5..783bd30 100644
+--- a/tests/test_spectrum_generation.py
++++ b/tests/test_spectrum_generation.py
+@@ -412,6 +412,50 @@ def test_oracle_tail_calibration_leaves_nonsevere_tail_unchanged():
+     assert diagnostics["upper_tail_calibration_activated"] is False
+ 
+ 
++def test_oracle_piecewise_quantile_calibration_reduces_s_shaped_qq_error():
++    random_generator = np.random.default_rng(2031)
++    training = random_generator.normal(0.0, 1.0, size=(12, 240))
++    center = np.mean(training, axis=0)
++    scale = np.std(training, axis=0, ddof=1)
++    scale = np.maximum(scale, np.percentile(scale[scale > 1.0e-12], 10.0))
++    latent = random_generator.normal(0.0, 1.0, size=(200, 240))
++    magnitude = np.abs(latent)
++    distorted = np.sign(latent) * np.where(
++        magnitude <= 1.0,
++        1.30 * magnitude,
++        1.30 + 0.55 * (magnitude - 1.0),
++    )
++    generated = center[None, :] + scale[None, :] * distorted
++
++    corrected, diagnostics = apply_condition_oracle_tail_calibration(
++        generated,
++        training,
++        configuration={
++            "strategy": "oracle_piecewise_quantile",
++            "piecewise_probabilities": [0.01, 0.10, 0.50, 0.90, 0.99],
++            "oracle_reference_count": 4,
++            "oracle_bootstrap_repeats": 64,
++            "oracle_confidence": 0.95,
++            "minimum_segment_span_ratio": 0.90,
++            "maximum_segment_span_ratio": 1.10,
++            "correction_strength": 0.80,
++            "maximum_absolute_correction_z": 0.60,
++            "maximum_modified_fraction": 1.0,
++            "random_seed": 2031,
++        },
++    )
++
++    before = np.asarray(diagnostics["segment_span_ratio_before"])
++    after = np.asarray(diagnostics["segment_span_ratio_after"])
++    assert diagnostics["active_segment_count"] >= 1
++    assert np.mean(np.abs(after - 1.0)) < np.mean(np.abs(before - 1.0))
++    assert diagnostics["maximum_absolute_correction_z_used"] <= 0.60 + 1.0e-12
++    assert np.isfinite(corrected).all()
++    generated_z = (generated - center[None, :]) / scale[None, :]
++    corrected_z = (corrected - center[None, :]) / scale[None, :]
++    assert abs(np.median(corrected_z) - np.median(generated_z)) < 1.0e-4
++
++
+ def test_quality_fidelity_losses_detect_shape_mean_and_envelope_errors():
+     diffusion = object.__new__(MaskedGaussianDiffusion1D)
+     nn.Module.__init__(diffusion)
+-- 
+2.51.1
+

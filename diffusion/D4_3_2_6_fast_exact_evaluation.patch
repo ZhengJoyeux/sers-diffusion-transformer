@@ -1,0 +1,358 @@
+From f53d29266ae2df35395fadab3a154588ee98f6c6 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.invalid>
+Date: Sun, 13 Sep 2026 19:38:00 +0530
+Subject: [PATCH] Accelerate exact all-condition evaluation
+
+---
+ scripts/evaluate_d4_2_generation.py     | 208 ++++++++++++++++--------
+ src/sers_generation_evaluator.py        |  13 +-
+ tests/test_sers_generation_evaluator.py |   4 +-
+ 3 files changed, 153 insertions(+), 72 deletions(-)
+
+diff --git a/scripts/evaluate_d4_2_generation.py b/scripts/evaluate_d4_2_generation.py
+index b232f91..2c87f62 100644
+--- a/scripts/evaluate_d4_2_generation.py
++++ b/scripts/evaluate_d4_2_generation.py
+@@ -75,6 +75,15 @@ def parse_arguments() -> argparse.Namespace:
+     parser.add_argument("--qq-quantile-count", type=int, default=101)
+     parser.add_argument("--qq-oracle-repeats", type=int, default=256)
+     parser.add_argument("--qq-oracle-confidence", type=float, default=0.975)
++    parser.add_argument(
++        "--plot-mode",
++        choices=("all", "none"),
++        default="all",
++        help=(
++            "all输出全部论文图；none只计算并保存数值CSV，适合快速迭代。"
++            "该选项不改变任何数值指标。"
++        ),
++    )
+     return parser.parse_args()
+ 
+ 
+@@ -682,14 +691,43 @@ def _qq_table(
+         int(np.argmin(np.abs(probabilities - value)))
+         for value in (0.01, 0.50, 0.99)
+     ]
++    oracle_cache: dict[
++        tuple[int, ...],
++        tuple[np.ndarray, np.ndarray, np.ndarray, float, float],
++    ] = {}
+     for _ in range(repeats):
+         shuffled = random_generator.permutation(indices)
+-        pseudo_reference = training[shuffled[:reference_count]]
+-        pseudo_population = training[shuffled[reference_count:]]
+-        pseudo_reference_z = training_z[shuffled[:reference_count]]
+-        pseudo_population_z = training_z[shuffled[reference_count:]]
+-        pseudo_reference_model = training_model[shuffled[:reference_count]]
+-        pseudo_population_model = training_model[shuffled[reference_count:]]
++        reference_subset = tuple(
++            sorted(int(value) for value in shuffled[:reference_count])
++        )
++        cached = oracle_cache.get(reference_subset)
++        if cached is not None:
++            (
++                raw_difference,
++                model_difference,
++                z_difference,
++                low_ratio,
++                high_ratio,
++            ) = cached
++            raw_differences.append(raw_difference)
++            model_differences.append(model_difference)
++            standardized_differences.append(z_difference)
++            lower_tail_ratios.append(low_ratio)
++            upper_tail_ratios.append(high_ratio)
++            continue
++        pseudo_reference_indices = np.asarray(
++            reference_subset, dtype=np.int64
++        )
++        pseudo_population_indices = np.asarray(
++            [value for value in indices if int(value) not in reference_subset],
++            dtype=np.int64,
++        )
++        pseudo_reference = training[pseudo_reference_indices]
++        pseudo_population = training[pseudo_population_indices]
++        pseudo_reference_z = training_z[pseudo_reference_indices]
++        pseudo_population_z = training_z[pseudo_population_indices]
++        pseudo_reference_model = training_model[pseudo_reference_indices]
++        pseudo_population_model = training_model[pseudo_population_indices]
+         reference_boot_raw = np.quantile(pseudo_reference, probabilities)
+         population_boot_raw = np.quantile(pseudo_population, probabilities)
+         reference_boot_model = np.quantile(
+@@ -700,11 +738,9 @@ def _qq_table(
+         )
+         reference_boot_z = np.quantile(pseudo_reference_z, probabilities)
+         population_boot_z = np.quantile(pseudo_population_z, probabilities)
+-        raw_differences.append(population_boot_raw - reference_boot_raw)
+-        model_differences.append(
+-            population_boot_model - reference_boot_model
+-        )
+-        standardized_differences.append(population_boot_z - reference_boot_z)
++        raw_difference = population_boot_raw - reference_boot_raw
++        model_difference = population_boot_model - reference_boot_model
++        z_difference = population_boot_z - reference_boot_z
+         low, middle, high = tail_indices
+         lower_denominator = max(
+             float(reference_boot_z[middle] - reference_boot_z[low]), EPSILON
+@@ -712,18 +748,26 @@ def _qq_table(
+         upper_denominator = max(
+             float(reference_boot_z[high] - reference_boot_z[middle]), EPSILON
+         )
+-        lower_tail_ratios.append(
+-            float(
+-                (population_boot_z[middle] - population_boot_z[low])
+-                / lower_denominator
+-            )
++        low_ratio = float(
++            (population_boot_z[middle] - population_boot_z[low])
++            / lower_denominator
+         )
+-        upper_tail_ratios.append(
+-            float(
+-                (population_boot_z[high] - population_boot_z[middle])
+-                / upper_denominator
+-            )
++        high_ratio = float(
++            (population_boot_z[high] - population_boot_z[middle])
++            / upper_denominator
+         )
++        oracle_cache[reference_subset] = (
++            raw_difference,
++            model_difference,
++            z_difference,
++            low_ratio,
++            high_ratio,
++        )
++        raw_differences.append(raw_difference)
++        model_differences.append(model_difference)
++        standardized_differences.append(z_difference)
++        lower_tail_ratios.append(low_ratio)
++        upper_tail_ratios.append(high_ratio)
+ 
+     alpha = 1.0 - confidence
+     raw_difference_array = np.stack(raw_differences, axis=0)
+@@ -1636,25 +1680,26 @@ def main() -> None:
+         )
+         if not peak_details.empty:
+             peak_diversity_frames.append(peak_details)
+-            _plot_peak_diversity(
+-                peak_details,
+-                output_root
+-                / "peak_diversity_plots"
+-                / f"{source_name}_peak_diversity.png",
+-            )
+-            _plot_peak_intensity_violins(
+-                axis=axis,
+-                training=training,
+-                reference=reference,
+-                generated=generated,
+-                details=peak_details,
+-                condition=source_name,
+-                output=(
++            if arguments.plot_mode == "all":
++                _plot_peak_diversity(
++                    peak_details,
+                     output_root
+-                    / "peak_violin_plots"
+-                    / f"{source_name}_peak_violin.png"
+-                ),
+-            )
++                    / "peak_diversity_plots"
++                    / f"{source_name}_peak_diversity.png",
++                )
++                _plot_peak_intensity_violins(
++                    axis=axis,
++                    training=training,
++                    reference=reference,
++                    generated=generated,
++                    details=peak_details,
++                    condition=source_name,
++                    output=(
++                        output_root
++                        / "peak_violin_plots"
++                        / f"{source_name}_peak_violin.png"
++                    ),
++                )
+         qq, qq_metrics = _qq_table(
+             condition=source_name,
+             training=training,
+@@ -1669,23 +1714,24 @@ def main() -> None:
+             random_seed=2026000 + condition_index,
+         )
+         qq_frames.append(qq)
+-        _plot_qq(
+-            qq,
+-            source_name,
+-            output_root / "qq_plots" / f"{source_name}_qq.png",
+-        )
+-        _plot_spectral_distribution(
+-            axis=axis,
+-            training=training,
+-            reference=reference,
+-            generated=generated,
+-            condition=source_name,
+-            output=(
+-                output_root
+-                / "spectral_distribution_plots"
+-                / f"{source_name}_distribution.png"
+-            ),
+-        )
++        if arguments.plot_mode == "all":
++            _plot_qq(
++                qq,
++                source_name,
++                output_root / "qq_plots" / f"{source_name}_qq.png",
++            )
++            _plot_spectral_distribution(
++                axis=axis,
++                training=training,
++                reference=reference,
++                generated=generated,
++                condition=source_name,
++                output=(
++                    output_root
++                    / "spectral_distribution_plots"
++                    / f"{source_name}_distribution.png"
++                ),
++            )
+ 
+         generated_to_training_mse = float(
+             generated_training_context["generated_to_training_mse_mean"]
+@@ -1871,7 +1917,8 @@ def main() -> None:
+     qq_stratified = _qq_stratified_summary(condition_summary)
+     quality_stratified = _quality_stratified_summary(condition_summary)
+     overview_path = output_root / "quality_overview.png"
+-    _plot_quality_overview(condition_summary, overview_path)
++    if arguments.plot_mode == "all":
++        _plot_quality_overview(condition_summary, overview_path)
+     overall_mean = {
+         str(record["metric"]): float(record["mean"])
+         for record in overall.to_dict(orient="records")
+@@ -1933,6 +1980,7 @@ def main() -> None:
+         f"checkpoint: {checkpoint_path}",
+         f"reference_split: {arguments.reference_split}",
+         f"condition_count: {condition_summary.shape[0]}",
++        f"plot_mode: {arguments.plot_mode}",
+         "MSE/RMSE/cosine/Pearson: same Raman positions after selecting the nearest same-condition held-out spectrum; values are never sorted",
+         "RMSE: mean per-spectrum raw RMSE; it is not QQ RMSE",
+         "Standardized shape MSE/RMSE: per-spectrum z-normalized shape comparison",
+@@ -2004,28 +2052,56 @@ def main() -> None:
+         f"{weighted_fraction('generated_above_training_envelope_point_fraction', point_weights):.9g}",
+         f"condition_metrics: {condition_path}",
+         f"overall_summary: {overall_path}",
+-        f"qq_directory: {output_root / 'qq_plots'}",
++        "qq_directory: "
++        + (
++            str(output_root / "qq_plots")
++            if arguments.plot_mode == "all"
++            else "disabled (--plot-mode none)"
++        ),
+         "spectral_distribution_directory: "
+-        f"{output_root / 'spectral_distribution_plots'}",
+-        f"quality_overview: {overview_path}",
++        + (
++            str(output_root / "spectral_distribution_plots")
++            if arguments.plot_mode == "all"
++            else "disabled (--plot-mode none)"
++        ),
++        "quality_overview: "
++        + (
++            str(overview_path)
++            if arguments.plot_mode == "all"
++            else "disabled (--plot-mode none)"
++        ),
+         f"qq_stratified_summary: {qq_stratified_path}",
+         f"quality_stratified_summary: {quality_stratified_path}",
+         f"peak_morphology_details: {peak_details_path}",
+-        f"peak_diversity_plots: {output_root / 'peak_diversity_plots'}",
+-        f"peak_violin_plots: {output_root / 'peak_violin_plots'}",
++        "peak_diversity_plots: "
++        + (
++            str(output_root / "peak_diversity_plots")
++            if arguments.plot_mode == "all"
++            else "disabled (--plot-mode none)"
++        ),
++        "peak_violin_plots: "
++        + (
++            str(output_root / "peak_violin_plots")
++            if arguments.plot_mode == "all"
++            else "disabled (--plot-mode none)"
++        ),
+     ]
+     report_path = output_root / "evaluation_report.txt"
+     report_path.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
+     print("===== 评价完成 =====")
+     print(f"逐条件指标：{condition_path}")
+     print(f"总体统计：{overall_path}")
+-    print(f"QQ图：{output_root / 'qq_plots'}")
+-    print(f"光谱分布图：{output_root / 'spectral_distribution_plots'}")
+-    print(f"全条件总览图：{overview_path}")
++    if arguments.plot_mode == "all":
++        print(f"QQ图：{output_root / 'qq_plots'}")
++        print(f"光谱分布图：{output_root / 'spectral_distribution_plots'}")
++        print(f"全条件总览图：{overview_path}")
++    else:
++        print("图像输出：已跳过（--plot-mode none，数值指标不受影响）")
+     print(f"QQ分层汇总：{qq_stratified_path}")
+     print(f"全质量分层汇总：{quality_stratified_path}")
+     print(f"峰形多样性明细：{peak_details_path}")
+-    print(f"特征峰小提琴图：{output_root / 'peak_violin_plots'}")
++    if arguments.plot_mode == "all":
++        print(f"特征峰小提琴图：{output_root / 'peak_violin_plots'}")
+     print(f"报告：{report_path}")
+ 
+ 
+diff --git a/src/sers_generation_evaluator.py b/src/sers_generation_evaluator.py
+index ba81e95..cf33c17 100644
+--- a/src/sers_generation_evaluator.py
++++ b/src/sers_generation_evaluator.py
+@@ -1267,15 +1267,20 @@ def sample_pair_metrics(
+     if number < 2:
+         raise ValueError("pair metrics至少需要2条光谱。")
+ 
+-    if all_pairs_if_small:
++    total_unique_pairs = number * (number - 1) // 2
++    requested = int(pair_count)
++    if requested <= 0:
++        raise ValueError("pair_count必须大于0。")
++
++    # Once the requested sample count reaches the finite number of unique
++    # unordered pairs, calculate every pair exactly. This removes duplicated
++    # random pairs and is both faster and statistically stronger for n=20/200.
++    if all_pairs_if_small or requested >= total_unique_pairs:
+         left_indices, right_indices = np.triu_indices(
+             number,
+             k=1,
+         )
+     else:
+-        requested = int(pair_count)
+-        if requested <= 0:
+-            raise ValueError("pair_count必须大于0。")
+         rng = np.random.default_rng(int(random_seed))
+         left_indices = rng.integers(
+             0,
+diff --git a/tests/test_sers_generation_evaluator.py b/tests/test_sers_generation_evaluator.py
+index 2427dcb..aa900be 100644
+--- a/tests/test_sers_generation_evaluator.py
++++ b/tests/test_sers_generation_evaluator.py
+@@ -250,7 +250,7 @@ def test_broad_local_matched_bootstrap_runs():
+     ).all()
+ 
+ 
+-def test_diversity_summary_uses_requested_pairs():
++def test_diversity_summary_uses_all_unique_pairs_when_request_is_larger():
+     _, training = _synthetic_sers(
+         number=16,
+         seed=2026,
+@@ -272,7 +272,7 @@ def test_diversity_summary_uses_requested_pairs():
+     )
+ 
+     assert training_pairs.shape[0] == 120
+-    assert generated_pairs.shape[0] == 500
++    assert generated_pairs.shape[0] == 496
+     assert summary.shape[0] == 4
+ 
+ 
+-- 
+2.51.1
+

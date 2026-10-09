@@ -1,0 +1,666 @@
+--- a/Dataset.py
++++ b/Dataset.py
+@@ -6,8 +6,8 @@
+ - read D4.24 generated spectra from data/generated
+ - fixed 12/4/4 real split per source file
+ - generated spectra are training-only
+-- unify all model inputs to the common measured range 600-2000 cm^-1 (1401 points)
+-- keep valid_mask support for safety, while preventing Raman-length/CHL label leakage
++- use a uniform 600-2500 cm^-1 model axis (1901 points)
++- require every real source spectrum to genuinely cover the full model range
+ - preserve negative baseline-corrected SERS values with signed-log1p preprocessing
+ 
+ The output order of pesticide targets is always: [DEL, CHL, TEB].
+@@ -36,10 +36,32 @@
+ PESTICIDE_TO_INDEX = {name: index for index, name in enumerate(PESTICIDES)}
+ LEVEL_TO_CODE = {"S": 1.0, "M": 2.0, "H": 3.0}
+ 
+-MODEL_RAMAN_AXIS = np.arange(600.0, 2000.0 + 1.0, 1.0, dtype=np.float32)
++MODEL_RAMAN_AXIS = np.arange(600.0, 2500.0 + 1.0, 1.0, dtype=np.float32)
+ MODEL_LENGTH = int(MODEL_RAMAN_AXIS.size)
+-if MODEL_LENGTH != 1401:
+-    raise RuntimeError(f"Unexpected common-axis Raman length: {MODEL_LENGTH}")
++if MODEL_LENGTH != 1901:
++    raise RuntimeError(f"Unexpected full-axis Raman length: {MODEL_LENGTH}")
++
++FULL_AXIS_COVERAGE_TOLERANCE_CM1 = 1.0
++DEFAULT_CORE_PEAK_HALF_WIDTH_CM1 = 7.0
++DEFAULT_AUXILIARY_PRIOR_MAX_WEIGHT = 0.35
++DEFAULT_SHARED_CORE_PEAK_WEIGHT = 0.65
++
++# Chemistry anchors are deliberately separated from data-driven auxiliary regions.
++# These centers are user-specified SERS core peaks; +/-7 cm^-1 is the initial
++# engineering tolerance and should later be validated against real training spectra.
++CHEMISTRY_CORE_PEAKS: dict[str, tuple[dict[str, float | str], ...]] = {
++    "DEL": (
++        {"center_cm-1": 1000.0, "role": "strong"},
++        {"center_cm-1": 1600.0, "role": "shared"},
++    ),
++    "CHL": (
++        {"center_cm-1": 2230.0, "role": "strong"},
++    ),
++    "TEB": (
++        {"center_cm-1": 1090.0, "role": "strong"},
++        {"center_cm-1": 1597.0, "role": "shared"},
++    ),
++}
+ 
+ REAL_TRAIN_INDICES = tuple(range(0, 12))
+ REAL_VALIDATION_INDICES = tuple(range(12, 16))
+@@ -240,9 +262,9 @@
+ ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+     """
+     Produce the three SERSFormer2 input branches:
+-      raw        : [1, 1401], valid-region min-max after signed-log1p
+-      percentile : [4, 1401], 95/85/75/50 percentile feature channels
+-      smoothed   : [1, 1401], Hann-smoothed signed-log1p signal
++      raw        : [1, 1901], valid-region min-max after signed-log1p
++      percentile : [4, 1901], 95/85/75/50 percentile feature channels
++      smoothed   : [1, 1901], Hann-smoothed signed-log1p signal
+ 
+     signed-log1p is used instead of the upstream "x>1 else 0.001" rule because
+     these baseline-corrected SERS spectra legitimately contain negative values.
+@@ -311,12 +333,23 @@
+         if len(files) != 126:
+             raise RuntimeError(f"Expected 126 real source files, found {len(files)}")
+ 
++        incomplete_full_axis: list[str] = []
++
+         for path in files:
+             condition = _condition_from_real_path(path)
+             if condition in self.real_data:
+                 raise RuntimeError(f"Duplicate real condition: {condition}")
+ 
+             axis, spectra, names = _read_table(path)
++            if (
++                float(axis[0]) > float(MODEL_RAMAN_AXIS[0]) + FULL_AXIS_COVERAGE_TOLERANCE_CM1
++                or float(axis[-1]) < float(MODEL_RAMAN_AXIS[-1]) - FULL_AXIS_COVERAGE_TOLERANCE_CM1
++            ):
++                incomplete_full_axis.append(
++                    f"{path}: {float(axis[0]):.1f}-{float(axis[-1]):.1f} cm^-1 "
++                    f"({int(axis.size)} points)"
++                )
++
+             if spectra.shape[1] != 20:
+                 raise RuntimeError(
+                     f"Each real source file must contain 20 spectra: {path}; "
+@@ -333,6 +366,19 @@
+                 "condition_info": info,
+             }
+ 
++        if incomplete_full_axis:
++            preview = "\n".join(f"  - {item}" for item in incomplete_full_axis[:40])
++            suffix = ""
++            if len(incomplete_full_axis) > 40:
++                suffix = f"\n  ... and {len(incomplete_full_axis) - 40} more"
++            raise RuntimeError(
++                "Full-axis SERSFormer mode requires every REAL source file to "
++                "genuinely cover 600-2500 cm^-1. Do not zero-pad, extrapolate, "
++                "or use generated spectra to fabricate the missing tail. "
++                f"Incomplete real files ({len(incomplete_full_axis)}):\n"
++                f"{preview}{suffix}"
++            )
++
+     def load_generated_data(self, require_complete: bool = True) -> None:
+         if self.generated_data is not None:
+             if require_complete and len(self.generated_data) != 126:
+@@ -394,9 +440,9 @@
+         "model_axis_end_cm-1": float(MODEL_RAMAN_AXIS[-1]),
+         "model_axis_points": int(MODEL_LENGTH),
+         "mitigation": (
+-            "All model inputs are cropped/interpolated to the common 600-2000 cm^-1 "
+-            "range, so source-axis length and the 2000-2500 cm^-1 acquisition tail "
+-            "cannot be used as a pesticide-class cue."
++            "Full-axis mode requires every real source file to genuinely cover "
++            "600-2500 cm^-1. Missing 2000-2500 cm^-1 tails are rejected rather "
++            "than padded or extrapolated, preventing axis-availability label leakage."
+         ),
+     }
+ 
+@@ -418,7 +464,7 @@
+     - validation/test spectra are never read for prior fitting;
+     - generated spectra are never used for prior fitting.
+ 
+-    The prior is not a hard spectral mask. It is a [3, 1401] non-negative
++    The prior is not a hard spectral mask. It is a [3, 1901] non-negative
+     guidance map later added to attention logits. Consequently a pesticide
+     query can still use every valid non-peak region.
+ 
+@@ -650,6 +696,7 @@
+     peak_half_width_cm1: float = 15.0,
+     min_matched_pairs: int = 4,
+     shared_peak_floor: float = 0.35,
++    excluded_intervals_cm1: tuple[tuple[float, float], ...] | None = None,
+ ) -> tuple[np.ndarray, dict[str, Any]]:
+     """
+     Build shared-aware soft priors from matched training conditions.
+ 
+@@ -682,6 +729,13 @@
+     if not (0.0 <= shared_peak_floor <= 1.0):
+         raise ValueError("shared_peak_floor must be in [0, 1]")
+ 
++    excluded_intervals_cm1 = tuple(excluded_intervals_cm1 or ())
++    for lower, upper in excluded_intervals_cm1:
++        if not (np.isfinite(lower) and np.isfinite(upper) and lower <= upper):
++            raise ValueError(
++                f"Invalid excluded Raman interval: {(lower, upper)}"
++            )
++
+     # One representative per condition, built from training mappings only.
+     representatives: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+     condition_lookup: dict[tuple[str, tuple[int, ...]], str] = {}
+@@ -829,6 +883,10 @@
+             "peak_half_width_cm-1": float(peak_half_width_cm1),
+             "min_matched_pairs": int(min_matched_pairs),
+             "shared_peak_floor": float(shared_peak_floor),
++            "excluded_intervals_cm-1": [
++                [float(lower), float(upper)]
++                for lower, upper in excluded_intervals_cm1
++            ],
+         },
+         "interpretation": (
+             "Selected regions are pesticide-sensitive spectral evidence, not "
+@@ -857,6 +915,27 @@
+                 [int(np.argmax(smooth_effect))], dtype=np.int64
+             )
+ 
++        if excluded_intervals_cm1:
++            candidate_shifts = MODEL_RAMAN_AXIS[candidates].astype(np.float64)
++            keep = np.ones(candidates.shape, dtype=np.bool_)
++            for lower, upper in excluded_intervals_cm1:
++                keep &= ~((candidate_shifts >= float(lower)) & (candidate_shifts <= float(upper)))
++            candidates = candidates[keep]
++
++            if candidates.size == 0:
++                allowed = np.ones(MODEL_LENGTH, dtype=np.bool_)
++                for lower, upper in excluded_intervals_cm1:
++                    allowed &= ~(
++                        (MODEL_RAMAN_AXIS >= float(lower))
++                        & (MODEL_RAMAN_AXIS <= float(upper))
++                    )
++                if not bool(allowed.any()):
++                    raise RuntimeError("All Raman positions were excluded from auxiliary peak search")
++                masked_effect = np.where(allowed, smooth_effect, -np.inf)
++                candidates = np.asarray(
++                    [int(np.argmax(masked_effect))], dtype=np.int64
++                )
++
+         prominences = signal.peak_prominences(smooth_effect, candidates)[0]
+         consistency_factor = 0.5 + 0.5 * consistency_profiles[
+             pesticide_index, candidates
+@@ -927,10 +1006,170 @@
+     return priors, summary
+ 
+ 
++def _chemistry_core_intervals(
++    half_width_cm1: float,
++) -> tuple[tuple[float, float], ...]:
++    intervals: list[tuple[float, float]] = []
++    for pesticide in PESTICIDES:
++        for item in CHEMISTRY_CORE_PEAKS[pesticide]:
++            center = float(item["center_cm-1"])
++            intervals.append(
++                (center - float(half_width_cm1), center + float(half_width_cm1))
++            )
++    return tuple(intervals)
++
++
++def _truncated_core_gaussian(
++    center_cm1: float,
++    half_width_cm1: float,
++    weight: float,
++) -> np.ndarray:
++    if half_width_cm1 <= 0.0:
++        raise ValueError("core half-width must be positive")
++    sigma = max(float(half_width_cm1) / 2.0, 1e-6)
++    distance = MODEL_RAMAN_AXIS.astype(np.float64) - float(center_cm1)
++    inside = np.abs(distance) <= float(half_width_cm1)
++    values = np.zeros(MODEL_LENGTH, dtype=np.float64)
++    values[inside] = np.exp(-0.5 * np.square(distance[inside] / sigma))
++    maximum = float(values.max())
++    if maximum > 0.0:
++        values /= maximum
++    return (float(weight) * values).astype(np.float32)
++
++
++def build_chemistry_hybrid_peak_priors(
++    repository: SERSDataRepository,
++    *,
++    core_half_width_cm1: float = DEFAULT_CORE_PEAK_HALF_WIDTH_CM1,
++    auxiliary_max_weight: float = DEFAULT_AUXILIARY_PRIOR_MAX_WEIGHT,
++    shared_core_weight: float = DEFAULT_SHARED_CORE_PEAK_WEIGHT,
++    top_k: int = 4,
++    min_peak_distance_cm1: float = 20.0,
++    peak_prominence: float = 0.02,
++    auxiliary_peak_half_width_cm1: float = 15.0,
++    min_matched_pairs: int = 4,
++    shared_peak_floor: float = 0.35,
++) -> tuple[np.ndarray, dict[str, Any]]:
++    """Combine user-specified chemistry anchors with matched-condition auxiliaries.
++
++    Core chemistry peaks are the strong prior used by each pesticide query:
++      DEL: 1000 and 1600 cm^-1
++      CHL: 2230 cm^-1
++      TEB: 1090 and 1597 cm^-1
++
++    A +/- ``core_half_width_cm1`` window is used as the initial tolerated peak
++    displacement. DEL~1600 and TEB~1597 are marked as shared core evidence and
++    receive ``shared_core_weight`` rather than exclusive weight 1.0.
++
++    ``matched_shared`` is retained only as an auxiliary-region discovery
++    mechanism. It is fitted from real training mappings only and is prevented
++    from selecting any chemistry-core window. The auxiliary prior is capped by
++    ``auxiliary_max_weight`` so it cannot outrank a strong chemistry anchor.
++    """
++    if core_half_width_cm1 <= 0.0:
++        raise ValueError("core_half_width_cm1 must be positive")
++    if not (0.0 <= auxiliary_max_weight <= 1.0):
++        raise ValueError("auxiliary_max_weight must be in [0, 1]")
++    if not (0.0 <= shared_core_weight <= 1.0):
++        raise ValueError("shared_core_weight must be in [0, 1]")
++
++    excluded_intervals = _chemistry_core_intervals(core_half_width_cm1)
++    auxiliary_prior, auxiliary_summary = build_matched_condition_peak_priors(
++        repository,
++        top_k=top_k,
++        min_peak_distance_cm1=min_peak_distance_cm1,
++        peak_prominence=peak_prominence,
++        peak_half_width_cm1=auxiliary_peak_half_width_cm1,
++        min_matched_pairs=min_matched_pairs,
++        shared_peak_floor=shared_peak_floor,
++        excluded_intervals_cm1=excluded_intervals,
++    )
++
++    core_prior = np.zeros((len(PESTICIDES), MODEL_LENGTH), dtype=np.float32)
++    hybrid_prior = np.zeros_like(core_prior)
++    pesticide_summary: dict[str, Any] = {}
++
++    for pesticide_index, pesticide in enumerate(PESTICIDES):
++        core_entries: list[dict[str, Any]] = []
++        for item in CHEMISTRY_CORE_PEAKS[pesticide]:
++            center = float(item["center_cm-1"])
++            role = str(item["role"])
++            weight = float(shared_core_weight if role == "shared" else 1.0)
++            component = _truncated_core_gaussian(
++                center_cm1=center,
++                half_width_cm1=core_half_width_cm1,
++                weight=weight,
++            )
++            core_prior[pesticide_index] = np.maximum(
++                core_prior[pesticide_index], component
++            )
++            core_entries.append(
++                {
++                    "center_cm-1": center,
++                    "window_cm-1": [
++                        center - float(core_half_width_cm1),
++                        center + float(core_half_width_cm1),
++                    ],
++                    "role": role,
++                    "prior_weight": weight,
++                }
++            )
++
++        scaled_auxiliary = (
++            float(auxiliary_max_weight) * auxiliary_prior[pesticide_index]
++        ).astype(np.float32)
++        hybrid_prior[pesticide_index] = np.maximum(
++            core_prior[pesticide_index], scaled_auxiliary
++        )
++
++        aux_info = auxiliary_summary["pesticides"][pesticide]
++        auxiliary_centers = [
++            float(value) for value in aux_info["peak_centers_cm-1"]
++        ]
++        core_centers = [float(item["center_cm-1"]) for item in core_entries]
++        pesticide_summary[pesticide] = {
++            "core_peaks": core_entries,
++            "core_peak_centers_cm-1": core_centers,
++            "auxiliary_peak_centers_cm-1": auxiliary_centers,
++            # Compatibility field for existing reporting code.
++            "peak_centers_cm-1": core_centers + auxiliary_centers,
++            "matched_pair_count": int(aux_info["matched_pair_count"]),
++            "matched_pairs": aux_info["matched_pairs"],
++            "auxiliary_selected_evidence": aux_info["selected_evidence"],
++        }
++
++    summary: dict[str, Any] = {
++        "method": "chemistry_core_plus_matched_auxiliary",
++        "fit_source": (
++            "chemistry core centers are user-specified; auxiliary regions use "
++            "real training mappings only; validation/test/generated excluded"
++        ),
++        "model_axis_cm-1": [
++            float(MODEL_RAMAN_AXIS[0]),
++            float(MODEL_RAMAN_AXIS[-1]),
++        ],
++        "parameters": {
++            "core_half_width_cm-1": float(core_half_width_cm1),
++            "auxiliary_max_weight": float(auxiliary_max_weight),
++            "shared_core_weight": float(shared_core_weight),
++            "auxiliary_top_k": int(top_k),
++            "auxiliary_peak_half_width_cm-1": float(auxiliary_peak_half_width_cm1),
++        },
++        "interpretation": (
++            "Chemically specified core peaks are primary soft anchors. "
++            "Matched-condition peaks are secondary data-driven discriminative "
++            "regions and are not asserted to be chemically assigned characteristic peaks."
++        ),
++        "pesticides": pesticide_summary,
++        "auxiliary_summary": auxiliary_summary,
++    }
++    return hybrid_prior, summary
++
++
+ class SERSDataset(Dataset):
+     """
+     Real-only validation/test; generated spectra may be added only to training.
+-    All samples returned to the model use the common 600-2000 cm^-1 axis (1401 points).
++    All samples returned to the model use the full 600-2500 cm^-1 axis (1901 points).
+     """
+ 
+     def __init__(
+@@ -1008,9 +1247,10 @@
+             source_path = generated_record["path"]
+             spectrum_name = generated_record["names"][ref.spectrum_index]
+ 
+-            # Generated files may extend to 2500 cm^-1, but the downstream
+-            # model deliberately uses only the common 600-2000 cm^-1 range so
+-            # Raman-axis length cannot leak the CHL label.
++            # Generated spectra are adapted to the same genuine 600-2500 cm^-1
++            # axis as their real condition. Full-axis real coverage is enforced
++            # at repository load time, so the model cannot use tail availability
++            # as a CHL class cue.
+             adapted, valid_mask = _adapt_spectrum_to_model_axis(
+                 axis,
+                 spectrum,
+--- a/Model_v2.py
++++ b/Model_v2.py
+@@ -12,11 +12,11 @@
+ Key design points:
+ - DEL, CHL and TEB each own a learnable query vector.
+ - Every query can attend to every *valid* Raman token.
+-- Training-data-derived peak priors add a positive soft bias to attention logits;
+-  they never delete non-peak regions.
++- Chemistry-core + training-derived auxiliary priors add a positive soft bias
++  to attention logits; they never delete non-peak regions.
+ - valid_mask remains authoritative for any unavailable Raman positions.
+-- The formal downstream model uses the common 600-2000 cm^-1 range to prevent
+-  source-axis length from leaking the CHL label.
++- The formal downstream model uses the complete 600-2500 cm^-1 range. Every
++  real source must genuinely cover that range, so axis availability cannot leak labels.
+ - The default public forward interface remains [classification_probability, concentration].
+ - T3.1 optionally uses pesticide-specific ordered S/M/H concentration heads while
+   preserving the T1/T2 continuous-regression checkpoint path.
+@@ -33,7 +33,7 @@
+ from torch import Tensor
+ 
+ 
+-DEFAULT_MODEL_LENGTH = 1401
++DEFAULT_MODEL_LENGTH = 1901
+ 
+ 
+ def _conv_pool_output_length(length: int) -> int:
+--- a/SERSFormer_Training.py
++++ b/SERSFormer_Training.py
+@@ -25,6 +25,7 @@
+     MODEL_RAMAN_AXIS,
+     PESTICIDES,
+     build_axis_label_audit,
++    build_chemistry_hybrid_peak_priors,
+     build_datasets,
+     build_matched_condition_peak_priors,
+     build_training_peak_priors,
+@@ -95,12 +96,13 @@
+     # arguments control prior extraction and its initial soft-attention bias.
+     parser.add_argument(
+         "--peak-prior-mode",
+-        choices=("global_contrast", "matched_shared"),
+-        default="matched_shared",
++        choices=("global_contrast", "matched_shared", "chemistry_hybrid"),
++        default="chemistry_hybrid",
+         help=(
+             "global_contrast keeps the earlier all-positive vs all-negative prior; "
+-            "matched_shared compares conditions while fixing matrix and all non-target "
+-            "pesticide levels, and retains shared Raman regions with reduced weight."
++            "matched_shared finds training-data discriminative regions; "
++            "chemistry_hybrid uses DEL 1000/1600, CHL 2230 and TEB 1090/1597 "
++            "as primary chemistry anchors and matched_shared only for auxiliaries."
+         ),
+     )
+     parser.add_argument("--peak-top-k", type=int, default=8)
+@@ -111,6 +113,24 @@
+     parser.add_argument("--peak-min-matched-pairs", type=int, default=4)
+     parser.add_argument("--peak-shared-floor", type=float, default=0.35)
+     parser.add_argument("--peak-guidance-strength", type=float, default=1.5)
++    parser.add_argument(
++        "--chemistry-core-half-width-cm1",
++        type=float,
++        default=7.0,
++        help="Initial +/- Raman-shift tolerance for user-specified chemistry core peaks.",
++    )
++    parser.add_argument(
++        "--chemistry-auxiliary-max-weight",
++        type=float,
++        default=0.35,
++        help="Maximum prior amplitude assigned to matched_shared auxiliary regions.",
++    )
++    parser.add_argument(
++        "--chemistry-shared-core-weight",
++        type=float,
++        default=0.65,
++        help="Prior weight for the overlapping DEL~1600 / TEB~1597 core region.",
++    )
+ 
+     parser.add_argument("--loss-weighting", choices=("fixed", "dwa"), default="dwa")
+     parser.add_argument("--classification-weight", type=float, default=0.5)
+@@ -494,7 +514,7 @@
+     path.parent.mkdir(parents=True, exist_ok=True)
+     torch.save(
+         {
+-            "checkpoint_version": 2,
++            "checkpoint_version": 3,
+             "epoch": int(epoch),
+             "best_validation_loss": float(best_validation_loss),
+             "model_state_dict": model.state_dict(),
+@@ -534,9 +554,9 @@
+     print("===== Source-axis label audit =====")
+     print(json.dumps(axis_audit["pesticide_by_source_axis"], ensure_ascii=False, indent=2))
+     print(
+-        f"Model input is restricted to common Raman range "
++        f"Model input uses the full Raman range "
+         f"{MODEL_RAMAN_AXIS[0]:.0f}-{MODEL_RAMAN_AXIS[-1]:.0f} cm^-1 "
+-        f"({MODEL_LENGTH} points) to prevent axis-length label leakage."
++        f"({MODEL_LENGTH} points); every real source must genuinely cover this range."
+     )
+ 
+     print("===== Dataset =====")
+@@ -582,7 +602,20 @@
+     if use_peak_guidance:
+         # Peak guidance is fitted only from the fixed real training split.
+         # Generated spectra, validation spectra and test spectra are excluded.
+-        if args.peak_prior_mode == "matched_shared":
++        if args.peak_prior_mode == "chemistry_hybrid":
++            peak_prior, peak_prior_summary = build_chemistry_hybrid_peak_priors(
++                train_dataset.repository,
++                core_half_width_cm1=args.chemistry_core_half_width_cm1,
++                auxiliary_max_weight=args.chemistry_auxiliary_max_weight,
++                shared_core_weight=args.chemistry_shared_core_weight,
++                top_k=args.peak_top_k,
++                min_peak_distance_cm1=args.peak_min_distance_cm1,
++                peak_prominence=args.peak_prominence,
++                auxiliary_peak_half_width_cm1=args.peak_half_width_cm1,
++                min_matched_pairs=args.peak_min_matched_pairs,
++                shared_peak_floor=args.peak_shared_floor,
++            )
++        elif args.peak_prior_mode == "matched_shared":
+             peak_prior, peak_prior_summary = build_matched_condition_peak_priors(
+                 train_dataset.repository,
+                 top_k=args.peak_top_k,
+@@ -613,26 +646,40 @@
+         ) as handle:
+             json.dump(peak_prior_summary, handle, ensure_ascii=False, indent=2)
+ 
+-        print("===== Training-only soft spectral priors =====")
++        print("===== Soft spectral priors =====")
+         print(f"prior mode: {args.peak_prior_mode}")
+         for pesticide in PESTICIDES:
+             info = peak_prior_summary["pesticides"][pesticide]
+-            centers = ", ".join(
+-                f"{value:.1f}" for value in info["peak_centers_cm-1"]
+-            )
+-            pair_text = (
+-                f" | matched_pairs={info.get('matched_pair_count')}"
+-                if "matched_pair_count" in info
+-                else ""
+-            )
+-            print(f"{pesticide}: {centers} cm^-1{pair_text}")
++            if args.peak_prior_mode == "chemistry_hybrid":
++                core = ", ".join(
++                    f"{value:.1f}" for value in info["core_peak_centers_cm-1"]
++                )
++                auxiliary = ", ".join(
++                    f"{value:.1f}"
++                    for value in info["auxiliary_peak_centers_cm-1"]
++                )
++                print(
++                    f"{pesticide}: core=[{core}] cm^-1; "
++                    f"auxiliary=[{auxiliary}] cm^-1; "
++                    f"matched_pairs={info['matched_pair_count']}"
++                )
++            else:
++                centers = ", ".join(
++                    f"{value:.1f}" for value in info["peak_centers_cm-1"]
++                )
++                pair_text = (
++                    f" | matched_pairs={info.get('matched_pair_count')}"
++                    if "matched_pair_count" in info
++                    else ""
++                )
++                print(f"{pesticide}: {centers} cm^-1{pair_text}")
+     else:
+         peak_prior = np.zeros((len(PESTICIDES), MODEL_LENGTH), dtype=np.float32)
+         peak_prior_summary = {
+             "mode": "query_only",
+             "description": (
+                 "Peak bias disabled. DEL/CHL/TEB learnable queries attend to the "
+-                "entire valid 600-2000 cm^-1 spectrum."
++                "entire valid 600-2500 cm^-1 spectrum."
+             ),
+         }
+         print("===== Query attention mode =====")
+@@ -690,10 +737,10 @@
+         "include_generated": bool(args.include_generated),
+         "maximum_generated_per_condition": args.maximum_generated_per_condition,
+         "split": "12/4/4 within each source file",
+-        "model_axis": "600-2000 cm^-1 common range, 1401 points",
++        "model_axis": "600-2500 cm^-1 full range, 1901 points",
+         "source_axis_handling": (
+-            "original 1401/1901-point acquisitions are both restricted to the common "
+-            "600-2000 cm^-1 model range; valid_mask remains supported"
++            "every real source must genuinely cover 600-2500 cm^-1; missing tails "
++            "are rejected instead of zero-padded or extrapolated"
+         ),
+         "axis_label_audit": axis_audit,
+         "query_attention_mode": args.query_attention_mode,
+--- /dev/null
++++ b/tests/test_full_axis_chemistry_prior.py
+@@ -0,0 +1,98 @@
++import numpy as np
++import torch
++
++import Dataset
++from Model_v2 import TransformerClassifyRegress_sep
++
++
++def test_full_raman_axis_is_600_to_2500() -> None:
++    assert Dataset.MODEL_LENGTH == 1901
++    assert float(Dataset.MODEL_RAMAN_AXIS[0]) == 600.0
++    assert float(Dataset.MODEL_RAMAN_AXIS[-1]) == 2500.0
++
++
++def test_chemistry_core_peak_centers_are_fixed() -> None:
++    expected = {
++        "DEL": [1000.0, 1600.0],
++        "CHL": [2230.0],
++        "TEB": [1090.0, 1597.0],
++    }
++    for pesticide, centers in expected.items():
++        observed = [
++            float(item["center_cm-1"])
++            for item in Dataset.CHEMISTRY_CORE_PEAKS[pesticide]
++        ]
++        assert observed == centers
++
++
++def test_chl_2230_core_prior_has_plus_minus_7_support() -> None:
++    prior = Dataset._truncated_core_gaussian(
++        center_cm1=2230.0,
++        half_width_cm1=7.0,
++        weight=1.0,
++    )
++    axis = Dataset.MODEL_RAMAN_AXIS
++    center_index = int(np.where(axis == 2230.0)[0][0])
++    assert prior[center_index] == 1.0
++    assert np.all(prior[(axis < 2223.0) | (axis > 2237.0)] == 0.0)
++    assert np.all(prior[(axis >= 2223.0) & (axis <= 2237.0)] > 0.0)
++
++
++def test_del_teb_shared_core_windows_overlap() -> None:
++    half_width = 7.0
++    del_interval = (1600.0 - half_width, 1600.0 + half_width)
++    teb_interval = (1597.0 - half_width, 1597.0 + half_width)
++    overlap_lower = max(del_interval[0], teb_interval[0])
++    overlap_upper = min(del_interval[1], teb_interval[1])
++    assert overlap_lower == 1593.0
++    assert overlap_upper == 1604.0
++    assert overlap_lower <= overlap_upper
++
++
++def test_chemistry_core_intervals_are_excluded_from_auxiliary_search() -> None:
++    intervals = Dataset._chemistry_core_intervals(7.0)
++    for center in (1000.0, 1600.0, 2230.0, 1090.0, 1597.0):
++        assert any(lower <= center <= upper for lower, upper in intervals)
++
++
++def test_1901_point_model_forward_ordinal_mode() -> None:
++    model = TransformerClassifyRegress_sep(
++        dim_model=32,
++        attn_head=4,
++        dim_ff=64,
++        drop=0.1,
++        batch_f=True,
++        encoder_layers=1,
++        n_labels=3,
++        model_length=1901,
++        peak_guidance_strength_init=1.5,
++        use_peak_guidance=True,
++        concentration_head_mode="ordinal",
++    )
++
++    prior = np.zeros((3, 1901), dtype=np.float32)
++    prior[0] = Dataset._truncated_core_gaussian(1000.0, 7.0, 1.0)
++    prior[1] = Dataset._truncated_core_gaussian(2230.0, 7.0, 1.0)
++    prior[2] = Dataset._truncated_core_gaussian(1090.0, 7.0, 1.0)
++    model.set_peak_prior(torch.from_numpy(prior))
++
++    batch_size = 2
++    batch = {
++        "raw": torch.rand(batch_size, 1, 1901),
++        "percentile": torch.rand(batch_size, 4, 1901),
++        "smoothed": torch.rand(batch_size, 1, 1901),
++        "valid_mask": torch.ones(batch_size, 1901, dtype=torch.bool),
++    }
++
++    with torch.no_grad():
++        classification, concentration, attention, ordinal = model(
++            batch,
++            return_attention=True,
++            return_ordinal=True,
++        )
++
++    assert tuple(classification.shape) == (2, 3)
++    assert tuple(concentration.shape) == (2, 3)
++    assert tuple(ordinal.shape) == (2, 3, 2)
++    assert attention.shape[0] == 2
++    assert attention.shape[1] == 3

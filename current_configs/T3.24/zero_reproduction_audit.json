@@ -1,0 +1,31 @@
+{
+  "status": "PASS",
+  "fix_version": "T3.24_zero_reproduction_v1",
+  "probability_atol": 1e-06,
+  "probability_rtol": 0,
+  "branch_atol": 1e-06,
+  "probability_and_change_errors": {
+    "p_ge_M_DEL": 0.0,
+    "p_ge_M_CHL": 0.0,
+    "p_ge_M_TEB": 0.0,
+    "p_ge_H_DEL": 0.0,
+    "p_ge_H_CHL": 0.0,
+    "p_ge_H_TEB": 0.0,
+    "delta_max_abs": 0.0,
+    "branch_delta_max_abs": 0.0,
+    "residual_delta_max_abs": 0.0
+  },
+  "decoded_grade_changes": {
+    "class_DEL": 0,
+    "class_CHL": 0,
+    "class_TEB": 0,
+    "head_DEL": 0,
+    "head_CHL": 0,
+    "head_TEB": 0,
+    "final_DEL": 0,
+    "final_CHL": 0,
+    "final_TEB": 0
+  },
+  "reasons": [],
+  "policy": "Identical initial weights; exact classification/grades; zero-change probabilities reuse anchor"
+}

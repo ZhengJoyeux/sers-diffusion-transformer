@@ -1,0 +1,231 @@
+diff --git a/config/ddpm_training_d4_3_formal.yaml b/config/ddpm_training_d4_3_formal.yaml
+index e51ebdf..0539015 100644
+--- a/config/ddpm_training_d4_3_formal.yaml
++++ b/config/ddpm_training_d4_3_formal.yaml
+@@ -1,8 +1,9 @@
+ project:
+-  # D4.3.2.3在T200/S100质量版基础上，增加training-PCA支持方向的
+-  # 条件分布宽度恢复，并补充峰位/峰高/峰宽分项多样性评价。
++  # D4.3.2.4基于全部126条件的分层评价继续修复系统性欠离散：
++  # 训练端提高多尺度方差floor，生成端仅在training-PCA支持子空间
++  # 内补足整体pairwise spread，并严格阻止超出同条件training极值。
+   # 扩散训练链由100增加到200；DDIM生成由50增加到100步。
+-  name: d4_3_2_3_peak_shape_diversity_formal
++  name: d4_3_2_4_global_distribution_balance_formal
+   random_seed: 2026
+ diagnostic_overfit:
+   enabled: false
+@@ -154,8 +155,8 @@ peak_parameter_constraints:
+ diversity_constraints:
+   enabled: true
+   strategy: low_noise_pairwise_residual_geometry
+-  total_weight: 0.04
+-  maximum_total_ratio_to_ddpm: 0.04
++  total_weight: 0.05
++  maximum_total_ratio_to_ddpm: 0.05
+   epsilon: 1.0e-08
+   condition_grouping:
+     samples_per_condition: 4
+@@ -228,18 +229,18 @@ diversity_constraints:
+       enabled: true
+       kernel_sizes: [5, 15, 31]
+       minimum_group_size: 4
+-      minimum_std_ratio: 0.85
++      minimum_std_ratio: 0.90
+       active_std_quantile: 20.0
+       maximum_timestep_fraction: 0.50
+       smooth_l1_beta: 0.05
+-      weight: 0.35
++      weight: 0.50
+     # 同条件4条样本的预测均值对齐真实目标均值，针对总体MSE、
+     # Wasserstein和幅值偏差；不直接压缩样本间差异。
+     condition_mean:
+       enabled: true
+       smooth_l1_beta: 0.05
+       minimum_group_size: 4
+-      weight: 0.75
++      weight: 1.00
+     # 每个同条件小组只惩罚超出真实目标残差包络的预测值；
+     # 不把预测主动拉向均值，避免与floor-only多样性目标冲突。
+     condition_pointwise_envelope:
+@@ -299,11 +300,11 @@ training:
+   maximum_validation_batches: 0
+   validation_random_seed: 2026001
+ output:
+-  output_directory: outputs/experiments/d4_3_2_3_peak_shape_diversity_formal
+-  checkpoint_directory: outputs/experiments/d4_3_2_3_peak_shape_diversity_formal/checkpoints
+-  log_directory: outputs/experiments/d4_3_2_3_peak_shape_diversity_formal/logs
+-  generated_spectrum_directory: outputs/experiments/d4_3_2_3_peak_shape_diversity_formal/generated
+-  preview_plot_directory: outputs/experiments/d4_3_2_3_peak_shape_diversity_formal/plots
++  output_directory: outputs/experiments/d4_3_2_4_global_distribution_balance_formal
++  checkpoint_directory: outputs/experiments/d4_3_2_4_global_distribution_balance_formal/checkpoints
++  log_directory: outputs/experiments/d4_3_2_4_global_distribution_balance_formal/logs
++  generated_spectrum_directory: outputs/experiments/d4_3_2_4_global_distribution_balance_formal/generated
++  preview_plot_directory: outputs/experiments/d4_3_2_4_global_distribution_balance_formal/plots
+   latest_checkpoint_name: latest.pt
+   best_checkpoint_name: best.pt
+   training_log_name: training_log.csv
+@@ -335,9 +336,13 @@ generation:
+     maximum_components: 6
+     explained_variance_ratio: 0.95
+     minimum_component_variance_fraction: 0.01
+-    minimum_component_std_ratio: 0.85
+-    maximum_scale_factor: 1.35
+-    maximum_correction_range_fraction: 0.08
++    minimum_component_std_ratio: 0.90
++    maximum_scale_factor: 1.45
++    # 分量逐个补足后，再检查整批谱的平均pairwise-MSE。若仍偏窄，
++    # 只沿上述training PCA子空间做第二级小幅扩展；正交方向保持不变。
++    minimum_pairwise_mse_ratio: 0.90
++    maximum_global_scale_factor: 1.15
++    maximum_correction_range_fraction: 0.10
+     minimum_generated_count: 20
+     epsilon: 1.0e-12
+   # 先用12条training构造real-vs-real oracle范围。只有生成QQ尾宽既
+@@ -378,7 +383,7 @@ generation:
+     softness_iqr_fraction: 0.05
+     minimum_softness_intensity: 0.25
+     maximum_softness_intensity: 2.0
+-    enforce_training_global_extrema: false
++    enforce_training_global_extrema: true
+     maximum_modified_fraction: 0.05
+   # 评价时自动从同条件training中找可靠峰，再把峰位、峰高和峰宽
+   # 的变化分别与training比较，避免pairwise-MSE被纯强度变化误导。
+diff --git a/src/spectrum_generator.py b/src/spectrum_generator.py
+index 75c7c65..80e2f62 100644
+--- a/src/spectrum_generator.py
++++ b/src/spectrum_generator.py
+@@ -176,6 +176,12 @@ def apply_condition_pca_spread_calibration(
+     maximum_scale_factor = float(
+         configuration.get("maximum_scale_factor", 1.35)
+     )
++    minimum_pairwise_ratio = float(
++        configuration.get("minimum_pairwise_mse_ratio", 0.0)
++    )
++    maximum_global_scale_factor = float(
++        configuration.get("maximum_global_scale_factor", 1.15)
++    )
+     minimum_component_variance_fraction = float(
+         configuration.get("minimum_component_variance_fraction", 0.01)
+     )
+@@ -195,6 +201,10 @@ def apply_condition_pca_spread_calibration(
+         raise ValueError("minimum_component_std_ratio必须位于(0,1]。")
+     if not 1.0 <= maximum_scale_factor <= 2.0:
+         raise ValueError("maximum_scale_factor必须位于[1,2]。")
++    if not 0.0 <= minimum_pairwise_ratio <= 1.0:
++        raise ValueError("minimum_pairwise_mse_ratio必须位于[0,1]。")
++    if not 1.0 <= maximum_global_scale_factor <= 2.0:
++        raise ValueError("maximum_global_scale_factor必须位于[1,2]。")
+     if not 0.0 <= minimum_component_variance_fraction <= 0.25:
+         raise ValueError("minimum_component_variance_fraction必须位于[0,0.25]。")
+     if not 0.0 < maximum_correction_fraction <= 0.25:
+@@ -253,6 +263,33 @@ def apply_condition_pca_spread_calibration(
+ 
+     score_delta = generated_scores * (scale_factors - 1.0)[np.newaxis, :]
+     correction = score_delta @ components
++    pairwise_training = _mean_pairwise_mse_from_variance(training)
++    provisional = generated + correction
++    provisional += (
++        generated_mean - np.mean(provisional, axis=0)
++    )[np.newaxis, :]
++    provisional_pairwise = _mean_pairwise_mse_from_variance(provisional)
++    provisional_ratio = provisional_pairwise / max(pairwise_training, epsilon)
++    global_scale_factor = 1.0
++    global_spread_activated = bool(
++        minimum_pairwise_ratio > 0.0
++        and np.any(eligible)
++        and provisional_ratio < minimum_pairwise_ratio
++    )
++    if global_spread_activated:
++        global_scale_factor = min(
++            np.sqrt(
++                minimum_pairwise_ratio
++                / max(provisional_ratio, epsilon)
++            ),
++            maximum_global_scale_factor,
++        )
++        provisional_centered = provisional - generated_mean[np.newaxis, :]
++        provisional_scores = provisional_centered @ components.T
++        global_score_delta = provisional_scores * (
++            (global_scale_factor - 1.0) * eligible.astype(np.float64)
++        )[np.newaxis, :]
++        correction += global_score_delta @ components
+     training_range = max(
+         float(np.percentile(training, 95.0) - np.percentile(training, 5.0)),
+         epsilon,
+@@ -279,7 +316,6 @@ def apply_condition_pca_spread_calibration(
+     component_ratio_after = corrected_std / np.maximum(training_std, epsilon)
+     pairwise_before = _mean_pairwise_mse_from_variance(generated)
+     pairwise_after = _mean_pairwise_mse_from_variance(corrected)
+-    pairwise_training = _mean_pairwise_mse_from_variance(training)
+     diagnostics: dict[str, float | int | bool | list[float]] = {
+         "enabled": True,
+         "training_only": True,
+@@ -300,6 +336,9 @@ def apply_condition_pca_spread_calibration(
+         / max(pairwise_training, epsilon),
+         "mean_pairwise_mse_ratio_after": pairwise_after
+         / max(pairwise_training, epsilon),
++        "global_pairwise_spread_activated": global_spread_activated,
++        "global_pairwise_scale_factor": float(global_scale_factor),
++        "minimum_pairwise_mse_ratio": float(minimum_pairwise_ratio),
+         "correction_rmse": float(np.sqrt(np.mean(np.square(corrected - generated)))),
+         "correction_rmse_before_safety_cap": correction_rmse_before_cap,
+         "safety_scale": float(safety_scale),
+diff --git a/tests/test_spectrum_generation.py b/tests/test_spectrum_generation.py
+index ebe996c..55b4ec5 100644
+--- a/tests/test_spectrum_generation.py
++++ b/tests/test_spectrum_generation.py
+@@ -293,6 +293,52 @@ def test_pca_spread_calibration_restores_supported_variation_and_keeps_mean():
+     )
+ 
+ 
++def test_pca_spread_calibration_applies_global_train_subspace_floor():
++    random_generator = np.random.default_rng(2029)
++    axis = np.linspace(-1.0, 1.0, 160)
++    modes = np.stack(
++        [
++            np.sin(np.pi * axis),
++            np.exp(-0.5 * np.square(axis / 0.20)),
++            np.cos(2.0 * np.pi * axis),
++        ],
++        axis=0,
++    )
++    training_scores = random_generator.normal(size=(12, 3))
++    generated_scores = random_generator.normal(scale=0.70, size=(80, 3))
++    training = 10.0 + training_scores @ modes
++    generated = 14.0 + generated_scores @ modes
++    mean_before = np.mean(generated, axis=0)
++
++    corrected, diagnostics = apply_condition_pca_spread_calibration(
++        generated,
++        training,
++        configuration={
++            "maximum_components": 6,
++            "explained_variance_ratio": 0.95,
++            "minimum_component_variance_fraction": 0.01,
++            # Disable the first-stage component floor in this test so the
++            # second-stage whole-batch floor is exercised independently.
++            "minimum_component_std_ratio": 0.50,
++            "maximum_scale_factor": 1.45,
++            "minimum_pairwise_mse_ratio": 0.90,
++            "maximum_global_scale_factor": 1.30,
++            "maximum_correction_range_fraction": 0.25,
++            "minimum_generated_count": 20,
++        },
++    )
++
++    np.testing.assert_allclose(
++        np.mean(corrected, axis=0), mean_before, rtol=0.0, atol=2.0e-5
++    )
++    assert diagnostics["global_pairwise_spread_activated"] is True
++    assert diagnostics["global_pairwise_scale_factor"] > 1.0
++    assert (
++        diagnostics["mean_pairwise_mse_ratio_after"]
++        > diagnostics["mean_pairwise_mse_ratio_before"]
++    )
++
++
+ def test_oracle_tail_calibration_keeps_middle_and_shrinks_only_excess_tails():
+     random_generator = np.random.default_rng(2026)
+     training = random_generator.normal(0.0, 1.0, size=(12, 160))
+

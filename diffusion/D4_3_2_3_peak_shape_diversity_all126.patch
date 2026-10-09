@@ -1,0 +1,1385 @@
+diff --git a/config/ddpm_training_d4_3_formal.yaml b/config/ddpm_training_d4_3_formal.yaml
+index 6d8b44b..e51ebdf 100644
+--- a/config/ddpm_training_d4_3_formal.yaml
++++ b/config/ddpm_training_d4_3_formal.yaml
+@@ -1,8 +1,8 @@
+ project:
+-  # D4.3.2.2-T200-S100同时优化高噪声恢复、条件均值、谱形、
+-  # 强度包络和多样性，并修正验证实验发现的QQ尾部过压缩。
++  # D4.3.2.3在T200/S100质量版基础上，增加training-PCA支持方向的
++  # 条件分布宽度恢复，并补充峰位/峰高/峰宽分项多样性评价。
+   # 扩散训练链由100增加到200；DDIM生成由50增加到100步。
+-  name: d4_3_2_2_t200_s100_quality_formal
++  name: d4_3_2_3_peak_shape_diversity_formal
+   random_seed: 2026
+ diagnostic_overfit:
+   enabled: false
+@@ -195,8 +195,8 @@ diversity_constraints:
+   # diversity_constraints中，因此不需要修改model_builder公共接口。
+   quality_fidelity:
+     enabled: true
+-    total_weight: 0.06
+-    maximum_total_ratio_to_ddpm: 0.06
++    total_weight: 0.07
++    maximum_total_ratio_to_ddpm: 0.07
+     # 75%时间步以上属于真正困难的高噪声区。25%的条件组从该区
+     # 分层抽样，其余仍全区间均匀抽样，避免T=200后高噪声覆盖变稀。
+     high_noise_sampling:
+@@ -221,6 +221,18 @@ diversity_constraints:
+       kernel_sizes: [5, 15, 31]
+       smooth_l1_beta: 0.05
+       weight: 0.40
++    # 现有D4.3多样性只看sigma=1的高频残差，可能遗漏峰高、峰宽和
++    # 较宽局部结构的条件内变化。这里在低/中噪声时间步对5/15/31点
++    # 平滑谱施加floor-only标准差约束，只补不足、不惩罚过宽。
++    condition_multiscale_variance_floor:
++      enabled: true
++      kernel_sizes: [5, 15, 31]
++      minimum_group_size: 4
++      minimum_std_ratio: 0.85
++      active_std_quantile: 20.0
++      maximum_timestep_fraction: 0.50
++      smooth_l1_beta: 0.05
++      weight: 0.35
+     # 同条件4条样本的预测均值对齐真实目标均值，针对总体MSE、
+     # Wasserstein和幅值偏差；不直接压缩样本间差异。
+     condition_mean:
+@@ -287,11 +299,11 @@ training:
+   maximum_validation_batches: 0
+   validation_random_seed: 2026001
+ output:
+-  output_directory: outputs/experiments/d4_3_2_2_t200_s100_quality_formal
+-  checkpoint_directory: outputs/experiments/d4_3_2_2_t200_s100_quality_formal/checkpoints
+-  log_directory: outputs/experiments/d4_3_2_2_t200_s100_quality_formal/logs
+-  generated_spectrum_directory: outputs/experiments/d4_3_2_2_t200_s100_quality_formal/generated
+-  preview_plot_directory: outputs/experiments/d4_3_2_2_t200_s100_quality_formal/plots
++  output_directory: outputs/experiments/d4_3_2_3_peak_shape_diversity_formal
++  checkpoint_directory: outputs/experiments/d4_3_2_3_peak_shape_diversity_formal/checkpoints
++  log_directory: outputs/experiments/d4_3_2_3_peak_shape_diversity_formal/logs
++  generated_spectrum_directory: outputs/experiments/d4_3_2_3_peak_shape_diversity_formal/generated
++  preview_plot_directory: outputs/experiments/d4_3_2_3_peak_shape_diversity_formal/plots
+   latest_checkpoint_name: latest.pt
+   best_checkpoint_name: best.pt
+   training_log_name: training_log.csv
+@@ -315,6 +327,19 @@ generation:
+     maximum_correction_iqr_fraction: 0.25
+     minimum_maximum_correction_intensity: 1.0
+     maximum_modified_raman_fraction: 1.00
++  # 只扩展生成批次在同条件12条training主变化方向上不足的标准差。
++  # 不改变生成均值、不压缩已经足够宽的PC，也不创造training以外的方向；
++  # 随后的QQ过冲控制与逐点强度包络仍负责拦截异常峰/负谷。
++  pca_spread_calibration:
++    enabled: true
++    maximum_components: 6
++    explained_variance_ratio: 0.95
++    minimum_component_variance_fraction: 0.01
++    minimum_component_std_ratio: 0.85
++    maximum_scale_factor: 1.35
++    maximum_correction_range_fraction: 0.08
++    minimum_generated_count: 20
++    epsilon: 1.0e-12
+   # 先用12条training构造real-vs-real oracle范围。只有生成QQ尾宽既
+   # 超过oracle上界、又达到明显过冲阈值1.50时，才压缩最外侧5%。
+   # 这样只处理1.5--1.8倍的异常尾部，不再把正常尾宽整体压到约0.86。
+@@ -355,6 +380,17 @@ generation:
+     maximum_softness_intensity: 2.0
+     enforce_training_global_extrema: false
+     maximum_modified_fraction: 0.05
++  # 评价时自动从同条件training中找可靠峰，再把峰位、峰高和峰宽
++  # 的变化分别与training比较，避免pairwise-MSE被纯强度变化误导。
++  peak_diversity_evaluation:
++    baseline_sigma_cm1: 30.0
++    smoothing_sigma_cm1: 2.0
++    minimum_relative_prominence: 0.06
++    minimum_peak_distance_cm1: 12.0
++    maximum_peak_count: 10
++    edge_exclusion_cm1: 24.0
++    measurement_half_width_cm1: 12.0
++    minimum_position_std_cm1: 0.35
+   sampling_calibration:
+     enabled: false
+     non_peak_noise:
+diff --git a/scripts/evaluate_d4_2_generation.py b/scripts/evaluate_d4_2_generation.py
+index b4cd106..150b3b4 100644
+--- a/scripts/evaluate_d4_2_generation.py
++++ b/scripts/evaluate_d4_2_generation.py
+@@ -18,6 +18,8 @@ matplotlib.use("Agg")
+ import matplotlib.pyplot as plt
+ import numpy as np
+ import pandas as pd
++from scipy.ndimage import gaussian_filter1d
++from scipy.signal import find_peaks
+ from scipy.stats import wasserstein_distance
+ 
+ from src.checkpoint_manager import load_checkpoint_file
+@@ -328,6 +330,237 @@ def _diversity_fields(
+     return fields, training_pairs, generated_pairs
+ 
+ 
++def _peak_morphology_diversity(
++    *,
++    condition: str,
++    axis: np.ndarray,
++    training: np.ndarray,
++    generated: np.ndarray,
++    configuration: dict,
++) -> tuple[dict[str, float | int], pd.DataFrame]:
++    """Separate peak-position, peak-height and peak-width diversity.
++
++    Reliable peaks are detected once from the condition training median.  All
++    limits and reference variation therefore remain train-only.  This avoids
++    declaring a batch diverse merely because amplitudes differ while every
++    peak stays at exactly the same Raman position.
++    """
++
++    if not isinstance(configuration, dict):
++        raise ValueError("peak_diversity_evaluation配置必须是字典。")
++    spacing = float(np.median(np.diff(axis)))
++    if spacing <= 0.0:
++        raise ValueError("peak diversity要求严格递增Raman轴。")
++    baseline_sigma = float(configuration.get("baseline_sigma_cm1", 30.0))
++    smoothing_sigma = float(configuration.get("smoothing_sigma_cm1", 2.0))
++    relative_prominence = float(
++        configuration.get("minimum_relative_prominence", 0.06)
++    )
++    minimum_distance = float(
++        configuration.get("minimum_peak_distance_cm1", 12.0)
++    )
++    maximum_peak_count = int(configuration.get("maximum_peak_count", 10))
++    edge_exclusion = float(configuration.get("edge_exclusion_cm1", 24.0))
++    half_width = float(
++        configuration.get("measurement_half_width_cm1", 12.0)
++    )
++    minimum_position_std = float(
++        configuration.get("minimum_position_std_cm1", 0.35)
++    )
++    if baseline_sigma <= smoothing_sigma or smoothing_sigma <= 0.0:
++        raise ValueError("峰评价要求baseline sigma大于正的smoothing sigma。")
++    if not 0.0 < relative_prominence < 1.0:
++        raise ValueError("minimum_relative_prominence必须位于(0,1)。")
++    if minimum_distance <= 0.0 or maximum_peak_count < 1 or half_width <= 0.0:
++        raise ValueError("峰评价的距离、数量或窗口配置无效。")
++
++    smooth_points = max(smoothing_sigma / spacing, 0.5)
++    baseline_points = max(baseline_sigma / spacing, smooth_points + 0.5)
++
++    def corrected_rows(values: np.ndarray) -> np.ndarray:
++        smoothed = gaussian_filter1d(
++            values, sigma=smooth_points, axis=1, mode="reflect"
++        )
++        baseline = gaussian_filter1d(
++            values, sigma=baseline_points, axis=1, mode="reflect"
++        )
++        return smoothed - baseline
++
++    training_corrected = corrected_rows(training)
++    generated_corrected = corrected_rows(generated)
++    reference_curve = np.median(training_corrected, axis=0)
++    peak_maximum = float(np.max(reference_curve))
++    if peak_maximum <= EPSILON:
++        empty = pd.DataFrame()
++        return {
++            "peak_diversity_peak_count": 0,
++            "peak_position_active_count": 0,
++            "peak_position_std_ratio_median": np.nan,
++            "peak_position_wasserstein_cm1_mean": np.nan,
++            "peak_position_frozen_fraction": np.nan,
++            "peak_height_iqr_ratio_median": np.nan,
++            "peak_width_iqr_ratio_median": np.nan,
++        }, empty
++    distance_points = max(int(round(minimum_distance / spacing)), 1)
++    peaks, properties = find_peaks(
++        reference_curve,
++        prominence=relative_prominence * peak_maximum,
++        distance=distance_points,
++    )
++    edge_points = int(np.ceil(edge_exclusion / spacing))
++    keep = np.logical_and(peaks >= edge_points, peaks < axis.size - edge_points)
++    peaks = peaks[keep]
++    prominences = properties["prominences"][keep]
++    if peaks.size > maximum_peak_count:
++        strongest = np.argsort(prominences)[-maximum_peak_count:]
++        peaks = peaks[strongest]
++        prominences = prominences[strongest]
++    order = np.argsort(peaks)
++    peaks = peaks[order]
++    prominences = prominences[order]
++
++    def measurements(
++        corrected: np.ndarray, peak_index: int
++    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
++        center = float(axis[peak_index])
++        local_indices = np.flatnonzero(np.abs(axis - center) <= half_width)
++        local_axis = axis[local_indices]
++        local = corrected[:, local_indices]
++        maximum_indices = np.argmax(local, axis=1)
++        positions = local_axis[maximum_indices]
++        heights = local[np.arange(local.shape[0]), maximum_indices]
++        weights = np.maximum(local, 0.0)
++        weight_sum = np.sum(weights, axis=1)
++        weighted_center = np.sum(
++            weights * local_axis[np.newaxis, :], axis=1
++        ) / np.maximum(weight_sum, EPSILON)
++        widths = np.sqrt(
++            np.sum(
++                weights
++                * np.square(local_axis[np.newaxis, :] - weighted_center[:, None]),
++                axis=1,
++            )
++            / np.maximum(weight_sum, EPSILON)
++        )
++        widths[weight_sum <= EPSILON] = 0.0
++        return positions, heights, widths
++
++    rows: list[dict[str, float | int | str | bool]] = []
++    position_ratios: list[float] = []
++    position_wasserstein: list[float] = []
++    frozen: list[float] = []
++    height_ratios: list[float] = []
++    width_ratios: list[float] = []
++    for peak_number, (peak_index, prominence) in enumerate(
++        zip(peaks, prominences), start=1
++    ):
++        train_position, train_height, train_width = measurements(
++            training_corrected, int(peak_index)
++        )
++        gen_position, gen_height, gen_width = measurements(
++            generated_corrected, int(peak_index)
++        )
++        train_position_std = float(np.std(train_position, ddof=1))
++        gen_position_std = float(np.std(gen_position, ddof=1))
++        position_active = train_position_std >= minimum_position_std
++        position_ratio = (
++            gen_position_std / max(train_position_std, EPSILON)
++            if position_active
++            else np.nan
++        )
++        position_w1 = float(wasserstein_distance(train_position, gen_position))
++        train_height_iqr = float(
++            np.percentile(train_height, 75.0) - np.percentile(train_height, 25.0)
++        )
++        gen_height_iqr = float(
++            np.percentile(gen_height, 75.0) - np.percentile(gen_height, 25.0)
++        )
++        height_ratio = gen_height_iqr / max(train_height_iqr, EPSILON)
++        train_width_iqr = float(
++            np.percentile(train_width, 75.0) - np.percentile(train_width, 25.0)
++        )
++        gen_width_iqr = float(
++            np.percentile(gen_width, 75.0) - np.percentile(gen_width, 25.0)
++        )
++        width_ratio = gen_width_iqr / max(train_width_iqr, EPSILON)
++        if position_active:
++            position_ratios.append(float(position_ratio))
++            position_wasserstein.append(position_w1)
++            frozen.append(float(gen_position_std < 0.5 * train_position_std))
++        if train_height_iqr > EPSILON:
++            height_ratios.append(height_ratio)
++        if train_width_iqr > EPSILON:
++            width_ratios.append(width_ratio)
++        rows.append(
++            {
++                "condition": condition,
++                "peak_number": peak_number,
++                "training_peak_center_cm1": float(axis[peak_index]),
++                "training_median_prominence": float(prominence),
++                "position_reference_active": bool(position_active),
++                "training_position_std_cm1": train_position_std,
++                "generated_position_std_cm1": gen_position_std,
++                "peak_position_std_ratio": float(position_ratio),
++                "peak_position_wasserstein_cm1": position_w1,
++                "training_height_iqr": train_height_iqr,
++                "generated_height_iqr": gen_height_iqr,
++                "peak_height_iqr_ratio": height_ratio,
++                "training_width_iqr_cm1": train_width_iqr,
++                "generated_width_iqr_cm1": gen_width_iqr,
++                "peak_width_iqr_ratio": width_ratio,
++            }
++        )
++
++    def median_or_nan(values: list[float]) -> float:
++        return float(np.median(values)) if values else np.nan
++
++    fields: dict[str, float | int] = {
++        "peak_diversity_peak_count": int(len(rows)),
++        "peak_position_active_count": int(len(position_ratios)),
++        "peak_position_std_ratio_median": median_or_nan(position_ratios),
++        "peak_position_wasserstein_cm1_mean": (
++            float(np.mean(position_wasserstein))
++            if position_wasserstein
++            else np.nan
++        ),
++        "peak_position_frozen_fraction": (
++            float(np.mean(frozen)) if frozen else np.nan
++        ),
++        "peak_height_iqr_ratio_median": median_or_nan(height_ratios),
++        "peak_width_iqr_ratio_median": median_or_nan(width_ratios),
++    }
++    return fields, pd.DataFrame(rows)
++
++
++def _plot_peak_diversity(details: pd.DataFrame, output: Path) -> None:
++    if details.empty:
++        return
++    figure, axis = plt.subplots(figsize=(9.5, 4.2))
++    centers = details["training_peak_center_cm1"].to_numpy(dtype=np.float64)
++    for column, label, color, marker in (
++        ("peak_position_std_ratio", "position std ratio", "#1565C0", "o"),
++        ("peak_height_iqr_ratio", "height IQR ratio", "#EF6C00", "s"),
++        ("peak_width_iqr_ratio", "width IQR ratio", "#2E7D32", "^"),
++    ):
++        values = details[column].to_numpy(dtype=np.float64)
++        finite = np.isfinite(values)
++        axis.scatter(
++            centers[finite], values[finite], s=32, label=label,
++            color=color, marker=marker, alpha=0.85,
++        )
++    axis.axhline(1.0, color="#555555", linestyle="--", linewidth=1.0)
++    axis.axhspan(0.8, 1.2, color="#A5D6A7", alpha=0.18)
++    axis.set_xlabel("Training-defined peak center (cm$^{-1}$)")
++    axis.set_ylabel("Generated / training variation")
++    axis.set_title(f"{details.iloc[0]['condition']}: peak morphology diversity")
++    axis.grid(alpha=0.18)
++    axis.legend(fontsize=8, loc="best")
++    figure.tight_layout()
++    output.parent.mkdir(parents=True, exist_ok=True)
++    figure.savefig(output, dpi=220, bbox_inches="tight")
++    plt.close(figure)
++
++
+ def _qq_table(
+     *,
+     condition: str,
+@@ -649,6 +882,60 @@ def _plot_quality_overview(frame: pd.DataFrame, output: Path) -> None:
+     """Create an all-condition dashboard of the main quality tradeoffs."""
+ 
+     figure, axes = plt.subplots(2, 2, figsize=(12.0, 9.0))
++    if frame.shape[0] == 1:
++        row = frame.iloc[0]
++        axes[0, 0].axis("off")
++        axes[0, 0].text(
++            0.03,
++            0.95,
++            "\n".join(
++                [
++                    str(row["condition"]),
++                    f"MSE: {row['nearest_reference_mse_mean']:.4g}",
++                    f"Cosine: {row['nearest_reference_cosine_mean']:.4f}",
++                    f"Pearson: {row['nearest_reference_pearson_mean']:.4f}",
++                    f"Wasserstein: {row['wasserstein_raw_pointwise_mean']:.4g}",
++                ]
++            ),
++            va="top",
++            fontsize=13,
++        )
++        diversity_labels = ["pairwise MSE", "Pearson distance", "peak height"]
++        diversity_values = [
++            row["diversity_pairwise_mse_ratio"],
++            row["diversity_pearson_distance_ratio"],
++            row["peak_height_iqr_ratio_median"],
++        ]
++        axes[0, 1].barh(diversity_labels, diversity_values, color="#42A5F5")
++        axes[0, 1].axvline(1.0, color="#555555", linestyle="--")
++        axes[0, 1].set_title("Diversity ratios")
++        axes[0, 1].set_xlabel("Generated / training")
++        tail_labels = ["lower 1%", "central 10--90%", "upper 1%"]
++        tail_values = [
++            row["qq_lower_tail_span_ratio"],
++            row["qq_central_10_90_span_ratio"],
++            row["qq_upper_tail_span_ratio"],
++        ]
++        axes[1, 0].barh(tail_labels, tail_values, color="#7E57C2")
++        axes[1, 0].axvline(1.0, color="#555555", linestyle="--")
++        axes[1, 0].set_title("QQ span ratios")
++        axes[1, 0].set_xlabel("Generated / held-out")
++        envelope_values = [
++            row["generated_below_training_envelope_point_fraction"],
++            row["generated_above_training_envelope_point_fraction"],
++        ]
++        axes[1, 1].barh(
++            ["below", "above"], envelope_values, color=["#EF5350", "#FFB74D"]
++        )
++        axes[1, 1].set_title("Outside training envelope")
++        axes[1, 1].set_xlabel("Point fraction")
++        for panel in axes.flat:
++            panel.grid(alpha=0.18)
++        figure.tight_layout()
++        output.parent.mkdir(parents=True, exist_ok=True)
++        figure.savefig(output, dpi=220, bbox_inches="tight")
++        plt.close(figure)
++        return
+     sorted_mse = np.sort(
+         frame["nearest_reference_mse_mean"].to_numpy(dtype=np.float64)
+     )
+@@ -820,6 +1107,87 @@ def _qq_stratified_summary(frame: pd.DataFrame) -> pd.DataFrame:
+     return pd.DataFrame(rows)
+ 
+ 
++def _quality_stratified_summary(frame: pd.DataFrame) -> pd.DataFrame:
++    """Summarize every quality family over scientifically relevant strata."""
++
++    working = frame.copy()
++    working["matrix"] = working["condition"].map(
++        lambda value: "water" if str(value).endswith("_water") else "soil"
++    )
++    working["analyte_count"] = working["condition"].map(
++        lambda value: sum(
++            f"{analyte}-" in str(value) for analyte in ("DEL", "CHL", "TEB")
++        )
++    )
++    working["analyte_signature"] = working["condition"].map(
++        lambda value: "+".join(
++            analyte
++            for analyte in ("DEL", "CHL", "TEB")
++            if f"{analyte}-" in str(value)
++        )
++    )
++    working["axis_group"] = working["point_count"].map(
++        lambda value: f"{int(value)}_points"
++    )
++    grouping_specs: list[tuple[str, list[str]]] = [
++        ("overall", []),
++        ("matrix", ["matrix"]),
++        ("analyte_count", ["analyte_count"]),
++        ("analyte_signature", ["analyte_signature"]),
++        ("matrix_x_analyte_count", ["matrix", "analyte_count"]),
++        ("axis_group", ["axis_group"]),
++    ]
++    metrics = [
++        "nearest_reference_mse_mean",
++        "nearest_reference_cosine_mean",
++        "nearest_reference_pearson_mean",
++        "mean_spectrum_mse",
++        "wasserstein_raw_pointwise_mean",
++        "wasserstein_normalized_pointwise_mean",
++        "generated_to_training_mse_ratio_vs_heldout",
++        "diversity_pairwise_mse_ratio",
++        "diversity_pearson_distance_ratio",
++        "peak_position_std_ratio_median",
++        "peak_position_wasserstein_cm1_mean",
++        "peak_position_frozen_fraction",
++        "peak_height_iqr_ratio_median",
++        "peak_width_iqr_ratio_median",
++        "qq_lower_tail_span_ratio",
++        "qq_central_10_90_span_ratio",
++        "qq_upper_tail_span_ratio",
++        "generated_below_training_envelope_point_fraction",
++        "generated_above_training_envelope_point_fraction",
++    ]
++    rows: list[dict[str, Any]] = []
++    for level, columns in grouping_specs:
++        groups = [((), working)] if not columns else working.groupby(columns)
++        for key, group in groups:
++            keys = key if isinstance(key, tuple) else (key,)
++            label = "all" if not columns else "|".join(str(value) for value in keys)
++            for metric in metrics:
++                if metric not in group:
++                    continue
++                values = group[metric].to_numpy(dtype=np.float64)
++                values = values[np.isfinite(values)]
++                if values.size == 0:
++                    continue
++                rows.append(
++                    {
++                        "stratum_level": level,
++                        "stratum": label,
++                        "condition_count": int(group.shape[0]),
++                        "metric_condition_count": int(values.size),
++                        "metric": metric,
++                        "mean": float(np.mean(values)),
++                        "std": float(np.std(values, ddof=0)),
++                        "p05": float(np.percentile(values, 5.0)),
++                        "median": float(np.median(values)),
++                        "p95": float(np.percentile(values, 95.0)),
++                    }
++                )
++    return pd.DataFrame(rows)
++
++
+ def main() -> None:
+     arguments = parse_arguments()
+     configuration = load_configuration(arguments.config)
+@@ -829,6 +1197,12 @@ def main() -> None:
+         )
+         or {}
+     )
++    peak_diversity_configuration = (
++        (configuration.get("generation", {}) or {}).get(
++            "peak_diversity_evaluation", {}
++        )
++        or {}
++    )
+     checkpoint_path = _resolve_path(configuration, arguments.checkpoint)
+     checkpoint = load_checkpoint_file(checkpoint_path, map_location="cpu")
+     metadata = checkpoint.get("metadata")
+@@ -891,6 +1265,7 @@ def main() -> None:
+     summary_rows: list[dict[str, Any]] = []
+     nearest_frames: list[pd.DataFrame] = []
+     qq_frames: list[pd.DataFrame] = []
++    peak_diversity_frames: list[pd.DataFrame] = []
+     print("===== D4条件生成核心指标评价 =====")
+     print(f"checkpoint：{checkpoint_path}")
+     print(f"真实参考子集：{arguments.reference_split}")
+@@ -977,6 +1352,21 @@ def main() -> None:
+             pair_count=arguments.generated_pair_count,
+             random_seed=2026 + condition_index,
+         )
++        peak_diversity, peak_details = _peak_morphology_diversity(
++            condition=source_name,
++            axis=axis,
++            training=training,
++            generated=generated,
++            configuration=peak_diversity_configuration,
++        )
++        if not peak_details.empty:
++            peak_diversity_frames.append(peak_details)
++            _plot_peak_diversity(
++                peak_details,
++                output_root
++                / "peak_diversity_plots"
++                / f"{source_name}_peak_diversity.png",
++            )
+         qq, qq_metrics = _qq_table(
+             condition=source_name,
+             training=training,
+@@ -1043,6 +1433,7 @@ def main() -> None:
+                 configuration=envelope_configuration,
+             ),
+             **diversity,
++            **peak_diversity,
+             **qq_metrics,
+             "generated_minimum_intensity": float(np.min(generated)),
+             "generated_negative_point_fraction": float(np.mean(generated < 0.0)),
+@@ -1084,6 +1475,16 @@ def main() -> None:
+             "Pearson-distance ratio="
+             f"{row['diversity_pearson_distance_ratio']:.4f}"
+         )
++        print(
++            "  峰形多样性：position-std ratio="
++            f"{row['peak_position_std_ratio_median']:.4f}；"
++            "height-IQR ratio="
++            f"{row['peak_height_iqr_ratio_median']:.4f}；"
++            "width-IQR ratio="
++            f"{row['peak_width_iqr_ratio_median']:.4f}；"
++            "position frozen="
++            f"{row['peak_position_frozen_fraction']:.3%}"
++        )
+         print(
+             "  负值："
+             f"min={row['generated_minimum_intensity']:.3f}；"
+@@ -1113,8 +1514,14 @@ def main() -> None:
+     condition_summary = pd.DataFrame(summary_rows)
+     nearest_details = pd.concat(nearest_frames, ignore_index=True)
+     qq_details = pd.concat(qq_frames, ignore_index=True)
++    peak_details_all = (
++        pd.concat(peak_diversity_frames, ignore_index=True)
++        if peak_diversity_frames
++        else pd.DataFrame()
++    )
+     overall = _overall_summary(condition_summary)
+     qq_stratified = _qq_stratified_summary(condition_summary)
++    quality_stratified = _quality_stratified_summary(condition_summary)
+     overview_path = output_root / "quality_overview.png"
+     _plot_quality_overview(condition_summary, overview_path)
+     overall_mean = {
+@@ -1157,6 +1564,8 @@ def main() -> None:
+     nearest_path = output_root / "generated_to_reference_details.csv"
+     qq_path = output_root / "qq_quantiles.csv"
+     qq_stratified_path = output_root / "qq_stratified_summary.csv"
++    quality_stratified_path = output_root / "quality_stratified_summary.csv"
++    peak_details_path = output_root / "peak_morphology_details.csv"
+     condition_summary.to_csv(condition_path, index=False, encoding="utf-8-sig")
+     overall.to_csv(overall_path, index=False, encoding="utf-8-sig")
+     nearest_details.to_csv(nearest_path, index=False, encoding="utf-8-sig")
+@@ -1164,6 +1573,12 @@ def main() -> None:
+     qq_stratified.to_csv(
+         qq_stratified_path, index=False, encoding="utf-8-sig"
+     )
++    quality_stratified.to_csv(
++        quality_stratified_path, index=False, encoding="utf-8-sig"
++    )
++    peak_details_all.to_csv(
++        peak_details_path, index=False, encoding="utf-8-sig"
++    )
+ 
+     report_lines = [
+         "D4条件生成核心指标评价",
+@@ -1188,6 +1603,10 @@ def main() -> None:
+         f"wasserstein_normalized_pointwise_mean: {overall_mean['wasserstein_normalized_pointwise_mean']:.9g}",
+         f"diversity_pairwise_mse_ratio: {overall_mean['diversity_pairwise_mse_ratio']:.9g}",
+         f"diversity_pearson_distance_ratio: {overall_mean['diversity_pearson_distance_ratio']:.9g}",
++        f"peak_position_std_ratio_median: {overall_mean.get('peak_position_std_ratio_median', float('nan')):.9g}",
++        f"peak_height_iqr_ratio_median: {overall_mean.get('peak_height_iqr_ratio_median', float('nan')):.9g}",
++        f"peak_width_iqr_ratio_median: {overall_mean.get('peak_width_iqr_ratio_median', float('nan')):.9g}",
++        f"peak_position_frozen_fraction: {overall_mean.get('peak_position_frozen_fraction', float('nan')):.9g}",
+         f"qq_lower_tail_span_ratio: {overall_mean['qq_lower_tail_span_ratio']:.9g}",
+         f"qq_upper_tail_span_ratio: {overall_mean['qq_upper_tail_span_ratio']:.9g}",
+         f"qq_central_10_90_span_ratio: {overall_mean['qq_central_10_90_span_ratio']:.9g}",
+@@ -1213,6 +1632,9 @@ def main() -> None:
+         f"{output_root / 'spectral_distribution_plots'}",
+         f"quality_overview: {overview_path}",
+         f"qq_stratified_summary: {qq_stratified_path}",
++        f"quality_stratified_summary: {quality_stratified_path}",
++        f"peak_morphology_details: {peak_details_path}",
++        f"peak_diversity_plots: {output_root / 'peak_diversity_plots'}",
+     ]
+     report_path = output_root / "evaluation_report.txt"
+     report_path.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
+@@ -1223,6 +1645,8 @@ def main() -> None:
+     print(f"光谱分布图：{output_root / 'spectral_distribution_plots'}")
+     print(f"全条件总览图：{overview_path}")
+     print(f"QQ分层汇总：{qq_stratified_path}")
++    print(f"全质量分层汇总：{quality_stratified_path}")
++    print(f"峰形多样性明细：{peak_details_path}")
+     print(f"报告：{report_path}")
+ 
+ 
+diff --git a/scripts/generate_conditional_spectra.py b/scripts/generate_conditional_spectra.py
+index b78c61b..670d7f2 100644
+--- a/scripts/generate_conditional_spectra.py
++++ b/scripts/generate_conditional_spectra.py
+@@ -28,6 +28,7 @@ from src.spectrum_generator import (
+     apply_condition_intensity_envelope_guard,
+     apply_condition_mean_fidelity_calibration,
+     apply_condition_oracle_tail_calibration,
++    apply_condition_pca_spread_calibration,
+     generate_spectra,
+ )
+ from src.spectrum_length_adapter import SpectrumLengthAdapter
+@@ -283,15 +284,19 @@ def main() -> None:
+     mean_configuration = generation.get(
+         "mean_fidelity_calibration", {}
+     ) or {}
++    spread_configuration = generation.get(
++        "pca_spread_calibration", {}
++    ) or {}
+     tail_configuration = generation.get("tail_calibration", {}) or {}
+     envelope_configuration = generation.get(
+         "intensity_envelope_guard", {}
+     ) or {}
+     mean_enabled = bool(mean_configuration.get("enabled", False))
++    spread_enabled = bool(spread_configuration.get("enabled", False))
+     tail_enabled = bool(tail_configuration.get("enabled", False))
+     envelope_enabled = bool(envelope_configuration.get("enabled", False))
+     condition_calibration_enabled = (
+-        mean_enabled or tail_enabled or envelope_enabled
++        mean_enabled or spread_enabled or tail_enabled or envelope_enabled
+     )
+     training_collection = None
+     relative_source_files = None
+@@ -360,6 +365,9 @@ def main() -> None:
+         "mean_fidelity_calibration_configuration": (
+             mean_configuration if mean_enabled else None
+         ),
++        "pca_spread_calibration_configuration": (
++            spread_configuration if spread_enabled else None
++        ),
+         "intensity_envelope_guard_configuration": (
+             envelope_configuration if envelope_enabled else None
+         ),
+@@ -417,6 +425,7 @@ def main() -> None:
+         if normalizer is not None:
+             spectra = normalizer.inverse_transform(spectra)
+         mean_diagnostics = None
++        spread_diagnostics = None
+         tail_diagnostics = None
+         envelope_diagnostics = None
+         if condition_calibration_enabled:
+@@ -437,6 +446,14 @@ def main() -> None:
+                     configuration=mean_configuration,
+                 )
+             )
++        if spread_enabled:
++            spectra, spread_diagnostics = (
++                apply_condition_pca_spread_calibration(
++                    spectra,
++                    condition_training,
++                    configuration=spread_configuration,
++                )
++            )
+         if tail_enabled:
+             condition_tail_configuration = dict(tail_configuration)
+             condition_tail_configuration["random_seed"] = int(
+@@ -483,6 +500,8 @@ def main() -> None:
+             )
+         if mean_diagnostics is not None:
+             condition_record["mean_fidelity_calibration"] = mean_diagnostics
++        if spread_diagnostics is not None:
++            condition_record["pca_spread_calibration"] = spread_diagnostics
+         if tail_diagnostics is not None:
+             condition_record["oracle_tail_calibration"] = tail_diagnostics
+         if envelope_diagnostics is not None:
+@@ -513,6 +532,19 @@ def main() -> None:
+                 "修正Raman点比例="
+                 f"{mean_diagnostics['modified_raman_fraction']:.3%}"
+             )
++        if spread_diagnostics is not None:
++            print(
++                "  training-PCA分布宽度恢复：component std ratio="
++                f"{spread_diagnostics['component_std_ratio_median_before']:.4f} -> "
++                f"{spread_diagnostics['component_std_ratio_median_after']:.4f}；"
++                "mean-pairwise-MSE ratio="
++                f"{spread_diagnostics['mean_pairwise_mse_ratio_before']:.4f} -> "
++                f"{spread_diagnostics['mean_pairwise_mse_ratio_after']:.4f}；"
++                "扩展PC数="
++                f"{spread_diagnostics['expanded_component_count']}；"
++                "修正RMSE="
++                f"{spread_diagnostics['correction_rmse']:.4f}"
++            )
+         if tail_diagnostics is not None:
+             print(
+                 "  QQ尾部校准：lower ratio="
+diff --git a/src/masked_diffusion.py b/src/masked_diffusion.py
+index 235d373..f7fb2f6 100644
+--- a/src/masked_diffusion.py
++++ b/src/masked_diffusion.py
+@@ -68,6 +68,9 @@ def _normalize_quality_fidelity_configuration(
+     high_noise = source.get("high_noise_weighting", {}) or {}
+     derivative = source.get("first_derivative", {}) or {}
+     multiscale = source.get("multiscale_shape", {}) or {}
++    multiscale_variance = source.get(
++        "condition_multiscale_variance_floor", {}
++    ) or {}
+     condition_mean = source.get("condition_mean", {}) or {}
+     envelope = source.get("condition_pointwise_envelope", {}) or {}
+     if not all(
+@@ -77,6 +80,7 @@ def _normalize_quality_fidelity_configuration(
+             high_noise,
+             derivative,
+             multiscale,
++            multiscale_variance,
+             condition_mean,
+             envelope,
+         )
+@@ -144,6 +148,46 @@ def _normalize_quality_fidelity_configuration(
+             "且smooth_l1_beta和weight均大于0。"
+         )
+ 
++    variance_kernel_sizes = [
++        int(value) for value in multiscale_variance.get("kernel_sizes", [])
++    ]
++    normalized["condition_multiscale_variance_floor"] = {
++        "enabled": bool(multiscale_variance.get("enabled", False)),
++        "kernel_sizes": variance_kernel_sizes,
++        "minimum_group_size": int(
++            multiscale_variance.get("minimum_group_size", 4)
++        ),
++        "minimum_std_ratio": float(
++            multiscale_variance.get("minimum_std_ratio", 0.85)
++        ),
++        "active_std_quantile": float(
++            multiscale_variance.get("active_std_quantile", 20.0)
++        ),
++        "maximum_timestep_fraction": float(
++            multiscale_variance.get("maximum_timestep_fraction", 0.50)
++        ),
++        "smooth_l1_beta": float(
++            multiscale_variance.get("smooth_l1_beta", 0.05)
++        ),
++        "weight": float(multiscale_variance.get("weight", 1.0)),
++    }
++    variance_floor = normalized["condition_multiscale_variance_floor"]
++    if variance_floor["enabled"] and (
++        not variance_kernel_sizes
++        or any(
++            value < 3 or value % 2 == 0 or value > 127
++            for value in variance_kernel_sizes
++        )
++        or len(set(variance_kernel_sizes)) != len(variance_kernel_sizes)
++        or variance_floor["minimum_group_size"] < 3
++        or not 0.0 < variance_floor["minimum_std_ratio"] <= 1.0
++        or not 0.0 <= variance_floor["active_std_quantile"] <= 80.0
++        or not 0.0 < variance_floor["maximum_timestep_fraction"] <= 1.0
++        or variance_floor["smooth_l1_beta"] <= 0.0
++        or variance_floor["weight"] <= 0.0
++    ):
++        raise ValueError("condition_multiscale_variance_floor配置无效。")
++
+     normalized["condition_mean"] = {
+         "enabled": bool(condition_mean.get("enabled", False)),
+         "smooth_l1_beta": float(condition_mean.get("smooth_l1_beta", 0.05)),
+@@ -185,6 +229,7 @@ def _normalize_quality_fidelity_configuration(
+         (
+             first["enabled"],
+             multi["enabled"],
++            variance_floor["enabled"],
+             mean["enabled"],
+             bounds["enabled"],
+         )
+@@ -315,10 +360,12 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+         target: torch.Tensor,
+         valid_mask: torch.Tensor,
+         condition: torch.Tensor,
++        timesteps: torch.Tensor | None = None,
+     ) -> dict[str, torch.Tensor]:
+         zero = prediction.sum() * 0.0
+         derivative_loss = zero
+         multiscale_loss = zero
++        multiscale_variance_loss = zero
+         condition_mean_loss = zero
+         envelope_loss = zero
+         active_groups = zero
+@@ -383,15 +430,19 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+         envelope = self.quality_fidelity_configuration.get(
+             "condition_pointwise_envelope", {}
+         )
++        variance_floor = self.quality_fidelity_configuration.get(
++            "condition_multiscale_variance_floor", {}
++        )
+         needs_condition_groups = bool(condition_mean.get("enabled", False)) or bool(
+             envelope.get("enabled", False)
+-        )
++        ) or bool(variance_floor.get("enabled", False))
+         if needs_condition_groups:
+             _, inverse = torch.unique(
+                 condition.detach(), dim=0, sorted=True, return_inverse=True
+             )
+             mean_group_losses: list[torch.Tensor] = []
+             envelope_group_losses: list[torch.Tensor] = []
++            variance_group_losses: list[torch.Tensor] = []
+             active_group_count = 0
+             for group_index in range(int(inverse.max().item()) + 1):
+                 selected = inverse == group_index
+@@ -403,6 +454,97 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+                     group_mask, dim=0, keepdim=True
+                 ).values
+                 group_is_active = False
++                timestep_is_active = True
++                if timesteps is not None:
++                    timestep_is_active = bool(
++                        (
++                            timesteps[selected].to(dtype=torch.float32).mean()
++                            / float(max(self.num_timesteps - 1, 1))
++                        ).item()
++                        <= float(
++                            variance_floor.get("maximum_timestep_fraction", 1.0)
++                        )
++                    )
++
++                if (
++                    bool(variance_floor.get("enabled", False))
++                    and selected_count
++                    >= int(variance_floor["minimum_group_size"])
++                    and timestep_is_active
++                ):
++                    kernel_losses: list[torch.Tensor] = []
++                    for kernel_size in variance_floor["kernel_sizes"]:
++                        padding = int(kernel_size) // 2
++                        pooled_mask = F.avg_pool1d(
++                            group_mask,
++                            kernel_size=int(kernel_size),
++                            stride=1,
++                            padding=padding,
++                            count_include_pad=True,
++                        )
++                        predicted_pool = F.avg_pool1d(
++                            group_prediction * group_mask,
++                            kernel_size=int(kernel_size),
++                            stride=1,
++                            padding=padding,
++                            count_include_pad=True,
++                        ) / pooled_mask.clamp_min(1.0e-12)
++                        target_pool = F.avg_pool1d(
++                            group_target * group_mask,
++                            kernel_size=int(kernel_size),
++                            stride=1,
++                            padding=padding,
++                            count_include_pad=True,
++                        ) / pooled_mask.clamp_min(1.0e-12)
++                        predicted_std = torch.sqrt(
++                            torch.mean(
++                                torch.square(
++                                    predicted_pool
++                                    - predicted_pool.mean(dim=0, keepdim=True)
++                                ),
++                                dim=0,
++                                keepdim=True,
++                            ).clamp_min(1.0e-12)
++                        )
++                        target_std = torch.sqrt(
++                            torch.mean(
++                                torch.square(
++                                    target_pool
++                                    - target_pool.mean(dim=0, keepdim=True)
++                                ),
++                                dim=0,
++                                keepdim=True,
++                            ).clamp_min(1.0e-12)
++                        ).detach()
++                        valid_std = target_std[group_valid > 0.5]
++                        active_threshold = torch.quantile(
++                            valid_std,
++                            float(variance_floor["active_std_quantile"]) / 100.0,
++                        )
++                        active_mask = group_valid * (
++                            target_std >= active_threshold
++                        ).to(group_valid.dtype)
++                        minimum_std = (
++                            float(variance_floor["minimum_std_ratio"])
++                            * target_std
++                        )
++                        relative_deficit = F.relu(
++                            minimum_std - predicted_std
++                        ) / target_std.clamp_min(1.0e-6)
++                        pointwise = F.smooth_l1_loss(
++                            relative_deficit,
++                            torch.zeros_like(relative_deficit),
++                            reduction="none",
++                            beta=float(variance_floor["smooth_l1_beta"]),
++                        )
++                        kernel_losses.append(
++                            self._masked_mean(pointwise, active_mask)
++                        )
++                    if kernel_losses:
++                        variance_group_losses.append(
++                            torch.stack(kernel_losses).mean()
++                        )
++                        group_is_active = True
+ 
+                 if bool(condition_mean.get("enabled", False)) and (
+                     selected_count >= int(condition_mean["minimum_group_size"])
+@@ -464,11 +606,17 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+                 condition_mean_loss = torch.stack(mean_group_losses).mean()
+             if envelope_group_losses:
+                 envelope_loss = torch.stack(envelope_group_losses).mean()
++            if variance_group_losses:
++                multiscale_variance_loss = torch.stack(
++                    variance_group_losses
++                ).mean()
+             active_groups = prediction.new_tensor(float(active_group_count))
+ 
+         raw = (
+             float(derivative.get("weight", 0.0)) * derivative_loss
+             + float(multiscale.get("weight", 0.0)) * multiscale_loss
++            + float(variance_floor.get("weight", 0.0))
++            * multiscale_variance_loss
+             + float(condition_mean.get("weight", 0.0)) * condition_mean_loss
+             + float(envelope.get("weight", 0.0)) * envelope_loss
+         )
+@@ -476,6 +624,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             "quality_fidelity_raw_loss": raw,
+             "first_derivative_fidelity_loss": derivative_loss,
+             "multiscale_shape_loss": multiscale_loss,
++            "condition_multiscale_variance_floor_loss": multiscale_variance_loss,
+             "condition_mean_fidelity_loss": condition_mean_loss,
+             "condition_envelope_loss": envelope_loss,
+             "quality_fidelity_active_groups": active_groups,
+@@ -743,6 +892,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+                 target=x_start,
+                 valid_mask=mask,
+                 condition=prepared_condition,
++                timesteps=t,
+             )
+             uncapped_quality = (
+                 float(self.quality_fidelity_configuration["total_weight"])
+@@ -818,6 +968,9 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             "multiscale_shape_loss": quality.get(
+                 "multiscale_shape_loss", zero
+             ).detach(),
++            "condition_multiscale_variance_floor_loss": quality.get(
++                "condition_multiscale_variance_floor_loss", zero
++            ).detach(),
+             "condition_mean_fidelity_loss": quality.get(
+                 "condition_mean_fidelity_loss", zero
+             ).detach(),
+diff --git a/src/spectrum_generator.py b/src/spectrum_generator.py
+index 263df2b..75c7c65 100644
+--- a/src/spectrum_generator.py
++++ b/src/spectrum_generator.py
+@@ -137,6 +137,177 @@ def apply_condition_mean_fidelity_calibration(
+     return corrected.astype(np.float32, copy=False), diagnostics
+ 
+ 
++def _mean_pairwise_mse_from_variance(spectra: np.ndarray) -> float:
++    """Return the exact mean MSE across all unordered sample pairs."""
++
++    if spectra.shape[0] < 2:
++        return 0.0
++    pointwise_variance = np.var(spectra, axis=0, ddof=1)
++    return float(2.0 * np.mean(pointwise_variance))
++
++
++def apply_condition_pca_spread_calibration(
++    generated_spectra: np.ndarray,
++    training_spectra: np.ndarray,
++    *,
++    configuration: dict,
++) -> tuple[np.ndarray, dict[str, float | int | bool | list[float]]]:
++    """Restore only missing spread along train-supported PCA directions.
++
++    The calibration is fitted independently for every condition from its 12
++    training spectra.  It never uses validation/test spectra and never creates
++    a direction outside the training PCA subspace.  Generated means are kept
++    exactly unchanged; only centered component scores whose standard deviation
++    falls below the configured floor are expanded.  Components that already
++    have enough (or excessive) spread are left untouched.
++    """
++
++    generated, training = _condition_arrays(generated_spectra, training_spectra)
++    if not isinstance(configuration, dict):
++        raise ValueError("pca_spread_calibration配置必须是字典。")
++
++    maximum_components = int(configuration.get("maximum_components", 6))
++    explained_variance_ratio = float(
++        configuration.get("explained_variance_ratio", 0.95)
++    )
++    minimum_component_ratio = float(
++        configuration.get("minimum_component_std_ratio", 0.85)
++    )
++    maximum_scale_factor = float(
++        configuration.get("maximum_scale_factor", 1.35)
++    )
++    minimum_component_variance_fraction = float(
++        configuration.get("minimum_component_variance_fraction", 0.01)
++    )
++    maximum_correction_fraction = float(
++        configuration.get("maximum_correction_range_fraction", 0.08)
++    )
++    minimum_generated_count = int(
++        configuration.get("minimum_generated_count", 20)
++    )
++    epsilon = float(configuration.get("epsilon", 1.0e-12))
++
++    if maximum_components < 1:
++        raise ValueError("maximum_components至少为1。")
++    if not 0.50 <= explained_variance_ratio <= 1.0:
++        raise ValueError("explained_variance_ratio必须位于[0.50,1]。")
++    if not 0.0 < minimum_component_ratio <= 1.0:
++        raise ValueError("minimum_component_std_ratio必须位于(0,1]。")
++    if not 1.0 <= maximum_scale_factor <= 2.0:
++        raise ValueError("maximum_scale_factor必须位于[1,2]。")
++    if not 0.0 <= minimum_component_variance_fraction <= 0.25:
++        raise ValueError("minimum_component_variance_fraction必须位于[0,0.25]。")
++    if not 0.0 < maximum_correction_fraction <= 0.25:
++        raise ValueError("maximum_correction_range_fraction必须位于(0,0.25]。")
++    if minimum_generated_count < 4 or epsilon <= 0.0:
++        raise ValueError("PCA spread最少生成数或epsilon无效。")
++    if generated.shape[0] < minimum_generated_count:
++        raise ValueError(
++            "PCA spread校准要求至少"
++            f"{minimum_generated_count}条生成谱，当前只有{generated.shape[0]}条。"
++        )
++
++    training_center = np.mean(training, axis=0)
++    training_centered = training - training_center[np.newaxis, :]
++    _, singular_values, right_vectors = np.linalg.svd(
++        training_centered, full_matrices=False
++    )
++    component_variances = np.square(singular_values) / max(
++        training.shape[0] - 1, 1
++    )
++    total_variance = float(np.sum(component_variances))
++    if not np.isfinite(total_variance) or total_variance <= epsilon:
++        raise ValueError("同条件training光谱没有可用于PCA spread的方差。")
++    variance_fractions = component_variances / total_variance
++    cumulative = np.cumsum(variance_fractions)
++    required = int(np.searchsorted(cumulative, explained_variance_ratio) + 1)
++    component_count = min(
++        maximum_components,
++        training.shape[0] - 1,
++        right_vectors.shape[0],
++        required,
++    )
++    components = right_vectors[:component_count]
++    training_scores = training_centered @ components.T
++
++    generated_mean = np.mean(generated, axis=0)
++    generated_centered = generated - generated_mean[np.newaxis, :]
++    generated_scores = generated_centered @ components.T
++    training_std = np.std(training_scores, axis=0, ddof=1)
++    generated_std = np.std(generated_scores, axis=0, ddof=1)
++    component_ratio_before = generated_std / np.maximum(training_std, epsilon)
++    eligible = np.logical_and(
++        variance_fractions[:component_count]
++        >= minimum_component_variance_fraction,
++        training_std > epsilon,
++    )
++    scale_factors = np.ones(component_count, dtype=np.float64)
++    deficient = np.logical_and(
++        eligible, component_ratio_before < minimum_component_ratio
++    )
++    scale_factors[deficient] = np.minimum(
++        minimum_component_ratio
++        / np.maximum(component_ratio_before[deficient], epsilon),
++        maximum_scale_factor,
++    )
++
++    score_delta = generated_scores * (scale_factors - 1.0)[np.newaxis, :]
++    correction = score_delta @ components
++    training_range = max(
++        float(np.percentile(training, 95.0) - np.percentile(training, 5.0)),
++        epsilon,
++    )
++    correction_rmse_before_cap = float(
++        np.sqrt(np.mean(np.square(correction)))
++    )
++    maximum_correction_rmse = maximum_correction_fraction * training_range
++    safety_scale = 1.0
++    if correction_rmse_before_cap > maximum_correction_rmse:
++        safety_scale = maximum_correction_rmse / max(
++            correction_rmse_before_cap, epsilon
++        )
++        correction *= safety_scale
++    corrected = generated + correction
++    # Numerical round-off must not turn a spread-only operation into a mean
++    # calibration.  This also makes the invariant directly testable.
++    corrected += (
++        generated_mean - np.mean(corrected, axis=0)
++    )[np.newaxis, :]
++
++    corrected_scores = (corrected - generated_mean[np.newaxis, :]) @ components.T
++    corrected_std = np.std(corrected_scores, axis=0, ddof=1)
++    component_ratio_after = corrected_std / np.maximum(training_std, epsilon)
++    pairwise_before = _mean_pairwise_mse_from_variance(generated)
++    pairwise_after = _mean_pairwise_mse_from_variance(corrected)
++    pairwise_training = _mean_pairwise_mse_from_variance(training)
++    diagnostics: dict[str, float | int | bool | list[float]] = {
++        "enabled": True,
++        "training_only": True,
++        "preserves_generated_mean": True,
++        "component_count": int(component_count),
++        "eligible_component_count": int(np.sum(eligible)),
++        "expanded_component_count": int(np.sum(deficient)),
++        "component_std_ratio_before": component_ratio_before.tolist(),
++        "component_std_ratio_after": component_ratio_after.tolist(),
++        "component_scale_factors": scale_factors.tolist(),
++        "component_std_ratio_median_before": float(
++            np.median(component_ratio_before[eligible]) if np.any(eligible) else 1.0
++        ),
++        "component_std_ratio_median_after": float(
++            np.median(component_ratio_after[eligible]) if np.any(eligible) else 1.0
++        ),
++        "mean_pairwise_mse_ratio_before": pairwise_before
++        / max(pairwise_training, epsilon),
++        "mean_pairwise_mse_ratio_after": pairwise_after
++        / max(pairwise_training, epsilon),
++        "correction_rmse": float(np.sqrt(np.mean(np.square(corrected - generated)))),
++        "correction_rmse_before_safety_cap": correction_rmse_before_cap,
++        "safety_scale": float(safety_scale),
++        "maximum_scale_factor_used": float(np.max(scale_factors)),
++    }
++    return corrected.astype(np.float32, copy=False), diagnostics
++
++
+ def apply_condition_oracle_tail_calibration(
+     generated_spectra: np.ndarray,
+     training_spectra: np.ndarray,
+diff --git a/tests/test_sers_generation_evaluator.py b/tests/test_sers_generation_evaluator.py
+index 6a157ca..b2d9a1d 100644
+--- a/tests/test_sers_generation_evaluator.py
++++ b/tests/test_sers_generation_evaluator.py
+@@ -1,11 +1,14 @@
+ import numpy as np
++import pandas as pd
+ 
+ from scripts.evaluate_d4_2_generation import (
+     _center_metrics,
+     _comparison_summary_fields,
+     _diversity_fields,
+     _pointwise_wasserstein,
++    _peak_morphology_diversity,
+     _qq_table,
++    _quality_stratified_summary,
+     _training_supported_intensity_metrics,
+ )
+ from src.sers_generation_evaluator import (
+@@ -324,6 +327,43 @@ def test_core_generation_metrics_and_qq_are_finite():
+     assert isinstance(qq_metrics["qq_any_tail_mismatch"], bool)
+ 
+ 
++def test_peak_morphology_diversity_detects_frozen_peak_positions():
++    axis, training = _synthetic_sers(
++        number=12, seed=2026, variation_scale=1.0
++    )
++    _, generated = _synthetic_sers(
++        number=80, seed=2027, variation_scale=0.08
++    )
++    metrics, details = _peak_morphology_diversity(
++        condition="CHL-H_water",
++        axis=axis,
++        training=training,
++        generated=generated,
++        configuration={
++            "baseline_sigma_cm1": 30.0,
++            "smoothing_sigma_cm1": 2.0,
++            "minimum_relative_prominence": 0.06,
++            "minimum_peak_distance_cm1": 12.0,
++            "maximum_peak_count": 10,
++            "edge_exclusion_cm1": 24.0,
++            "measurement_half_width_cm1": 12.0,
++            "minimum_position_std_cm1": 0.20,
++        },
++    )
++    assert metrics["peak_diversity_peak_count"] == 2
++    assert metrics["peak_position_active_count"] >= 1
++    assert metrics["peak_position_std_ratio_median"] < 0.5
++    assert metrics["peak_position_frozen_fraction"] > 0.0
++    assert details.shape[0] == 2
++    assert set(
++        [
++            "peak_position_std_ratio",
++            "peak_height_iqr_ratio",
++            "peak_width_iqr_ratio",
++        ]
++    ).issubset(details.columns)
++
++
+ def test_training_supported_intensity_metrics_detect_both_sides():
+     training = np.repeat(
+         np.asarray([[-18.0, 100.0, 200.0]], dtype=np.float64), 12, axis=0
+@@ -360,3 +400,50 @@ def test_identical_distributions_have_zero_pointwise_wasserstein():
+     )
+     assert metrics["wasserstein_raw_pointwise_mean"] == 0.0
+     assert metrics["wasserstein_normalized_pointwise_mean"] == 0.0
++
++
++def test_quality_stratified_summary_covers_all_condition_families():
++    rows = []
++    for condition, points in (
++        ("DEL-S_water", 1401),
++        ("CHL-H_soil", 1901),
++        ("DEL-M_TEB-H_water", 1401),
++        ("DEL-H_TEB-M_CHL-S_soil", 1901),
++    ):
++        rows.append(
++            {
++                "condition": condition,
++                "point_count": points,
++                "nearest_reference_mse_mean": 100.0,
++                "nearest_reference_cosine_mean": 0.98,
++                "nearest_reference_pearson_mean": 0.97,
++                "mean_spectrum_mse": 20.0,
++                "wasserstein_raw_pointwise_mean": 5.0,
++                "wasserstein_normalized_pointwise_mean": 0.03,
++                "generated_to_training_mse_ratio_vs_heldout": 0.8,
++                "diversity_pairwise_mse_ratio": 0.85,
++                "diversity_pearson_distance_ratio": 0.83,
++                "peak_position_std_ratio_median": 0.9,
++                "peak_position_wasserstein_cm1_mean": 0.5,
++                "peak_position_frozen_fraction": 0.1,
++                "peak_height_iqr_ratio_median": 0.88,
++                "peak_width_iqr_ratio_median": 0.92,
++                "qq_lower_tail_span_ratio": 0.9,
++                "qq_central_10_90_span_ratio": 0.95,
++                "qq_upper_tail_span_ratio": 0.9,
++                "generated_below_training_envelope_point_fraction": 0.0,
++                "generated_above_training_envelope_point_fraction": 0.0,
++            }
++        )
++    summary = _quality_stratified_summary(pd.DataFrame(rows))
++    assert {
++        "overall",
++        "matrix",
++        "analyte_count",
++        "analyte_signature",
++        "matrix_x_analyte_count",
++        "axis_group",
++    }.issubset(set(summary["stratum_level"]))
++    overall = summary[summary["stratum_level"] == "overall"]
++    assert set(overall["condition_count"]) == {4}
++    assert "peak_position_std_ratio_median" in set(overall["metric"])
+diff --git a/tests/test_spectrum_generation.py b/tests/test_spectrum_generation.py
+index 586fed9..ebe996c 100644
+--- a/tests/test_spectrum_generation.py
++++ b/tests/test_spectrum_generation.py
+@@ -13,6 +13,7 @@ from src.spectrum_generator import (
+     apply_condition_mean_fidelity_calibration,
+     apply_condition_negative_floor_guard,
+     apply_condition_oracle_tail_calibration,
++    apply_condition_pca_spread_calibration,
+     generate_spectra,
+ )
+ from src.masked_diffusion import MaskedGaussianDiffusion1D
+@@ -247,6 +248,51 @@ def test_mean_fidelity_calibration_reduces_bias_without_changing_pairwise_mse():
+     np.testing.assert_allclose(pairwise_after, pairwise_before, rtol=1.0e-6)
+ 
+ 
++def test_pca_spread_calibration_restores_supported_variation_and_keeps_mean():
++    random_generator = np.random.default_rng(2026)
++    axis = np.linspace(-1.0, 1.0, 120)
++    first_mode = np.sin(np.pi * axis)
++    second_mode = np.exp(-0.5 * np.square(axis / 0.18))
++    train_scores = random_generator.normal(size=(12, 2))
++    training = (
++        20.0
++        + 5.0 * train_scores[:, [0]] * first_mode[None, :]
++        + 8.0 * train_scores[:, [1]] * second_mode[None, :]
++    )
++    generated_scores = random_generator.normal(scale=0.35, size=(80, 2))
++    generated = (
++        22.0
++        + 5.0 * generated_scores[:, [0]] * first_mode[None, :]
++        + 8.0 * generated_scores[:, [1]] * second_mode[None, :]
++    )
++    mean_before = np.mean(generated, axis=0)
++    corrected, diagnostics = apply_condition_pca_spread_calibration(
++        generated,
++        training,
++        configuration={
++            "maximum_components": 6,
++            "explained_variance_ratio": 0.95,
++            "minimum_component_variance_fraction": 0.01,
++            "minimum_component_std_ratio": 0.85,
++            "maximum_scale_factor": 1.35,
++            "maximum_correction_range_fraction": 0.25,
++            "minimum_generated_count": 20,
++        },
++    )
++    np.testing.assert_allclose(
++        np.mean(corrected, axis=0), mean_before, rtol=0.0, atol=2.0e-5
++    )
++    assert diagnostics["expanded_component_count"] >= 1
++    assert (
++        diagnostics["component_std_ratio_median_after"]
++        > diagnostics["component_std_ratio_median_before"]
++    )
++    assert (
++        diagnostics["mean_pairwise_mse_ratio_after"]
++        > diagnostics["mean_pairwise_mse_ratio_before"]
++    )
++
++
+ def test_oracle_tail_calibration_keeps_middle_and_shrinks_only_excess_tails():
+     random_generator = np.random.default_rng(2026)
+     training = random_generator.normal(0.0, 1.0, size=(12, 160))
+@@ -376,6 +422,40 @@ def test_quality_fidelity_losses_detect_shape_mean_and_envelope_errors():
+     assert losses["quality_fidelity_active_groups"].item() == 2.0
+ 
+ 
++def test_condition_multiscale_variance_floor_detects_collapsed_group():
++    diffusion = object.__new__(MaskedGaussianDiffusion1D)
++    nn.Module.__init__(diffusion)
++    diffusion.num_timesteps = 200
++    diffusion.quality_fidelity_configuration = {
++        "enabled": True,
++        "condition_multiscale_variance_floor": {
++            "enabled": True,
++            "kernel_sizes": [3, 5],
++            "minimum_group_size": 4,
++            "minimum_std_ratio": 0.85,
++            "active_std_quantile": 20.0,
++            "maximum_timestep_fraction": 0.50,
++            "smooth_l1_beta": 0.05,
++            "weight": 1.0,
++        },
++    }
++    target = torch.zeros((4, 1, 21), dtype=torch.float32)
++    target[0, 0, 8:13] = 1.0
++    target[1, 0, 9:14] = 1.3
++    target[2, 0, 7:12] = 0.7
++    target[3, 0, 10:15] = 1.1
++    prediction = target.mean(dim=0, keepdim=True).repeat(4, 1, 1)
++    losses = diffusion._quality_fidelity_losses(
++        prediction=prediction,
++        target=target,
++        valid_mask=torch.ones_like(target),
++        condition=torch.tensor([[1.0, 0.0]]).repeat(4, 1),
++        timesteps=torch.tensor([20, 20, 20, 20]),
++    )
++    assert losses["condition_multiscale_variance_floor_loss"].item() > 0.0
++    assert losses["quality_fidelity_raw_loss"].item() > 0.0
++
++
+ def test_high_noise_stratified_sampling_preserves_full_range_and_tail_coverage():
+     diffusion = object.__new__(MaskedGaussianDiffusion1D)
+     nn.Module.__init__(diffusion)

@@ -1,0 +1,48 @@
+D4.26 hybrid local verification — 2026-10-05 UTC
+
+Project source: current uploaded D4.25 source with terminal guard, stage trace,
+and joint prior sampler patches. No access to the Ubuntu/GPU server was used.
+
+Local test environment (scratch-only, not an installation instruction):
+Python 3.11; PyTorch 2.11.0+cpu; denoising-diffusion-pytorch 2.2.6;
+ema-pytorch 0.8.3; CPU threads=1. Server CUDA validation remains to be run.
+
+1. Project pytest: 251 passed in 9.06s.
+   Includes 13 new model tests: old checkpoint key/RNG compatibility;
+   zero-init eval parity; short/full physical masks and partial boundaries;
+   invalid key/value exclusion; actual-base response; self ablation;
+   learned attention + FiLM gradients after 3 updates; masked network values;
+   real masked diffusion loss, DDIM and strict serialization roundtrip;
+   EMA deepcopy/no stale context; true model input length1904 and dim32;
+   invalid configuration; cross-architecture resume rejection.
+
+2. Package workflow unittest: 7 tests passed.
+   Exact apply/idempotence/rollback, reject unknown code before mutation,
+   reject unsafe rollback, frozen independent generation and training budget,
+   checkpoint condition counts/axes/split separation/completed-step guards,
+   stage export/replay/cached evaluation/paired-noise rejection, finite metrics.
+   Temporary projects, synthetic traces and mock evaluator/checkpoint validation
+   are used for controller tests; these are NOT real spectral quality results.
+
+3. Full-size synthetic optimizer check: PASS on CPU.
+   Two inputs: valid lengths1401/1901, padded1904; 3 in-memory Adam updates.
+   All 15 original ResnetBlock FiLM weight gradients and both new attention
+   in_proj_weight gradients finite/nonzero; invalid output tails zero.
+   Adapter parameters341504; total denoiser parameters1688385.
+   EMA state tensors exactly equal after initial copying.
+   Warm-model EMA output max abs diff3.5762786865234375e-7,
+   within rtol1e-5/atol1e-6; native numerical execution can differ with EMA's
+   requires_grad flags. This is checked numerically, not claimed bitwise equal.
+   Synthetic losses are not validation losses and are not expected monotonic.
+
+4. ZIP/source checks: all packaged Python compiled; payload/prerequisite SHA256
+   verified; all archive entries under D4_26_hybrid_unet/; no trained model,
+   optimizer artifacts, local dependencies or synthetic spectra shipped.
+
+Remaining server checks:
+- Apply and full tests in existing sers_ddpm environment.
+- CUDA synthetic check and true126-condition/1512-spectrum pipeline check.
+- New25epoch cross candidate; strict best EMA load; latest step4725.
+- Fixed-independent-sampler paired pilot: baseline/cross, three conditions,
+  200 each, same physicalGPU1, T200/actualS100; before/after processing evaluation.
+- No measured spectral improvement is claimed by this patch delivery.

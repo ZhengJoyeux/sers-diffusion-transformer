@@ -1,0 +1,1634 @@
+diff --git a/config/ddpm_training_d4_3_formal.yaml b/config/ddpm_training_d4_3_formal.yaml
+index b8de1bd..6d8b44b 100644
+--- a/config/ddpm_training_d4_3_formal.yaml
++++ b/config/ddpm_training_d4_3_formal.yaml
+@@ -1,7 +1,8 @@
+ project:
+-  # D4.3.2在D4.3.1基础上增加一个统一的SERS保真模块：
+-  # 高噪声时间步加权 + 一阶导数保真 + 条件内强度包络。
+-  name: d4_3_2_fidelity_tail_control_formal
++  # D4.3.2.2-T200-S100同时优化高噪声恢复、条件均值、谱形、
++  # 强度包络和多样性，并修正验证实验发现的QQ尾部过压缩。
++  # 扩散训练链由100增加到200；DDIM生成由50增加到100步。
++  name: d4_3_2_2_t200_s100_quality_formal
+   random_seed: 2026
+ diagnostic_overfit:
+   enabled: false
+@@ -153,8 +154,8 @@ peak_parameter_constraints:
+ diversity_constraints:
+   enabled: true
+   strategy: low_noise_pairwise_residual_geometry
+-  total_weight: 0.02
+-  maximum_total_ratio_to_ddpm: 0.02
++  total_weight: 0.04
++  maximum_total_ratio_to_ddpm: 0.04
+   epsilon: 1.0e-08
+   condition_grouping:
+     samples_per_condition: 4
+@@ -171,7 +172,7 @@ diversity_constraints:
+     enabled: true
+     metric: whitened_l2
+     penalty_mode: floor_only
+-    minimum_distance_ratio: 0.8
++    minimum_distance_ratio: 0.95
+     maximum_distance_ratio: 1.25
+     transition_fraction: 0.2
+     weight: 1.0
+@@ -184,7 +185,7 @@ diversity_constraints:
+     enabled: true
+     penalty_mode: floor_only
+     active_std_quantile: 20.0
+-    minimum_std_ratio: 0.8
++    minimum_std_ratio: 0.90
+     maximum_std_ratio: 1.25
+     reference_std_floor_fraction: 0.25
+     weight: 0.5
+@@ -194,19 +195,39 @@ diversity_constraints:
+   # diversity_constraints中，因此不需要修改model_builder公共接口。
+   quality_fidelity:
+     enabled: true
+-    total_weight: 0.05
+-    maximum_total_ratio_to_ddpm: 0.05
++    total_weight: 0.06
++    maximum_total_ratio_to_ddpm: 0.06
++    # 75%时间步以上属于真正困难的高噪声区。25%的条件组从该区
++    # 分层抽样，其余仍全区间均匀抽样，避免T=200后高噪声覆盖变稀。
++    high_noise_sampling:
++      enabled: true
++      sampling_probability: 0.25
++      minimum_timestep_fraction: 0.75
+     # pred_x0在高噪声端更难恢复；保持t均匀采样，只把高t样本的
+     # 主DDPM损失平滑提高到最多2倍，避免低噪声端被完全忽略。
+     high_noise_weighting:
+       enabled: true
+-      maximum_weight: 2.0
+-      power: 2.0
++      maximum_weight: 2.25
++      power: 1.5
+     # 直接约束相邻Raman点的一阶差分，改善峰形和导数Pearson。
+     first_derivative:
+       enabled: true
+       smooth_l1_beta: 0.05
+-      weight: 0.50
++      weight: 0.40
++    # 对5/15/31点窗口的局部平均同时保真，减少尖峰旁的振铃、
++    # 连续负谷和肉眼可见的宽度/基线形变。
++    multiscale_shape:
++      enabled: true
++      kernel_sizes: [5, 15, 31]
++      smooth_l1_beta: 0.05
++      weight: 0.40
++    # 同条件4条样本的预测均值对齐真实目标均值，针对总体MSE、
++    # Wasserstein和幅值偏差；不直接压缩样本间差异。
++    condition_mean:
++      enabled: true
++      smooth_l1_beta: 0.05
++      minimum_group_size: 4
++      weight: 0.75
+     # 每个同条件小组只惩罚超出真实目标残差包络的预测值；
+     # 不把预测主动拉向均值，避免与floor-only多样性目标冲突。
+     condition_pointwise_envelope:
+@@ -223,22 +244,22 @@ local_peak_distribution_constraints:
+   enabled: false
+ model:
+   channels: 1
+-  model_dimension: 16
++  model_dimension: 32
+   dimension_multipliers:
+   - 1
+   - 2
+   - 4
+-  dropout: 0.0
++  dropout: 0.05
+   self_condition: false
+-  diffusion_timesteps: 100
+-  sampling_timesteps: 50
++  diffusion_timesteps: 200
++  sampling_timesteps: 100
+   objective: pred_x0
+   beta_schedule: cosine
+   ddim_sampling_eta: 0.0
+   auto_normalize: false
+ diffusion:
+-  diffusion_steps: 100
+-  sampling_steps: 50
++  diffusion_steps: 200
++  sampling_steps: 100
+   objective: pred_x0
+   beta_schedule: cosine
+   ddim_sampling_eta: 0.0
+@@ -249,7 +270,7 @@ diffusion:
+ training:
+   device: cuda
+   batch_size: 8
+-  number_of_epochs: 120
++  number_of_epochs: 160
+   learning_rate: 0.0001
+   weight_decay: 0.0
+   number_of_workers: 0
+@@ -266,11 +287,11 @@ training:
+   maximum_validation_batches: 0
+   validation_random_seed: 2026001
+ output:
+-  output_directory: outputs/experiments/d4_3_2_fidelity_tail_control_formal
+-  checkpoint_directory: outputs/experiments/d4_3_2_fidelity_tail_control_formal/checkpoints
+-  log_directory: outputs/experiments/d4_3_2_fidelity_tail_control_formal/logs
+-  generated_spectrum_directory: outputs/experiments/d4_3_2_fidelity_tail_control_formal/generated
+-  preview_plot_directory: outputs/experiments/d4_3_2_fidelity_tail_control_formal/plots
++  output_directory: outputs/experiments/d4_3_2_2_t200_s100_quality_formal
++  checkpoint_directory: outputs/experiments/d4_3_2_2_t200_s100_quality_formal/checkpoints
++  log_directory: outputs/experiments/d4_3_2_2_t200_s100_quality_formal/logs
++  generated_spectrum_directory: outputs/experiments/d4_3_2_2_t200_s100_quality_formal/generated
++  preview_plot_directory: outputs/experiments/d4_3_2_2_t200_s100_quality_formal/plots
+   latest_checkpoint_name: latest.pt
+   best_checkpoint_name: best.pt
+   training_log_name: training_log.csv
+@@ -294,9 +315,9 @@ generation:
+     maximum_correction_iqr_fraction: 0.25
+     minimum_maximum_correction_intensity: 1.0
+     maximum_modified_raman_fraction: 1.00
+-  # 先用12条training构造real-vs-real oracle范围；只有生成QQ尾宽
+-  # 超出真实小样本自身的97.5%波动上界时，才压缩最外侧5%尾部。
+-  # 中间90%不变，避免整体压缩已经偏低的生成多样性。
++  # 先用12条training构造real-vs-real oracle范围。只有生成QQ尾宽既
++  # 超过oracle上界、又达到明显过冲阈值1.50时，才压缩最外侧5%。
++  # 这样只处理1.5--1.8倍的异常尾部，不再把正常尾宽整体压到约0.86。
+   tail_calibration:
+     enabled: true
+     lower_probability: 0.01
+@@ -307,16 +328,20 @@ generation:
+     oracle_bootstrap_repeats: 256
+     oracle_confidence: 0.975
+     minimum_allowed_tail_ratio: 1.15
++    minimum_trigger_tail_ratio: 1.50
+     minimum_compression_factor: 0.25
+     maximum_modified_fraction: 0.10
+     random_seed: 2026
+   # 反归一化后、导出前，按同条件逐Raman点训练分布处理极端深谷
+-  # 和过强峰。只做双侧软回拉，不硬裁剪，不使用validation/test。
++  # 和过强峰。training决定允许边界，生成批次只判断是否属于同位置
++  # 最外侧2.5%离群点；不再允许生成异常尾部反过来放宽自己的边界。
+   intensity_envelope_guard:
+     enabled: true
+     training_lower_quantile: 0.05
+     training_upper_quantile: 0.95
+     training_iqr_margin: 0.50
++    training_extrema_margin_iqr_fraction: 0.10
++    minimum_extrema_margin_intensity: 2.0
+     generated_lower_quantile: 0.025
+     generated_upper_quantile: 0.975
+     minimum_generated_count: 20
+diff --git a/scripts/diagnose_timestep_recovery.py b/scripts/diagnose_timestep_recovery.py
+index 2822827..170c1e3 100644
+--- a/scripts/diagnose_timestep_recovery.py
++++ b/scripts/diagnose_timestep_recovery.py
+@@ -149,7 +149,7 @@ def build_diagnostic_timesteps(
+     if total_timesteps <= 0:
+         raise ValueError("扩散总步数必须大于0。")
+ 
+-    # 当总步数为100时得到：0、10、25、50、75、90、99。
++    # T=200时得到：0、20、50、100、150、180、199；其他T同比例检查。
+     fractions = (
+         0.0,
+         0.10,
+@@ -348,8 +348,8 @@ def main() -> None:
+     parser.add_argument(
+         "--model-source",
+         choices=("raw", "ema"),
+-        default="raw",
+-        help="使用原始模型权重或EMA权重。",
++        default="ema",
++        help="使用原始模型权重或EMA权重；默认与正式生成一致使用EMA。",
+     )
+ 
+     parser.add_argument(
+diff --git a/scripts/evaluate_d4_2_generation.py b/scripts/evaluate_d4_2_generation.py
+index 38fefc3..b4cd106 100644
+--- a/scripts/evaluate_d4_2_generation.py
++++ b/scripts/evaluate_d4_2_generation.py
+@@ -204,6 +204,86 @@ def _metric_summary_fields(frame: pd.DataFrame) -> dict[str, float]:
+     return result
+ 
+ 
++def _comparison_summary_fields(
++    frame: pd.DataFrame,
++    prefix: str,
++) -> dict[str, float]:
++    """Keep real-real and generated-real context beside the headline metric."""
++
++    return {
++        f"{prefix}_mse_mean": float(
++            np.mean(np.square(frame["raw_rmse"].to_numpy(dtype=np.float64)))
++        ),
++        f"{prefix}_cosine_mean": float(
++            frame["cosine"].to_numpy(dtype=np.float64).mean()
++        ),
++        f"{prefix}_pearson_mean": float(
++            frame["pearson"].to_numpy(dtype=np.float64).mean()
++        ),
++    }
++
++
++def _training_supported_intensity_metrics(
++    *,
++    training: np.ndarray,
++    generated: np.ndarray,
++    configuration: dict,
++) -> dict[str, float]:
++    """Measure remaining pointwise extremes using training-only support."""
++
++    lower_quantile = float(configuration.get("training_lower_quantile", 0.05))
++    upper_quantile = float(configuration.get("training_upper_quantile", 0.95))
++    iqr_margin = float(configuration.get("training_iqr_margin", 0.50))
++    extrema_margin_fraction = float(
++        configuration.get("training_extrema_margin_iqr_fraction", 0.10)
++    )
++    minimum_extrema_margin = float(
++        configuration.get("minimum_extrema_margin_intensity", 2.0)
++    )
++    minimum_deficit = float(configuration.get("minimum_deficit_intensity", 5.0))
++    minimum_excess = float(configuration.get("minimum_excess_intensity", 5.0))
++    activation_maximum = float(
++        configuration.get("activation_maximum_intensity", -18.0)
++    )
++
++    q_low = np.quantile(training, lower_quantile, axis=0)
++    q_high = np.quantile(training, upper_quantile, axis=0)
++    q25 = np.quantile(training, 0.25, axis=0)
++    q75 = np.quantile(training, 0.75, axis=0)
++    iqr = np.maximum(q75 - q25, 0.0)
++    extrema_margin = np.maximum(
++        extrema_margin_fraction * iqr,
++        minimum_extrema_margin,
++    )
++    floor = np.minimum(
++        q_low - iqr_margin * iqr,
++        np.min(training, axis=0) - extrema_margin,
++    )
++    ceiling = np.maximum(
++        q_high + iqr_margin * iqr,
++        np.max(training, axis=0) + extrema_margin,
++    )
++    floor = np.minimum(floor, activation_maximum)
++    lower = np.logical_and(
++        generated < activation_maximum,
++        generated < floor[np.newaxis, :] - minimum_deficit,
++    )
++    upper = generated > ceiling[np.newaxis, :] + minimum_excess
++    return {
++        "training_minimum_intensity": float(np.min(training)),
++        "training_maximum_intensity": float(np.max(training)),
++        "generated_maximum_intensity": float(np.max(generated)),
++        "generated_below_training_envelope_point_fraction": float(np.mean(lower)),
++        "generated_below_training_envelope_spectrum_fraction": float(
++            np.mean(np.any(lower, axis=1))
++        ),
++        "generated_above_training_envelope_point_fraction": float(np.mean(upper)),
++        "generated_above_training_envelope_spectrum_fraction": float(
++            np.mean(np.any(upper, axis=1))
++        ),
++    }
++
++
+ def _diversity_fields(
+     *,
+     training: np.ndarray,
+@@ -331,8 +411,14 @@ def _qq_table(
+     alpha = 1.0 - confidence
+     raw_difference_array = np.stack(raw_differences, axis=0)
+     z_difference_array = np.stack(standardized_differences, axis=0)
+-    lower_tail_oracle = float(np.quantile(lower_tail_ratios, confidence))
+-    upper_tail_oracle = float(np.quantile(upper_tail_ratios, confidence))
++    lower_tail_oracle_lower = float(
++        np.quantile(lower_tail_ratios, 1.0 - confidence)
++    )
++    lower_tail_oracle_upper = float(np.quantile(lower_tail_ratios, confidence))
++    upper_tail_oracle_lower = float(
++        np.quantile(upper_tail_ratios, 1.0 - confidence)
++    )
++    upper_tail_oracle_upper = float(np.quantile(upper_tail_ratios, confidence))
+     table = pd.DataFrame(
+         {
+             "condition": condition,
+@@ -378,18 +464,32 @@ def _qq_table(
+             (generated_z_q[central_high] - generated_z_q[central_low])
+             / reference_central_span
+         ),
+-        "qq_lower_tail_oracle_upper": lower_tail_oracle,
+-        "qq_upper_tail_oracle_upper": upper_tail_oracle,
++        "qq_lower_tail_oracle_lower": lower_tail_oracle_lower,
++        "qq_lower_tail_oracle_upper": lower_tail_oracle_upper,
++        "qq_upper_tail_oracle_lower": upper_tail_oracle_lower,
++        "qq_upper_tail_oracle_upper": upper_tail_oracle_upper,
+     }
+     metrics["qq_lower_tail_overrun"] = bool(
+-        metrics["qq_lower_tail_span_ratio"] > lower_tail_oracle
++        metrics["qq_lower_tail_span_ratio"] > lower_tail_oracle_upper
+     )
+     metrics["qq_upper_tail_overrun"] = bool(
+-        metrics["qq_upper_tail_span_ratio"] > upper_tail_oracle
++        metrics["qq_upper_tail_span_ratio"] > upper_tail_oracle_upper
++    )
++    metrics["qq_lower_tail_underrun"] = bool(
++        metrics["qq_lower_tail_span_ratio"] < lower_tail_oracle_lower
++    )
++    metrics["qq_upper_tail_underrun"] = bool(
++        metrics["qq_upper_tail_span_ratio"] < upper_tail_oracle_lower
+     )
+     metrics["qq_any_tail_overrun"] = bool(
+         metrics["qq_lower_tail_overrun"] or metrics["qq_upper_tail_overrun"]
+     )
++    metrics["qq_any_tail_underrun"] = bool(
++        metrics["qq_lower_tail_underrun"] or metrics["qq_upper_tail_underrun"]
++    )
++    metrics["qq_any_tail_mismatch"] = bool(
++        metrics["qq_any_tail_overrun"] or metrics["qq_any_tail_underrun"]
++    )
+     return table, metrics
+ 
+ 
+@@ -446,6 +546,182 @@ def _plot_qq(table: pd.DataFrame, condition: str, output: Path) -> None:
+     plt.close(figure)
+ 
+ 
++def _plot_spectral_distribution(
++    *,
++    axis: np.ndarray,
++    training: np.ndarray,
++    reference: np.ndarray,
++    generated: np.ndarray,
++    condition: str,
++    output: Path,
++) -> None:
++    """Plot robust bands so isolated extremes cannot hide the bulk fit."""
++
++    quantiles = np.quantile(
++        generated,
++        [0.05, 0.25, 0.50, 0.75, 0.95],
++        axis=0,
++    )
++    q05, q25, generated_median, q75, q95 = quantiles
++    training_median = np.median(training, axis=0)
++    reference_median = np.median(reference, axis=0)
++    figure, axes = plt.subplots(
++        2,
++        1,
++        figsize=(12.0, 7.0),
++        sharex=True,
++        gridspec_kw={"height_ratios": [3.0, 1.25]},
++    )
++    upper, lower = axes
++    for index, spectrum in enumerate(training):
++        upper.plot(
++            axis,
++            spectrum,
++            color="#777777",
++            linewidth=0.55,
++            alpha=0.22,
++            label="12 training spectra" if index == 0 else None,
++        )
++    for index, spectrum in enumerate(reference):
++        upper.plot(
++            axis,
++            spectrum,
++            color="#C62828",
++            linewidth=0.85,
++            alpha=0.55,
++            label="4 held-out spectra" if index == 0 else None,
++        )
++    upper.fill_between(
++        axis,
++        q05,
++        q95,
++        color="#90CAF9",
++        alpha=0.28,
++        label="generated 5--95%",
++    )
++    upper.fill_between(
++        axis,
++        q25,
++        q75,
++        color="#42A5F5",
++        alpha=0.30,
++        label="generated 25--75%",
++    )
++    upper.plot(
++        axis,
++        generated_median,
++        color="#0D47A1",
++        linewidth=1.25,
++        label="generated median",
++    )
++    upper.set_ylabel("Intensity")
++    upper.set_title(f"{condition}: real spectra and generated distribution")
++    upper.grid(alpha=0.18)
++    upper.legend(fontsize=8, ncol=3, loc="best")
++
++    lower.axhline(0.0, color="#777777", linestyle="--", linewidth=0.8)
++    lower.plot(
++        axis,
++        generated_median - reference_median,
++        color="#1565C0",
++        linewidth=1.0,
++        label="generated median - held-out median",
++    )
++    lower.plot(
++        axis,
++        training_median - reference_median,
++        color="#616161",
++        linewidth=0.85,
++        alpha=0.8,
++        label="training median - held-out median",
++    )
++    lower.set_xlabel("Raman shift (cm$^{-1}$)")
++    lower.set_ylabel("Median residual")
++    lower.grid(alpha=0.18)
++    lower.legend(fontsize=8, loc="best")
++    figure.tight_layout()
++    output.parent.mkdir(parents=True, exist_ok=True)
++    figure.savefig(output, dpi=220, bbox_inches="tight")
++    plt.close(figure)
++
++
++def _plot_quality_overview(frame: pd.DataFrame, output: Path) -> None:
++    """Create an all-condition dashboard of the main quality tradeoffs."""
++
++    figure, axes = plt.subplots(2, 2, figsize=(12.0, 9.0))
++    sorted_mse = np.sort(
++        frame["nearest_reference_mse_mean"].to_numpy(dtype=np.float64)
++    )
++    axes[0, 0].plot(
++        np.arange(1, sorted_mse.size + 1),
++        sorted_mse,
++        color="#1565C0",
++    )
++    axes[0, 0].set_yscale("log")
++    axes[0, 0].set_xlabel("Condition rank")
++    axes[0, 0].set_ylabel("Nearest-reference MSE (log)")
++    axes[0, 0].set_title("Fidelity across all conditions")
++
++    mismatch = frame["qq_any_tail_mismatch"].astype(bool).to_numpy()
++    colors = np.where(mismatch, "#D32F2F", "#2E7D32")
++    axes[0, 1].scatter(
++        frame["diversity_pairwise_mse_ratio"],
++        frame["nearest_reference_mse_mean"],
++        c=colors,
++        s=22,
++        alpha=0.78,
++    )
++    axes[0, 1].axvline(1.0, color="#777777", linestyle="--", linewidth=0.9)
++    axes[0, 1].set_yscale("log")
++    axes[0, 1].set_xlabel("Generated / training pairwise-MSE diversity")
++    axes[0, 1].set_ylabel("Nearest-reference MSE (log)")
++    axes[0, 1].set_title("Fidelity-diversity tradeoff (red: QQ mismatch)")
++
++    axes[1, 0].scatter(
++        frame["qq_lower_tail_span_ratio"],
++        frame["qq_upper_tail_span_ratio"],
++        c=colors,
++        s=22,
++        alpha=0.78,
++    )
++    axes[1, 0].axvline(1.0, color="#777777", linestyle="--", linewidth=0.9)
++    axes[1, 0].axhline(1.0, color="#777777", linestyle="--", linewidth=0.9)
++    axes[1, 0].set_xlabel("Lower-tail span ratio")
++    axes[1, 0].set_ylabel("Upper-tail span ratio")
++    axes[1, 0].set_title("Two-sided QQ tail balance")
++
++    lower_violation = np.maximum(
++        frame["generated_below_training_envelope_point_fraction"].to_numpy(
++            dtype=np.float64
++        ),
++        EPSILON,
++    )
++    upper_violation = np.maximum(
++        frame["generated_above_training_envelope_point_fraction"].to_numpy(
++            dtype=np.float64
++        ),
++        EPSILON,
++    )
++    axes[1, 1].scatter(
++        lower_violation,
++        upper_violation,
++        c=colors,
++        s=22,
++        alpha=0.78,
++    )
++    axes[1, 1].set_xscale("log")
++    axes[1, 1].set_yscale("log")
++    axes[1, 1].set_xlabel("Below training envelope fraction")
++    axes[1, 1].set_ylabel("Above training envelope fraction")
++    axes[1, 1].set_title("Unsupported intensity tails")
++    for panel in axes.flat:
++        panel.grid(alpha=0.18)
++    figure.tight_layout()
++    output.parent.mkdir(parents=True, exist_ok=True)
++    figure.savefig(output, dpi=220, bbox_inches="tight")
++    plt.close(figure)
++
++
+ def _overall_summary(frame: pd.DataFrame) -> pd.DataFrame:
+     rows: list[dict[str, Any]] = []
+     excluded = {"generated_count", "training_count", "reference_count", "point_count"}
+@@ -527,6 +803,18 @@ def _qq_stratified_summary(frame: pd.DataFrame) -> pd.DataFrame:
+                     "any_tail_overrun_fraction": float(
+                         group["qq_any_tail_overrun"].astype(float).mean()
+                     ),
++                    "lower_tail_underrun_fraction": float(
++                        group["qq_lower_tail_underrun"].astype(float).mean()
++                    ),
++                    "upper_tail_underrun_fraction": float(
++                        group["qq_upper_tail_underrun"].astype(float).mean()
++                    ),
++                    "any_tail_underrun_fraction": float(
++                        group["qq_any_tail_underrun"].astype(float).mean()
++                    ),
++                    "any_tail_mismatch_fraction": float(
++                        group["qq_any_tail_mismatch"].astype(float).mean()
++                    ),
+                 }
+             )
+     return pd.DataFrame(rows)
+@@ -535,6 +823,12 @@ def _qq_stratified_summary(frame: pd.DataFrame) -> pd.DataFrame:
+ def main() -> None:
+     arguments = parse_arguments()
+     configuration = load_configuration(arguments.config)
++    envelope_configuration = (
++        (configuration.get("generation", {}) or {}).get(
++            "intensity_envelope_guard", {}
++        )
++        or {}
++    )
+     checkpoint_path = _resolve_path(configuration, arguments.checkpoint)
+     checkpoint = load_checkpoint_file(checkpoint_path, map_location="cpu")
+     metadata = checkpoint.get("metadata")
+@@ -631,6 +925,36 @@ def main() -> None:
+         training = _interpolate_collection(collection, training_indices, axis)
+         reference = _interpolate_collection(collection, reference_indices, axis)
+ 
++        heldout_to_training = nearest_reference_metrics(
++            query_spectra=reference,
++            reference_spectra=training,
++            query_names=[
++                f"{arguments.reference_split}_{index + 1:02d}"
++                for index in range(reference.shape[0])
++            ],
++            reference_names=[
++                f"training_{index + 1:02d}"
++                for index in range(training.shape[0])
++            ],
++        )
++        generated_to_training = nearest_reference_metrics(
++            query_spectra=generated,
++            reference_spectra=training,
++            query_names=generated_names,
++            reference_names=[
++                f"training_{index + 1:02d}"
++                for index in range(training.shape[0])
++            ],
++        )
++        heldout_context = _comparison_summary_fields(
++            heldout_to_training,
++            "heldout_to_training",
++        )
++        generated_training_context = _comparison_summary_fields(
++            generated_to_training,
++            "generated_to_training",
++        )
++
+         nearest = nearest_reference_metrics(
+             query_spectra=generated,
+             reference_spectra=reference,
+@@ -669,6 +993,25 @@ def main() -> None:
+             source_name,
+             output_root / "qq_plots" / f"{source_name}_qq.png",
+         )
++        _plot_spectral_distribution(
++            axis=axis,
++            training=training,
++            reference=reference,
++            generated=generated,
++            condition=source_name,
++            output=(
++                output_root
++                / "spectral_distribution_plots"
++                / f"{source_name}_distribution.png"
++            ),
++        )
++
++        generated_to_training_mse = float(
++            generated_training_context["generated_to_training_mse_mean"]
++        )
++        heldout_to_training_mse = float(
++            heldout_context["heldout_to_training_mse_mean"]
++        )
+ 
+         row: dict[str, Any] = {
+             "condition": source_name,
+@@ -682,12 +1025,23 @@ def main() -> None:
+             "raman_end_cm1": float(axis[-1]),
+             "point_count": int(axis.size),
+             **_metric_summary_fields(nearest),
++            **heldout_context,
++            **generated_training_context,
++            "generated_to_training_mse_ratio_vs_heldout": (
++                generated_to_training_mse
++                / max(heldout_to_training_mse, EPSILON)
++            ),
+             **_center_metrics(reference, generated),
+             **_pointwise_wasserstein(
+                 training=training,
+                 reference=reference,
+                 generated=generated,
+             ),
++            **_training_supported_intensity_metrics(
++                training=training,
++                generated=generated,
++                configuration=envelope_configuration,
++            ),
+             **diversity,
+             **qq_metrics,
+             "generated_minimum_intensity": float(np.min(generated)),
+@@ -714,6 +1068,14 @@ def main() -> None:
+             f"cos={row['mean_spectrum_cosine']:.6f}；"
+             f"r={row['mean_spectrum_pearson']:.6f}"
+         )
++        print(
++            "  train分布参照：generated/train MSE="
++            f"{row['generated_to_training_mse_mean']:.6g}；"
++            "held-out/train MSE="
++            f"{row['heldout_to_training_mse_mean']:.6g}；"
++            "ratio="
++            f"{row['generated_to_training_mse_ratio_vs_heldout']:.4f}"
++        )
+         print(
+             "  多样性MSE："
+             f"train={row['training_pairwise_mse_median']:.6g}；"
+@@ -729,12 +1091,23 @@ def main() -> None:
+             f"<-40光谱={row['generated_below_minus_40_spectrum_fraction']:.3%}"
+         )
+         print(
+-            "  QQ尾宽/oracle上界：lower="
++            "  training逐点包络外：lower点/光谱="
++            f"{row['generated_below_training_envelope_point_fraction']:.6%}/"
++            f"{row['generated_below_training_envelope_spectrum_fraction']:.3%}；"
++            "upper点/光谱="
++            f"{row['generated_above_training_envelope_point_fraction']:.6%}/"
++            f"{row['generated_above_training_envelope_spectrum_fraction']:.3%}"
++        )
++        print(
++            "  QQ尾宽/oracle区间：lower="
+             f"{row['qq_lower_tail_span_ratio']:.4f}/"
+-            f"{row['qq_lower_tail_oracle_upper']:.4f}；upper="
++            f"[{row['qq_lower_tail_oracle_lower']:.4f},"
++            f"{row['qq_lower_tail_oracle_upper']:.4f}]；upper="
+             f"{row['qq_upper_tail_span_ratio']:.4f}/"
+-            f"{row['qq_upper_tail_oracle_upper']:.4f}；"
+-            f"overrun={bool(row['qq_any_tail_overrun'])}"
++            f"[{row['qq_upper_tail_oracle_lower']:.4f},"
++            f"{row['qq_upper_tail_oracle_upper']:.4f}]；"
++            f"overrun={bool(row['qq_any_tail_overrun'])}；"
++            f"underrun={bool(row['qq_any_tail_underrun'])}"
+         )
+ 
+     condition_summary = pd.DataFrame(summary_rows)
+@@ -742,6 +1115,8 @@ def main() -> None:
+     qq_details = pd.concat(qq_frames, ignore_index=True)
+     overall = _overall_summary(condition_summary)
+     qq_stratified = _qq_stratified_summary(condition_summary)
++    overview_path = output_root / "quality_overview.png"
++    _plot_quality_overview(condition_summary, overview_path)
+     overall_mean = {
+         str(record["metric"]): float(record["mean"])
+         for record in overall.to_dict(orient="records")
+@@ -749,6 +1124,33 @@ def main() -> None:
+     qq_any_tail_overrun_fraction = float(
+         condition_summary["qq_any_tail_overrun"].astype(float).mean()
+     )
++    qq_any_tail_underrun_fraction = float(
++        condition_summary["qq_any_tail_underrun"].astype(float).mean()
++    )
++    qq_any_tail_mismatch_fraction = float(
++        condition_summary["qq_any_tail_mismatch"].astype(float).mean()
++    )
++    point_weights = (
++        condition_summary["generated_count"].to_numpy(dtype=np.float64)
++        * condition_summary["point_count"].to_numpy(dtype=np.float64)
++    )
++    spectrum_weights = condition_summary["generated_count"].to_numpy(
++        dtype=np.float64
++    )
++    generated_global_minimum = float(
++        condition_summary["generated_minimum_intensity"].min()
++    )
++    generated_global_maximum = float(
++        condition_summary["generated_maximum_intensity"].max()
++    )
++
++    def weighted_fraction(column: str, weights: np.ndarray) -> float:
++        return float(
++            np.average(
++                condition_summary[column].to_numpy(dtype=np.float64),
++                weights=weights,
++            )
++        )
+ 
+     condition_path = output_root / "condition_metrics.csv"
+     overall_path = output_root / "overall_metric_summary.csv"
+@@ -777,6 +1179,10 @@ def main() -> None:
+         f"nearest_reference_mse_mean: {overall_mean['nearest_reference_mse_mean']:.9g}",
+         f"nearest_reference_cosine_mean: {overall_mean['nearest_reference_cosine_mean']:.9g}",
+         f"nearest_reference_pearson_mean: {overall_mean['nearest_reference_pearson_mean']:.9g}",
++        f"heldout_to_training_mse_mean: {overall_mean['heldout_to_training_mse_mean']:.9g}",
++        f"generated_to_training_mse_mean: {overall_mean['generated_to_training_mse_mean']:.9g}",
++        "generated_to_training_mse_ratio_vs_heldout: "
++        f"{overall_mean['generated_to_training_mse_ratio_vs_heldout']:.9g}",
+         f"mean_spectrum_mse: {overall_mean['mean_spectrum_mse']:.9g}",
+         f"wasserstein_raw_pointwise_mean: {overall_mean['wasserstein_raw_pointwise_mean']:.9g}",
+         f"wasserstein_normalized_pointwise_mean: {overall_mean['wasserstein_normalized_pointwise_mean']:.9g}",
+@@ -786,11 +1192,26 @@ def main() -> None:
+         f"qq_upper_tail_span_ratio: {overall_mean['qq_upper_tail_span_ratio']:.9g}",
+         f"qq_central_10_90_span_ratio: {overall_mean['qq_central_10_90_span_ratio']:.9g}",
+         f"qq_any_tail_overrun_fraction: {qq_any_tail_overrun_fraction:.9g}",
+-        f"generated_minimum_intensity: {overall_mean['generated_minimum_intensity']:.9g}",
+-        f"generated_below_minus_40_point_fraction: {overall_mean['generated_below_minus_40_point_fraction']:.9g}",
++        f"qq_any_tail_underrun_fraction: {qq_any_tail_underrun_fraction:.9g}",
++        f"qq_any_tail_mismatch_fraction: {qq_any_tail_mismatch_fraction:.9g}",
++        f"generated_minimum_intensity_global: {generated_global_minimum:.9g}",
++        f"generated_maximum_intensity_global: {generated_global_maximum:.9g}",
++        "generated_minimum_intensity_condition_mean: "
++        f"{overall_mean['generated_minimum_intensity']:.9g}",
++        "generated_below_minus_40_point_fraction_global: "
++        f"{weighted_fraction('generated_below_minus_40_point_fraction', point_weights):.9g}",
++        "generated_below_minus_40_spectrum_fraction_global: "
++        f"{weighted_fraction('generated_below_minus_40_spectrum_fraction', spectrum_weights):.9g}",
++        "generated_below_training_envelope_point_fraction_global: "
++        f"{weighted_fraction('generated_below_training_envelope_point_fraction', point_weights):.9g}",
++        "generated_above_training_envelope_point_fraction_global: "
++        f"{weighted_fraction('generated_above_training_envelope_point_fraction', point_weights):.9g}",
+         f"condition_metrics: {condition_path}",
+         f"overall_summary: {overall_path}",
+         f"qq_directory: {output_root / 'qq_plots'}",
++        "spectral_distribution_directory: "
++        f"{output_root / 'spectral_distribution_plots'}",
++        f"quality_overview: {overview_path}",
+         f"qq_stratified_summary: {qq_stratified_path}",
+     ]
+     report_path = output_root / "evaluation_report.txt"
+@@ -799,6 +1220,8 @@ def main() -> None:
+     print(f"逐条件指标：{condition_path}")
+     print(f"总体统计：{overall_path}")
+     print(f"QQ图：{output_root / 'qq_plots'}")
++    print(f"光谱分布图：{output_root / 'spectral_distribution_plots'}")
++    print(f"全条件总览图：{overview_path}")
+     print(f"QQ分层汇总：{qq_stratified_path}")
+     print(f"报告：{report_path}")
+ 
+diff --git a/scripts/generate_conditional_spectra.py b/scripts/generate_conditional_spectra.py
+index 72dfa2c..b78c61b 100644
+--- a/scripts/generate_conditional_spectra.py
++++ b/scripts/generate_conditional_spectra.py
+@@ -521,6 +521,9 @@ def main() -> None:
+                 "upper ratio="
+                 f"{tail_diagnostics['upper_tail_ratio_before']:.4f} -> "
+                 f"{tail_diagnostics['upper_tail_ratio_after']:.4f}；"
++                "lower/upper触发="
++                f"{tail_diagnostics['lower_tail_calibration_activated']}/"
++                f"{tail_diagnostics['upper_tail_calibration_activated']}；"
+                 "修改点比例="
+                 f"{tail_diagnostics['modified_point_fraction']:.4%}"
+             )
+diff --git a/src/masked_diffusion.py b/src/masked_diffusion.py
+index e1cb91e..235d373 100644
+--- a/src/masked_diffusion.py
++++ b/src/masked_diffusion.py
+@@ -64,12 +64,44 @@ def _normalize_quality_fidelity_configuration(
+             "quality_fidelity.maximum_total_ratio_to_ddpm必须位于(0,0.25]。"
+         )
+ 
++    high_noise_sampling = source.get("high_noise_sampling", {}) or {}
+     high_noise = source.get("high_noise_weighting", {}) or {}
+     derivative = source.get("first_derivative", {}) or {}
++    multiscale = source.get("multiscale_shape", {}) or {}
++    condition_mean = source.get("condition_mean", {}) or {}
+     envelope = source.get("condition_pointwise_envelope", {}) or {}
+-    if not all(isinstance(item, dict) for item in (high_noise, derivative, envelope)):
++    if not all(
++        isinstance(item, dict)
++        for item in (
++            high_noise_sampling,
++            high_noise,
++            derivative,
++            multiscale,
++            condition_mean,
++            envelope,
++        )
++    ):
+         raise ValueError("quality_fidelity的子配置必须是字典。")
+ 
++    normalized["high_noise_sampling"] = {
++        "enabled": bool(high_noise_sampling.get("enabled", False)),
++        "sampling_probability": float(
++            high_noise_sampling.get("sampling_probability", 0.0)
++        ),
++        "minimum_timestep_fraction": float(
++            high_noise_sampling.get("minimum_timestep_fraction", 0.75)
++        ),
++    }
++    high_sampling = normalized["high_noise_sampling"]
++    if high_sampling["enabled"] and not (
++        0.0 < high_sampling["sampling_probability"] <= 0.75
++        and 0.50 <= high_sampling["minimum_timestep_fraction"] < 1.0
++    ):
++        raise ValueError(
++            "high_noise_sampling要求sampling_probability位于(0,0.75]且"
++            "minimum_timestep_fraction位于[0.5,1)。"
++        )
++
+     normalized["high_noise_weighting"] = {
+         "enabled": bool(high_noise.get("enabled", False)),
+         "maximum_weight": float(high_noise.get("maximum_weight", 1.0)),
+@@ -92,6 +124,43 @@ def _normalize_quality_fidelity_configuration(
+     ):
+         raise ValueError("first_derivative要求smooth_l1_beta和weight均大于0。")
+ 
++    kernel_sizes = [int(value) for value in multiscale.get("kernel_sizes", [])]
++    normalized["multiscale_shape"] = {
++        "enabled": bool(multiscale.get("enabled", False)),
++        "kernel_sizes": kernel_sizes,
++        "smooth_l1_beta": float(multiscale.get("smooth_l1_beta", 0.05)),
++        "weight": float(multiscale.get("weight", 1.0)),
++    }
++    multi = normalized["multiscale_shape"]
++    if multi["enabled"] and (
++        not kernel_sizes
++        or any(value < 3 or value % 2 == 0 or value > 127 for value in kernel_sizes)
++        or len(set(kernel_sizes)) != len(kernel_sizes)
++        or multi["smooth_l1_beta"] <= 0.0
++        or multi["weight"] <= 0.0
++    ):
++        raise ValueError(
++            "multiscale_shape要求互不重复的奇数kernel_sizes位于[3,127]，"
++            "且smooth_l1_beta和weight均大于0。"
++        )
++
++    normalized["condition_mean"] = {
++        "enabled": bool(condition_mean.get("enabled", False)),
++        "smooth_l1_beta": float(condition_mean.get("smooth_l1_beta", 0.05)),
++        "minimum_group_size": int(condition_mean.get("minimum_group_size", 4)),
++        "weight": float(condition_mean.get("weight", 1.0)),
++    }
++    mean = normalized["condition_mean"]
++    if mean["enabled"] and (
++        mean["smooth_l1_beta"] <= 0.0
++        or mean["minimum_group_size"] < 2
++        or mean["weight"] <= 0.0
++    ):
++        raise ValueError(
++            "condition_mean要求smooth_l1_beta和weight大于0且"
++            "minimum_group_size至少为2。"
++        )
++
+     normalized["condition_pointwise_envelope"] = {
+         "enabled": bool(envelope.get("enabled", False)),
+         "lower_quantile": float(envelope.get("lower_quantile", 0.05)),
+@@ -112,7 +181,14 @@ def _normalize_quality_fidelity_configuration(
+         and bounds["weight"] > 0.0
+     ):
+         raise ValueError("condition_pointwise_envelope配置无效。")
+-    if not first["enabled"] and not bounds["enabled"]:
++    if not any(
++        (
++            first["enabled"],
++            multi["enabled"],
++            mean["enabled"],
++            bounds["enabled"],
++        )
++    ):
+         raise ValueError("quality_fidelity至少需要启用一个保真损失。")
+     return normalized
+ 
+@@ -188,6 +264,45 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+         power = float(configuration["power"])
+         return 1.0 + (maximum - 1.0) * fraction.pow(power)
+ 
++    def _sample_training_timesteps(
++        self,
++        count: int,
++        device: torch.device,
++    ) -> torch.Tensor:
++        """Sample all noise levels while reserving coverage for the hard tail."""
++
++        number = int(count)
++        if number <= 0:
++            raise ValueError("训练时间步抽样数量必须大于0。")
++        uniform = torch.randint(
++            0,
++            self.num_timesteps,
++            (number,),
++            device=device,
++        ).long()
++        configuration = self.quality_fidelity_configuration.get(
++            "high_noise_sampling", {}
++        )
++        if not self.quality_fidelity_enabled or not bool(
++            configuration.get("enabled", False)
++        ):
++            return uniform
++
++        probability = float(configuration["sampling_probability"])
++        minimum_fraction = float(configuration["minimum_timestep_fraction"])
++        high_start = min(
++            max(int(round(minimum_fraction * (self.num_timesteps - 1))), 0),
++            self.num_timesteps - 1,
++        )
++        high = torch.randint(
++            high_start,
++            self.num_timesteps,
++            (number,),
++            device=device,
++        ).long()
++        choose_high = torch.rand(number, device=device) < probability
++        return torch.where(choose_high, high, uniform)
++
+     @staticmethod
+     def _masked_mean(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+         count = mask.sum().clamp_min(1.0)
+@@ -203,6 +318,8 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+     ) -> dict[str, torch.Tensor]:
+         zero = prediction.sum() * 0.0
+         derivative_loss = zero
++        multiscale_loss = zero
++        condition_mean_loss = zero
+         envelope_loss = zero
+         active_groups = zero
+ 
+@@ -221,64 +338,145 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             )
+             derivative_loss = self._masked_mean(pointwise, derivative_mask)
+ 
++        multiscale = self.quality_fidelity_configuration.get(
++            "multiscale_shape", {}
++        )
++        if bool(multiscale.get("enabled", False)):
++            scale_losses: list[torch.Tensor] = []
++            for kernel_size in multiscale["kernel_sizes"]:
++                padding = int(kernel_size) // 2
++                pooled_mask = F.avg_pool1d(
++                    valid_mask,
++                    kernel_size=int(kernel_size),
++                    stride=1,
++                    padding=padding,
++                    count_include_pad=True,
++                )
++                predicted_pool = F.avg_pool1d(
++                    prediction * valid_mask,
++                    kernel_size=int(kernel_size),
++                    stride=1,
++                    padding=padding,
++                    count_include_pad=True,
++                ) / pooled_mask.clamp_min(1.0e-12)
++                target_pool = F.avg_pool1d(
++                    target * valid_mask,
++                    kernel_size=int(kernel_size),
++                    stride=1,
++                    padding=padding,
++                    count_include_pad=True,
++                ) / pooled_mask.clamp_min(1.0e-12)
++                pointwise = F.smooth_l1_loss(
++                    predicted_pool,
++                    target_pool,
++                    reduction="none",
++                    beta=float(multiscale["smooth_l1_beta"]),
++                )
++                pooled_valid = (pooled_mask > 1.0e-12).to(pointwise.dtype)
++                scale_losses.append(self._masked_mean(pointwise, pooled_valid))
++            if scale_losses:
++                multiscale_loss = torch.stack(scale_losses).mean()
++
++        condition_mean = self.quality_fidelity_configuration.get(
++            "condition_mean", {}
++        )
+         envelope = self.quality_fidelity_configuration.get(
+             "condition_pointwise_envelope", {}
+         )
+-        if bool(envelope.get("enabled", False)):
++        needs_condition_groups = bool(condition_mean.get("enabled", False)) or bool(
++            envelope.get("enabled", False)
++        )
++        if needs_condition_groups:
+             _, inverse = torch.unique(
+                 condition.detach(), dim=0, sorted=True, return_inverse=True
+             )
+-            group_losses: list[torch.Tensor] = []
++            mean_group_losses: list[torch.Tensor] = []
++            envelope_group_losses: list[torch.Tensor] = []
++            active_group_count = 0
+             for group_index in range(int(inverse.max().item()) + 1):
+                 selected = inverse == group_index
+-                if int(selected.sum().item()) < int(envelope["minimum_group_size"]):
+-                    continue
++                selected_count = int(selected.sum().item())
+                 group_target = target[selected]
+                 group_prediction = prediction[selected]
+                 group_mask = valid_mask[selected]
+-                lower_q = torch.quantile(
+-                    group_target.detach(),
+-                    float(envelope["lower_quantile"]),
+-                    dim=0,
+-                    keepdim=True,
+-                )
+-                upper_q = torch.quantile(
+-                    group_target.detach(),
+-                    float(envelope["upper_quantile"]),
+-                    dim=0,
+-                    keepdim=True,
+-                )
+-                q25 = torch.quantile(
+-                    group_target.detach(), 0.25, dim=0, keepdim=True
+-                )
+-                q75 = torch.quantile(
+-                    group_target.detach(), 0.75, dim=0, keepdim=True
+-                )
+-                spread = (q75 - q25).clamp_min(0.0)
+-                margin = float(envelope["iqr_margin"]) * spread
+-                lower = lower_q - margin
+-                upper = upper_q + margin
+-                violation = F.relu(lower - group_prediction) + F.relu(
+-                    group_prediction - upper
+-                )
+-                pointwise = F.smooth_l1_loss(
+-                    violation,
+-                    torch.zeros_like(violation),
+-                    reduction="none",
+-                    beta=float(envelope["smooth_l1_beta"]),
+-                )
+-                group_losses.append(self._masked_mean(pointwise, group_mask))
+-            if group_losses:
+-                envelope_loss = torch.stack(group_losses).mean()
+-                active_groups = prediction.new_tensor(float(len(group_losses)))
++                group_valid = torch.min(
++                    group_mask, dim=0, keepdim=True
++                ).values
++                group_is_active = False
++
++                if bool(condition_mean.get("enabled", False)) and (
++                    selected_count >= int(condition_mean["minimum_group_size"])
++                ):
++                    predicted_mean = group_prediction.mean(dim=0, keepdim=True)
++                    target_mean = group_target.mean(dim=0, keepdim=True)
++                    mean_pointwise = F.smooth_l1_loss(
++                        predicted_mean,
++                        target_mean,
++                        reduction="none",
++                        beta=float(condition_mean["smooth_l1_beta"]),
++                    )
++                    mean_group_losses.append(
++                        self._masked_mean(mean_pointwise, group_valid)
++                    )
++                    group_is_active = True
++
++                if bool(envelope.get("enabled", False)) and (
++                    selected_count >= int(envelope["minimum_group_size"])
++                ):
++                    lower_q = torch.quantile(
++                        group_target.detach(),
++                        float(envelope["lower_quantile"]),
++                        dim=0,
++                        keepdim=True,
++                    )
++                    upper_q = torch.quantile(
++                        group_target.detach(),
++                        float(envelope["upper_quantile"]),
++                        dim=0,
++                        keepdim=True,
++                    )
++                    q25 = torch.quantile(
++                        group_target.detach(), 0.25, dim=0, keepdim=True
++                    )
++                    q75 = torch.quantile(
++                        group_target.detach(), 0.75, dim=0, keepdim=True
++                    )
++                    spread = (q75 - q25).clamp_min(0.0)
++                    margin = float(envelope["iqr_margin"]) * spread
++                    lower = lower_q - margin
++                    upper = upper_q + margin
++                    violation = F.relu(lower - group_prediction) + F.relu(
++                        group_prediction - upper
++                    )
++                    envelope_pointwise = F.smooth_l1_loss(
++                        violation,
++                        torch.zeros_like(violation),
++                        reduction="none",
++                        beta=float(envelope["smooth_l1_beta"]),
++                    )
++                    envelope_group_losses.append(
++                        self._masked_mean(envelope_pointwise, group_mask)
++                    )
++                    group_is_active = True
++                active_group_count += int(group_is_active)
++
++            if mean_group_losses:
++                condition_mean_loss = torch.stack(mean_group_losses).mean()
++            if envelope_group_losses:
++                envelope_loss = torch.stack(envelope_group_losses).mean()
++            active_groups = prediction.new_tensor(float(active_group_count))
+ 
+         raw = (
+             float(derivative.get("weight", 0.0)) * derivative_loss
++            + float(multiscale.get("weight", 0.0)) * multiscale_loss
++            + float(condition_mean.get("weight", 0.0)) * condition_mean_loss
+             + float(envelope.get("weight", 0.0)) * envelope_loss
+         )
+         return {
+             "quality_fidelity_raw_loss": raw,
+             "first_derivative_fidelity_loss": derivative_loss,
++            "multiscale_shape_loss": multiscale_loss,
++            "condition_mean_fidelity_loss": condition_mean_loss,
+             "condition_envelope_loss": envelope_loss,
+             "quality_fidelity_active_groups": active_groups,
+         }
+@@ -394,20 +592,13 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+                 sorted=True,
+                 return_inverse=True,
+             )
+-            grouped_timestep = torch.randint(
+-                0,
+-                self.num_timesteps,
+-                (int(inverse.max().item()) + 1,),
+-                device=img.device,
+-            ).long()
++            grouped_timestep = self._sample_training_timesteps(
++                int(inverse.max().item()) + 1,
++                img.device,
++            )
+             timestep = grouped_timestep[inverse]
+         else:
+-            timestep = torch.randint(
+-                0,
+-                self.num_timesteps,
+-                (batch_size,),
+-                device=img.device,
+-            ).long()
++            timestep = self._sample_training_timesteps(batch_size, img.device)
+         normalized = self.normalize(img) * mask
+         return self.p_losses(
+             normalized,
+@@ -574,11 +765,24 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             weighted_quality = zero
+ 
+         reduced = ddpm_loss + weighted_diversity + weighted_quality
++        timestep_fraction = t.to(dtype=torch.float32) / float(
++            max(self.num_timesteps - 1, 1)
++        )
++        high_sampling = self.quality_fidelity_configuration.get(
++            "high_noise_sampling", {}
++        )
++        high_threshold = float(
++            high_sampling.get("minimum_timestep_fraction", 0.75)
++        )
+         self._latest_loss_components = {
+             "total_loss": reduced.detach(),
+             "ddpm_loss": ddpm_loss.detach(),
+             "ddpm_uniform_loss": ddpm_uniform_loss.detach(),
+             "mean_high_noise_weight": timestep_fidelity_weight.mean().detach(),
++            "mean_training_timestep_fraction": timestep_fraction.mean().detach(),
++            "high_noise_training_sample_fraction": (
++                timestep_fraction >= high_threshold
++            ).to(dtype=torch.float32).mean().detach(),
+             "physics_loss": zero,
+             "diversity_loss": weighted_diversity.detach(),
+             "diversity_uncapped_loss": uncapped_diversity.detach(),
+@@ -611,6 +815,12 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             "first_derivative_fidelity_loss": quality.get(
+                 "first_derivative_fidelity_loss", zero
+             ).detach(),
++            "multiscale_shape_loss": quality.get(
++                "multiscale_shape_loss", zero
++            ).detach(),
++            "condition_mean_fidelity_loss": quality.get(
++                "condition_mean_fidelity_loss", zero
++            ).detach(),
+             "condition_envelope_loss": quality.get(
+                 "condition_envelope_loss", zero
+             ).detach(),
+diff --git a/src/spectrum_generator.py b/src/spectrum_generator.py
+index eb874e6..263df2b 100644
+--- a/src/spectrum_generator.py
++++ b/src/spectrum_generator.py
+@@ -164,6 +164,9 @@ def apply_condition_oracle_tail_calibration(
+     minimum_allowed = float(
+         configuration.get("minimum_allowed_tail_ratio", 1.15)
+     )
++    minimum_trigger = float(
++        configuration.get("minimum_trigger_tail_ratio", 1.50)
++    )
+     minimum_compression_factor = float(
+         configuration.get("minimum_compression_factor", 0.25)
+     )
+@@ -182,6 +185,10 @@ def apply_condition_oracle_tail_calibration(
+         raise ValueError("oracle_bootstrap_repeats至少32且confidence位于[0.90,1)。")
+     if not 1.0 <= minimum_allowed <= 2.0:
+         raise ValueError("minimum_allowed_tail_ratio必须位于[1,2]。")
++    if not minimum_allowed <= minimum_trigger <= 3.0:
++        raise ValueError(
++            "minimum_trigger_tail_ratio必须不小于允许尾宽且不大于3。"
++        )
+     if not 0.0 < minimum_compression_factor <= 1.0:
+         raise ValueError("minimum_compression_factor必须位于(0,1]。")
+     if not 0.0 < maximum_modified_fraction <= 0.20:
+@@ -234,7 +241,9 @@ def apply_condition_oracle_tail_calibration(
+     )
+ 
+     lower_factor = 1.0
+-    if lower_ratio_before > allowed_lower:
++    lower_trigger = max(allowed_lower, minimum_trigger)
++    upper_trigger = max(allowed_upper, minimum_trigger)
++    if lower_ratio_before > lower_trigger:
+         target_lower = generated_q[2] - allowed_lower * training_lower_span
+         denominator = max(float(generated_q[1] - generated_q[0]), 1.0e-12)
+         lower_factor = float(
+@@ -245,7 +254,7 @@ def apply_condition_oracle_tail_calibration(
+             )
+         )
+     upper_factor = 1.0
+-    if upper_ratio_before > allowed_upper:
++    if upper_ratio_before > upper_trigger:
+         target_upper = generated_q[2] + allowed_upper * training_upper_span
+         denominator = max(float(generated_q[4] - generated_q[3]), 1.0e-12)
+         upper_factor = float(
+@@ -285,6 +294,8 @@ def apply_condition_oracle_tail_calibration(
+         "oracle_bootstrap_repeats": repeats,
+         "oracle_lower_tail_ratio_upper": allowed_lower,
+         "oracle_upper_tail_ratio_upper": allowed_upper,
++        "lower_tail_trigger_ratio": lower_trigger,
++        "upper_tail_trigger_ratio": upper_trigger,
+         "lower_tail_ratio_before": lower_ratio_before,
+         "upper_tail_ratio_before": upper_ratio_before,
+         "lower_tail_ratio_after": float(
+@@ -295,6 +306,8 @@ def apply_condition_oracle_tail_calibration(
+         ),
+         "lower_compression_factor": lower_factor,
+         "upper_compression_factor": upper_factor,
++        "lower_tail_calibration_activated": bool(lower_factor < 1.0),
++        "upper_tail_calibration_activated": bool(upper_factor < 1.0),
+         "modified_point_fraction": modified_fraction,
+         "modified_spectrum_count": int(np.sum(np.any(modified, axis=1))),
+     }
+@@ -318,6 +331,12 @@ def apply_condition_intensity_envelope_guard(
+         configuration.get("training_upper_quantile", 0.95)
+     )
+     training_iqr_margin = float(configuration.get("training_iqr_margin", 0.50))
++    extrema_margin_fraction = float(
++        configuration.get("training_extrema_margin_iqr_fraction", 0.10)
++    )
++    minimum_extrema_margin = float(
++        configuration.get("minimum_extrema_margin_intensity", 2.0)
++    )
+     generated_quantile = float(
+         configuration.get("generated_lower_quantile", 0.025)
+     )
+@@ -358,6 +377,10 @@ def apply_condition_intensity_envelope_guard(
+         raise ValueError("generated_upper_quantile必须位于[0.90, 1]。")
+     if not np.isfinite(training_iqr_margin) or training_iqr_margin < 0.0:
+         raise ValueError("training_iqr_margin必须是非负有限数。")
++    if not np.isfinite(extrema_margin_fraction) or extrema_margin_fraction < 0.0:
++        raise ValueError("training_extrema_margin_iqr_fraction必须是非负有限数。")
++    if not np.isfinite(minimum_extrema_margin) or minimum_extrema_margin < 0.0:
++        raise ValueError("minimum_extrema_margin_intensity必须是非负有限数。")
+     if minimum_generated_count < 2:
+         raise ValueError("minimum_generated_count至少为2。")
+     if not np.isfinite(activation_maximum):
+@@ -383,8 +406,18 @@ def apply_condition_intensity_envelope_guard(
+     train_q25 = np.quantile(training, 0.25, axis=0)
+     train_q75 = np.quantile(training, 0.75, axis=0)
+     train_iqr = np.maximum(train_q75 - train_q25, 0.0)
+-    training_floor = train_q - training_iqr_margin * train_iqr
+-    training_ceiling = train_upper_q + training_iqr_margin * train_iqr
++    extrema_margin = np.maximum(
++        extrema_margin_fraction * train_iqr,
++        minimum_extrema_margin,
++    )
++    training_floor = np.minimum(
++        train_q - training_iqr_margin * train_iqr,
++        np.min(training, axis=0) - extrema_margin,
++    )
++    training_ceiling = np.maximum(
++        train_upper_q + training_iqr_margin * train_iqr,
++        np.max(training, axis=0) + extrema_margin,
++    )
+ 
+     used_generated_reference = generated.shape[0] >= minimum_generated_count
+     if used_generated_reference:
+@@ -392,16 +425,21 @@ def apply_condition_intensity_envelope_guard(
+         generated_ceiling = np.quantile(
+             generated, generated_upper_quantile, axis=0
+         )
+-        # Requiring a point to be below both references avoids correcting a
+-        # legitimate low-intensity member that only looks unusual to one set.
+-        allowed_floor = np.minimum(training_floor, generated_floor)
+-        allowed_ceiling = np.maximum(training_ceiling, generated_ceiling)
++        # Training owns the physical boundary.  Generated quantiles are only
++        # rank gates, so a malformed generated batch cannot legitimize its own
++        # extreme tail by moving the allowed boundary outward.
++        lower_rank_gate = generated <= generated_floor[np.newaxis, :]
++        upper_rank_gate = generated >= generated_ceiling[np.newaxis, :]
+     else:
+-        allowed_floor = training_floor.copy()
+-        allowed_ceiling = training_ceiling.copy()
++        lower_rank_gate = np.ones_like(generated, dtype=bool)
++        upper_rank_gate = np.ones_like(generated, dtype=bool)
++
++    allowed_floor = training_floor.copy()
++    allowed_ceiling = training_ceiling.copy()
+ 
+-    # This module is exclusively a negative-valley guard.  It must not lift a
+-    # low but positive peak merely because the training distribution is higher.
++    # The lower side is exclusively a negative-valley guard: a low but
++    # positive peak is not lifted merely because training intensities are
++    # higher.  The upper side independently limits unsupported peak strength.
+     allowed_floor = np.minimum(allowed_floor, activation_maximum)
+     training_global_minimum = float(np.min(training))
+     training_global_maximum = float(np.max(training))
+@@ -410,15 +448,21 @@ def apply_condition_intensity_envelope_guard(
+         allowed_ceiling = np.minimum(allowed_ceiling, training_global_maximum)
+ 
+     lower_violation = np.logical_and(
++        lower_rank_gate,
+         np.logical_and(
+-            generated < allowed_floor[np.newaxis, :],
+-            generated < activation_maximum,
++            np.logical_and(
++                generated < allowed_floor[np.newaxis, :],
++                generated < activation_maximum,
++            ),
++            allowed_floor[np.newaxis, :] - generated > minimum_deficit,
+         ),
+-        allowed_floor[np.newaxis, :] - generated > minimum_deficit,
+     )
+     upper_violation = np.logical_and(
+-        generated > allowed_ceiling[np.newaxis, :],
+-        generated - allowed_ceiling[np.newaxis, :] > minimum_excess,
++        upper_rank_gate,
++        np.logical_and(
++            generated > allowed_ceiling[np.newaxis, :],
++            generated - allowed_ceiling[np.newaxis, :] > minimum_excess,
++        ),
+     )
+     violation = np.logical_or(lower_violation, upper_violation)
+     modified_point_count = int(np.sum(violation))
+@@ -463,6 +507,7 @@ def apply_condition_intensity_envelope_guard(
+         "training_count": int(training.shape[0]),
+         "generated_count": int(generated.shape[0]),
+         "used_generated_batch_reference": used_generated_reference,
++        "generated_batch_is_rank_gate_only": True,
+         "modified_spectrum_count": int(np.sum(np.any(violation, axis=1))),
+         "modified_point_count": modified_point_count,
+         "lower_modified_point_count": int(np.sum(lower_violation)),
+diff --git a/tests/test_sers_generation_evaluator.py b/tests/test_sers_generation_evaluator.py
+index 2ae0095..6a157ca 100644
+--- a/tests/test_sers_generation_evaluator.py
++++ b/tests/test_sers_generation_evaluator.py
+@@ -2,9 +2,11 @@ import numpy as np
+ 
+ from scripts.evaluate_d4_2_generation import (
+     _center_metrics,
++    _comparison_summary_fields,
+     _diversity_fields,
+     _pointwise_wasserstein,
+     _qq_table,
++    _training_supported_intensity_metrics,
+ )
+ from src.sers_generation_evaluator import (
+     broad_local_distribution_evaluation,
+@@ -128,6 +130,13 @@ def test_nearest_metrics_are_finite():
+             "pearson"
+         ].to_numpy()
+     ).all()
++    context = _comparison_summary_fields(
++        generated_nearest,
++        "generated_to_training",
++    )
++    assert context["generated_to_training_mse_mean"] >= 0.0
++    assert -1.0 <= context["generated_to_training_cosine_mean"] <= 1.0
++    assert -1.0 <= context["generated_to_training_pearson_mean"] <= 1.0
+ 
+ 
+ def test_identical_spectra_have_unit_pearson():
+@@ -302,7 +311,44 @@ def test_core_generation_metrics_and_qq_are_finite():
+     assert np.isfinite(qq.select_dtypes(include=[np.number]).to_numpy()).all()
+     assert qq_metrics["qq_lower_tail_span_ratio"] > 0.0
+     assert qq_metrics["qq_upper_tail_span_ratio"] > 0.0
++    assert (
++        qq_metrics["qq_lower_tail_oracle_lower"]
++        < qq_metrics["qq_lower_tail_oracle_upper"]
++    )
++    assert (
++        qq_metrics["qq_upper_tail_oracle_lower"]
++        < qq_metrics["qq_upper_tail_oracle_upper"]
++    )
+     assert isinstance(qq_metrics["qq_any_tail_overrun"], bool)
++    assert isinstance(qq_metrics["qq_any_tail_underrun"], bool)
++    assert isinstance(qq_metrics["qq_any_tail_mismatch"], bool)
++
++
++def test_training_supported_intensity_metrics_detect_both_sides():
++    training = np.repeat(
++        np.asarray([[-18.0, 100.0, 200.0]], dtype=np.float64), 12, axis=0
++    )
++    generated = np.repeat(training[[0]], 20, axis=0)
++    generated[0, 1] = -200.0
++    generated[1, 2] = 900.0
++    metrics = _training_supported_intensity_metrics(
++        training=training,
++        generated=generated,
++        configuration={
++            "training_lower_quantile": 0.05,
++            "training_upper_quantile": 0.95,
++            "training_iqr_margin": 0.5,
++            "training_extrema_margin_iqr_fraction": 0.10,
++            "minimum_extrema_margin_intensity": 2.0,
++            "activation_maximum_intensity": -18.0,
++            "minimum_deficit_intensity": 5.0,
++            "minimum_excess_intensity": 5.0,
++        },
++    )
++    assert metrics["generated_below_training_envelope_point_fraction"] > 0.0
++    assert metrics["generated_above_training_envelope_point_fraction"] > 0.0
++    assert metrics["training_minimum_intensity"] == -18.0
++    assert metrics["generated_maximum_intensity"] == 900.0
+ 
+ 
+ def test_identical_distributions_have_zero_pointwise_wasserstein():
+diff --git a/tests/test_spectrum_generation.py b/tests/test_spectrum_generation.py
+index 8989eb1..586fed9 100644
+--- a/tests/test_spectrum_generation.py
++++ b/tests/test_spectrum_generation.py
+@@ -123,6 +123,8 @@ def test_negative_floor_guard_repairs_extreme_valley_and_keeps_normal_noise():
+         configuration={
+             "training_lower_quantile": 0.05,
+             "training_iqr_margin": 0.5,
++            "training_extrema_margin_iqr_fraction": 0.10,
++            "minimum_extrema_margin_intensity": 2.0,
+             "generated_lower_quantile": 0.025,
+             "minimum_generated_count": 20,
+             "activation_maximum_intensity": -18.0,
+@@ -164,6 +166,8 @@ def test_intensity_envelope_repairs_both_deep_valley_and_excess_peak():
+             "training_lower_quantile": 0.05,
+             "training_upper_quantile": 0.95,
+             "training_iqr_margin": 0.5,
++            "training_extrema_margin_iqr_fraction": 0.10,
++            "minimum_extrema_margin_intensity": 2.0,
+             "generated_lower_quantile": 0.025,
+             "generated_upper_quantile": 0.975,
+             "minimum_generated_count": 20,
+@@ -184,6 +188,41 @@ def test_intensity_envelope_repairs_both_deep_valley_and_excess_peak():
+     assert diagnostics["upper_modified_point_count"] == 1
+ 
+ 
++def test_generated_outliers_cannot_loosen_training_owned_envelope():
++    training = np.repeat(
++        np.asarray([[-18.0, 100.0, 200.0]], dtype=np.float32),
++        12,
++        axis=0,
++    )
++    generated = np.repeat(training[[0]], 40, axis=0)
++    generated[:4, 2] = -200.0
++    corrected, diagnostics = apply_condition_intensity_envelope_guard(
++        generated,
++        training,
++        configuration={
++            "training_lower_quantile": 0.05,
++            "training_upper_quantile": 0.95,
++            "training_iqr_margin": 0.5,
++            "training_extrema_margin_iqr_fraction": 0.10,
++            "minimum_extrema_margin_intensity": 2.0,
++            "generated_lower_quantile": 0.025,
++            "generated_upper_quantile": 0.975,
++            "minimum_generated_count": 20,
++            "activation_maximum_intensity": -18.0,
++            "minimum_deficit_intensity": 5.0,
++            "minimum_excess_intensity": 5.0,
++            "softness_iqr_fraction": 0.05,
++            "minimum_softness_intensity": 0.25,
++            "maximum_softness_intensity": 2.0,
++            "enforce_training_global_extrema": False,
++            "maximum_modified_fraction": 0.05,
++        },
++    )
++    assert np.all(corrected[:4, 2] > -30.0)
++    assert diagnostics["lower_modified_point_count"] == 4
++    assert diagnostics["generated_batch_is_rank_gate_only"] is True
++
++
+ def test_mean_fidelity_calibration_reduces_bias_without_changing_pairwise_mse():
+     random_generator = np.random.default_rng(2026)
+     training = random_generator.normal(10.0, 2.0, size=(12, 80))
+@@ -233,6 +272,7 @@ def test_oracle_tail_calibration_keeps_middle_and_shrinks_only_excess_tails():
+             "oracle_bootstrap_repeats": 64,
+             "oracle_confidence": 0.975,
+             "minimum_allowed_tail_ratio": 1.15,
++            "minimum_trigger_tail_ratio": 1.50,
+             "minimum_compression_factor": 0.25,
+             "maximum_modified_fraction": 0.10,
+             "random_seed": 2026,
+@@ -241,6 +281,8 @@ def test_oracle_tail_calibration_keeps_middle_and_shrinks_only_excess_tails():
+     np.testing.assert_allclose(corrected[middle], generated[middle], atol=1.0e-6)
+     assert diagnostics["lower_compression_factor"] < 1.0
+     assert diagnostics["upper_compression_factor"] < 1.0
++    assert diagnostics["lower_tail_calibration_activated"] is True
++    assert diagnostics["upper_tail_calibration_activated"] is True
+     assert (
+         diagnostics["lower_tail_ratio_after"]
+         < diagnostics["lower_tail_ratio_before"]
+@@ -251,7 +293,34 @@ def test_oracle_tail_calibration_keeps_middle_and_shrinks_only_excess_tails():
+     )
+ 
+ 
+-def test_quality_fidelity_losses_detect_derivative_and_envelope_errors():
++def test_oracle_tail_calibration_leaves_nonsevere_tail_unchanged():
++    random_generator = np.random.default_rng(2027)
++    training = random_generator.normal(0.0, 1.0, size=(12, 160))
++    generated = random_generator.normal(0.0, 1.10, size=(200, 160))
++    corrected, diagnostics = apply_condition_oracle_tail_calibration(
++        generated,
++        training,
++        configuration={
++            "lower_probability": 0.01,
++            "upper_probability": 0.99,
++            "lower_anchor_probability": 0.05,
++            "upper_anchor_probability": 0.95,
++            "oracle_reference_count": 4,
++            "oracle_bootstrap_repeats": 64,
++            "oracle_confidence": 0.975,
++            "minimum_allowed_tail_ratio": 1.15,
++            "minimum_trigger_tail_ratio": 1.50,
++            "minimum_compression_factor": 0.25,
++            "maximum_modified_fraction": 0.10,
++            "random_seed": 2026,
++        },
++    )
++    np.testing.assert_allclose(corrected, generated, atol=1.0e-6)
++    assert diagnostics["lower_tail_calibration_activated"] is False
++    assert diagnostics["upper_tail_calibration_activated"] is False
++
++
++def test_quality_fidelity_losses_detect_shape_mean_and_envelope_errors():
+     diffusion = object.__new__(MaskedGaussianDiffusion1D)
+     nn.Module.__init__(diffusion)
+     diffusion.quality_fidelity_configuration = {
+@@ -261,6 +330,18 @@ def test_quality_fidelity_losses_detect_derivative_and_envelope_errors():
+             "smooth_l1_beta": 0.05,
+             "weight": 0.5,
+         },
++        "multiscale_shape": {
++            "enabled": True,
++            "kernel_sizes": [3, 5],
++            "smooth_l1_beta": 0.05,
++            "weight": 0.5,
++        },
++        "condition_mean": {
++            "enabled": True,
++            "smooth_l1_beta": 0.05,
++            "minimum_group_size": 4,
++            "weight": 0.5,
++        },
+         "condition_pointwise_envelope": {
+             "enabled": True,
+             "lower_quantile": 0.05,
+@@ -289,10 +370,35 @@ def test_quality_fidelity_losses_detect_derivative_and_envelope_errors():
+         condition=condition,
+     )
+     assert losses["first_derivative_fidelity_loss"].item() > 0.0
++    assert losses["multiscale_shape_loss"].item() > 0.0
++    assert losses["condition_mean_fidelity_loss"].item() > 0.0
+     assert losses["condition_envelope_loss"].item() > 0.0
+     assert losses["quality_fidelity_active_groups"].item() == 2.0
+ 
+ 
++def test_high_noise_stratified_sampling_preserves_full_range_and_tail_coverage():
++    diffusion = object.__new__(MaskedGaussianDiffusion1D)
++    nn.Module.__init__(diffusion)
++    diffusion.num_timesteps = 200
++    diffusion.quality_fidelity_enabled = True
++    diffusion.quality_fidelity_configuration = {
++        "high_noise_sampling": {
++            "enabled": True,
++            "sampling_probability": 0.25,
++            "minimum_timestep_fraction": 0.75,
++        }
++    }
++    torch.manual_seed(2026)
++    timesteps = diffusion._sample_training_timesteps(
++        20_000,
++        torch.device("cpu"),
++    )
++    high_fraction = float((timesteps >= 149).to(torch.float32).mean())
++    assert int(timesteps.min()) < 20
++    assert int(timesteps.max()) >= 195
++    assert 0.40 < high_fraction < 0.48
++
++
+ def test_spectrum_generation_shape():
+     """验证普通DDPM能够生成正确形状的张量。"""
+ 

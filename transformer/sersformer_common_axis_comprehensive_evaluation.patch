@@ -1,0 +1,1212 @@
+diff --git a/Dataset.py b/Dataset.py
+index e041718..e640c65 100644
+--- a/Dataset.py
++++ b/Dataset.py
+@@ -6,8 +6,8 @@ Engineering adaptations only (not paper-method innovations):
+ - read D4.24 generated spectra from data/generated
+ - fixed 12/4/4 real split per source file
+ - generated spectra are training-only
+-- unify all inputs to a 600-2500 cm^-1, 1901-point model axis
+-- use a condition-specific valid_mask for short 1401-point spectra
++- unify all model inputs to the common measured range 600-2000 cm^-1 (1401 points)
++- keep valid_mask support for safety, while preventing Raman-length/CHL label leakage
+ - preserve negative baseline-corrected SERS values with signed-log1p preprocessing
+ 
+ The output order of pesticide targets is always: [DEL, CHL, TEB].
+@@ -36,10 +36,10 @@ PESTICIDES = ("DEL", "CHL", "TEB")
+ PESTICIDE_TO_INDEX = {name: index for index, name in enumerate(PESTICIDES)}
+ LEVEL_TO_CODE = {"S": 1.0, "M": 2.0, "H": 3.0}
+ 
+-MODEL_RAMAN_AXIS = np.arange(600.0, 2500.0 + 1.0, 1.0, dtype=np.float32)
++MODEL_RAMAN_AXIS = np.arange(600.0, 2000.0 + 1.0, 1.0, dtype=np.float32)
+ MODEL_LENGTH = int(MODEL_RAMAN_AXIS.size)
+-if MODEL_LENGTH != 1901:
+-    raise RuntimeError(f"Unexpected model Raman length: {MODEL_LENGTH}")
++if MODEL_LENGTH != 1401:
++    raise RuntimeError(f"Unexpected common-axis Raman length: {MODEL_LENGTH}")
+ 
+ REAL_TRAIN_INDICES = tuple(range(0, 12))
+ REAL_VALIDATION_INDICES = tuple(range(12, 16))
+@@ -240,9 +240,9 @@ def _preprocess_spectrum(
+ ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+     """
+     Produce the three SERSFormer2 input branches:
+-      raw        : [1, 1901], valid-region min-max after signed-log1p
+-      percentile : [4, 1901], 95/85/75/50 percentile feature channels
+-      smoothed   : [1, 1901], Hann-smoothed signed-log1p signal
++      raw        : [1, 1401], valid-region min-max after signed-log1p
++      percentile : [4, 1401], 95/85/75/50 percentile feature channels
++      smoothed   : [1, 1401], Hann-smoothed signed-log1p signal
+ 
+     signed-log1p is used instead of the upstream "x>1 else 0.001" rule because
+     these baseline-corrected SERS spectra legitimately contain negative values.
+@@ -368,6 +368,39 @@ class SERSDataRepository:
+ 
+ 
+ 
++def build_axis_label_audit(repository: SERSDataRepository) -> dict[str, Any]:
++    """Describe source-axis length versus pesticide presence before common-axis cropping.
++
++    This audit is intentionally based on the original source axes. It documents
++    acquisition/label confounding without exposing that information to the model.
++    """
++    counts: dict[str, dict[str, int]] = {pesticide: {} for pesticide in PESTICIDES}
++    axis_lengths: dict[int, int] = {}
++
++    for record in repository.real_data.values():
++        source_length = int(len(record["axis"]))
++        axis_lengths[source_length] = axis_lengths.get(source_length, 0) + 1
++        info: ConditionInfo = record["condition_info"]
++        for pesticide_index, pesticide in enumerate(PESTICIDES):
++            presence = int(info.presence[pesticide_index] > 0.5)
++            key = f"presence={presence}|points={source_length}"
++            counts[pesticide][key] = counts[pesticide].get(key, 0) + 1
++
++    return {
++        "source_file_count": int(len(repository.real_data)),
++        "source_axis_point_counts": {str(k): int(v) for k, v in sorted(axis_lengths.items())},
++        "pesticide_by_source_axis": counts,
++        "model_axis_start_cm-1": float(MODEL_RAMAN_AXIS[0]),
++        "model_axis_end_cm-1": float(MODEL_RAMAN_AXIS[-1]),
++        "model_axis_points": int(MODEL_LENGTH),
++        "mitigation": (
++            "All model inputs are cropped/interpolated to the common 600-2000 cm^-1 "
++            "range, so source-axis length and the 2000-2500 cm^-1 acquisition tail "
++            "cannot be used as a pesticide-class cue."
++        ),
++    }
++
++
+ def build_training_peak_priors(
+     repository: SERSDataRepository,
+     *,
+@@ -385,7 +418,7 @@ def build_training_peak_priors(
+     - validation/test spectra are never read for prior fitting;
+     - generated spectra are never used for prior fitting.
+ 
+-    The prior is not a hard spectral mask. It is a [3, 1901] non-negative
++    The prior is not a hard spectral mask. It is a [3, 1401] non-negative
+     guidance map later added to attention logits. Consequently a pesticide
+     query can still use every valid non-peak region.
+ 
+@@ -580,7 +613,7 @@ def build_training_peak_priors(
+ class SERSDataset(Dataset):
+     """
+     Real-only validation/test; generated spectra may be added only to training.
+-    All samples returned to the model have length 1901.
++    All samples returned to the model use the common 600-2000 cm^-1 axis (1401 points).
+     """
+ 
+     def __init__(
+@@ -658,8 +691,9 @@ class SERSDataset(Dataset):
+             source_path = generated_record["path"]
+             spectrum_name = generated_record["names"][ref.spectrum_index]
+ 
+-            # Generated files are 1901 points, but for conditions whose real
+-            # acquisition ends near 2000 cm^-1, 2001-2500 must remain invalid.
++            # Generated files may extend to 2500 cm^-1, but the downstream
++            # model deliberately uses only the common 600-2000 cm^-1 range so
++            # Raman-axis length cannot leak the CHL label.
+             adapted, valid_mask = _adapt_spectrum_to_model_axis(
+                 axis,
+                 spectrum,
+diff --git a/Inference.py b/Inference.py
+index 83fd655..8d9dd97 100644
+--- a/Inference.py
++++ b/Inference.py
+@@ -1,62 +1,539 @@
+-"""Inference/evaluation for baseline-compatible or peak-guided SERSFormer checkpoints."""
++"""Comprehensive post-training evaluation for DEL/CHL/TEB SERSFormer.
++
++The evaluation follows the SERSFormer-2.0 paper where applicable:
++- multilabel accuracy / precision / recall / F1
++- per-pesticide confusion matrices
++- pesticide co-occurrence confusion matrices
++- ROC curves and AUROC
++- multiregression MSE and R2
++- violin plots for concentration prediction
++
++For a more transparent quantitative assessment, this project also reports MAE,
++RMSE, per-pesticide metrics, end-to-end gated regression, and stratified results
++for single/binary/ternary mixtures and water/soil matrices.
++"""
+ 
+ from __future__ import annotations
+ 
+ import argparse
++from itertools import combinations
+ import json
++import math
+ from pathlib import Path
++from typing import Any, Iterable
+ 
++import matplotlib.pyplot as plt
+ import numpy as np
+ import pandas as pd
+ import torch
++from sklearn.metrics import (
++    accuracy_score,
++    auc,
++    confusion_matrix,
++    mean_absolute_error,
++    mean_squared_error,
++    jaccard_score,
++    precision_recall_fscore_support,
++    r2_score,
++    roc_auc_score,
++    roc_curve,
++)
+ from torch.utils.data import DataLoader
+ 
+ from Dataset import PESTICIDES, build_datasets
+-from Metric import (
+-    merge_metrics,
+-    multilabel_classification_metrics,
+-    regression_metrics,
+-)
+ from Model_v2 import TransformerClassifyRegress_sep
+ 
+ 
+ def parse_args() -> argparse.Namespace:
+-    parser = argparse.ArgumentParser(description="Evaluate an adapted SERSFormer2 checkpoint")
++    parser = argparse.ArgumentParser(
++        description="Comprehensive evaluation of peak-guided SERSFormer checkpoint"
++    )
+     parser.add_argument("--checkpoint", type=Path, required=True)
+-    parser.add_argument("--split", choices=("train", "validation", "test"), default="test")
++    parser.add_argument(
++        "--split", choices=("train", "validation", "test", "all"), default="test"
++    )
+     parser.add_argument("--batch-size", type=int, default=64)
+     parser.add_argument("--num-workers", type=int, default=4)
+     parser.add_argument("--device", type=str, default="cuda")
+     parser.add_argument("--output-directory", type=Path, default=Path("outputs/inference"))
+     parser.add_argument("--classification-threshold", type=float, default=0.5)
++    parser.add_argument("--training-history", type=Path, default=None)
+     return parser.parse_args()
+ 
+ 
+-def main() -> None:
+-    args = parse_args()
+-    device = torch.device(
+-        args.device if not args.device.startswith("cuda") or torch.cuda.is_available() else "cpu"
+-    )
++def _resolve_device(requested: str) -> torch.device:
++    if requested.startswith("cuda") and not torch.cuda.is_available():
++        print("WARNING: CUDA requested but unavailable; using CPU.")
++        return torch.device("cpu")
++    return torch.device(requested)
+ 
+-    checkpoint = torch.load(args.checkpoint, map_location="cpu")
+-    concentration_map = checkpoint.get("concentration_map")
+-    train_dataset, validation_dataset, test_dataset = build_datasets(
+-        include_generated_train=False,
+-        concentration_map=concentration_map,
++
++def _safe_r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
++    if y_true.size < 2 or np.allclose(y_true, y_true[0]):
++        return float("nan")
++    return float(r2_score(y_true, y_pred))
++
++
++def _regression_metric_block(
++    y_true: np.ndarray,
++    y_pred: np.ndarray,
++) -> dict[str, float | int]:
++    y_true = np.asarray(y_true, dtype=np.float64).reshape(-1)
++    y_pred = np.asarray(y_pred, dtype=np.float64).reshape(-1)
++    finite = np.isfinite(y_true) & np.isfinite(y_pred)
++    y_true = y_true[finite]
++    y_pred = y_pred[finite]
++    if y_true.size == 0:
++        return {
++            "n": 0,
++            "mae": float("nan"),
++            "mse": float("nan"),
++            "rmse": float("nan"),
++            "r2": float("nan"),
++        }
++    mse = float(mean_squared_error(y_true, y_pred))
++    return {
++        "n": int(y_true.size),
++        "mae": float(mean_absolute_error(y_true, y_pred)),
++        "mse": mse,
++        "rmse": float(math.sqrt(max(mse, 0.0))),
++        "r2": _safe_r2(y_true, y_pred),
++    }
++
++
++def _classification_metrics(
++    y_true: np.ndarray,
++    probabilities: np.ndarray,
++    threshold: float,
++) -> tuple[dict[str, Any], pd.DataFrame, np.ndarray]:
++    y_true = np.asarray(y_true, dtype=np.int64)
++    probabilities = np.asarray(probabilities, dtype=np.float64)
++    y_pred = (probabilities >= float(threshold)).astype(np.int64)
++
++    result: dict[str, Any] = {
++        "threshold": float(threshold),
++        # Exact-match / subset accuracy: all three labels must be correct.
++        "multilabel_exact_match_accuracy": float(accuracy_score(y_true, y_pred)),
++        # Elementwise accuracy is useful because exact-match becomes strict for mixtures.
++        "multilabel_hamming_accuracy": float(np.mean(y_true == y_pred)),
++        "multilabel_jaccard_accuracy_samples": float(
++            jaccard_score(y_true, y_pred, average="samples", zero_division=0)
++        ),
++    }
++
++    for average in ("micro", "macro"):
++        precision, recall, f1, _ = precision_recall_fscore_support(
++            y_true,
++            y_pred,
++            average=average,
++            zero_division=0,
++        )
++        result[f"precision_{average}"] = float(precision)
++        result[f"recall_{average}"] = float(recall)
++        result[f"f1_{average}"] = float(f1)
++
++    try:
++        result["auroc_macro"] = float(
++            roc_auc_score(y_true, probabilities, average="macro")
++        )
++    except ValueError:
++        result["auroc_macro"] = float("nan")
++    try:
++        result["auroc_micro"] = float(
++            roc_auc_score(y_true, probabilities, average="micro")
++        )
++    except ValueError:
++        result["auroc_micro"] = float("nan")
++
++    per_pesticide_rows: list[dict[str, Any]] = []
++    for index, pesticide in enumerate(PESTICIDES):
++        truth = y_true[:, index]
++        pred = y_pred[:, index]
++        prob = probabilities[:, index]
++        tn, fp, fn, tp = confusion_matrix(truth, pred, labels=[0, 1]).ravel()
++        precision, recall, f1, _ = precision_recall_fscore_support(
++            truth,
++            pred,
++            average="binary",
++            zero_division=0,
++        )
++        try:
++            label_auc = float(roc_auc_score(truth, prob))
++        except ValueError:
++            label_auc = float("nan")
++        specificity = float(tn / (tn + fp)) if (tn + fp) else float("nan")
++        per_pesticide_rows.append(
++            {
++                "pesticide": pesticide,
++                "n": int(truth.size),
++                "positive_n": int(truth.sum()),
++                "negative_n": int((1 - truth).sum()),
++                "accuracy": float(np.mean(truth == pred)),
++                "precision": float(precision),
++                "recall": float(recall),
++                "f1": float(f1),
++                "specificity": specificity,
++                "auroc": label_auc,
++                "TN": int(tn),
++                "FP": int(fp),
++                "FN": int(fn),
++                "TP": int(tp),
++            }
++        )
++    return result, pd.DataFrame(per_pesticide_rows), y_pred
++
++
++def _regression_metrics(
++    y_reg: np.ndarray,
++    p_reg: np.ndarray,
++    y_class: np.ndarray,
++    y_pred_class: np.ndarray,
++) -> tuple[dict[str, Any], pd.DataFrame]:
++    y_reg = np.asarray(y_reg, dtype=np.float64)
++    p_reg = np.asarray(p_reg, dtype=np.float64)
++    y_class = np.asarray(y_class, dtype=np.int64)
++    y_pred_class = np.asarray(y_pred_class, dtype=np.int64)
++
++    present = y_class > 0
++    correctly_detected_present = present & (y_pred_class > 0)
++    gated_prediction = np.where(y_pred_class > 0, p_reg, 0.0)
++
++    overall = {
++        # All outputs including absent=0. Useful as true end-to-end multioutput error,
++        # but can be helped by many zeros, so it is never reported alone.
++        "all_outputs_raw_regression": _regression_metric_block(y_reg, p_reg),
++        # Classification-gated regression includes FN/FP impact in the final pipeline.
++        "end_to_end_classification_gated": _regression_metric_block(
++            y_reg, gated_prediction
++        ),
++        # Quantification accuracy on every truly present pesticide, even if classification
++        # missed it. This avoids selecting only easy correctly classified cases.
++        "present_targets_only": _regression_metric_block(
++            y_reg[present], p_reg[present]
++        ),
++        # SERSFormer-2.0-style conditional evaluation: quantify concentrations after the
++        # corresponding pesticide has been positively identified. Reported explicitly as
++        # conditional because it can be more optimistic than end-to-end evaluation.
++        "sersformer2_conditional_correctly_detected_present": _regression_metric_block(
++            y_reg[correctly_detected_present], p_reg[correctly_detected_present]
++        ),
++        "absent_targets_prediction_error": _regression_metric_block(
++            y_reg[~present], p_reg[~present]
++        ),
++    }
++
++    rows: list[dict[str, Any]] = []
++    for index, pesticide in enumerate(PESTICIDES):
++        pesticide_present = present[:, index]
++        correct_present = correctly_detected_present[:, index]
++        for scope, mask, prediction in (
++            ("present_targets_only", pesticide_present, p_reg[:, index]),
++            (
++                "sersformer2_conditional_correctly_detected_present",
++                correct_present,
++                p_reg[:, index],
++            ),
++            (
++                "end_to_end_classification_gated",
++                np.ones(y_reg.shape[0], dtype=bool),
++                gated_prediction[:, index],
++            ),
++        ):
++            metrics = _regression_metric_block(y_reg[mask, index], prediction[mask])
++            rows.append({"pesticide": pesticide, "scope": scope, **metrics})
++    return overall, pd.DataFrame(rows)
++
++
++def _plot_matrix(
++    matrix: np.ndarray,
++    labels: list[str],
++    title: str,
++    path: Path,
++    value_format: str = "d",
++) -> None:
++    fig, ax = plt.subplots(figsize=(5, 4))
++    image = ax.imshow(matrix)
++    ax.set_xticks(range(len(labels)))
++    ax.set_yticks(range(len(labels)))
++    ax.set_xticklabels(labels)
++    ax.set_yticklabels(labels)
++    ax.set_xlabel("Predicted")
++    ax.set_ylabel("True")
++    ax.set_title(title)
++    threshold = float(np.nanmax(matrix)) / 2.0 if matrix.size else 0.0
++    for row in range(matrix.shape[0]):
++        for col in range(matrix.shape[1]):
++            value = matrix[row, col]
++            text = format(int(value), value_format) if value_format == "d" else format(float(value), value_format)
++            ax.text(col, row, text, ha="center", va="center")
++    fig.colorbar(image, ax=ax)
++    fig.tight_layout()
++    path.parent.mkdir(parents=True, exist_ok=True)
++    fig.savefig(path, dpi=300, bbox_inches="tight")
++    plt.close(fig)
++
++
++def _save_confusion_matrices(
++    y_true: np.ndarray,
++    y_pred: np.ndarray,
++    output_directory: Path,
++) -> None:
++    output_directory.mkdir(parents=True, exist_ok=True)
++    for index, pesticide in enumerate(PESTICIDES):
++        matrix = confusion_matrix(y_true[:, index], y_pred[:, index], labels=[0, 1])
++        pd.DataFrame(
++            matrix,
++            index=["true_absent", "true_present"],
++            columns=["pred_absent", "pred_present"],
++        ).to_csv(output_directory / f"{pesticide}_counts.csv")
++        _plot_matrix(
++            matrix,
++            ["Absent", "Present"],
++            f"{pesticide} confusion matrix (counts)",
++            output_directory / f"{pesticide}_counts.png",
++        )
++
++        row_sum = matrix.sum(axis=1, keepdims=True)
++        normalized = np.divide(
++            matrix,
++            row_sum,
++            out=np.zeros_like(matrix, dtype=np.float64),
++            where=row_sum > 0,
++        )
++        pd.DataFrame(
++            normalized,
++            index=["true_absent", "true_present"],
++            columns=["pred_absent", "pred_present"],
++        ).to_csv(output_directory / f"{pesticide}_row_normalized.csv")
++        _plot_matrix(
++            normalized,
++            ["Absent", "Present"],
++            f"{pesticide} confusion matrix (row normalized)",
++            output_directory / f"{pesticide}_row_normalized.png",
++            value_format=".3f",
++        )
++
++
++def _save_cooccurrence_matrices(
++    y_true: np.ndarray,
++    y_pred: np.ndarray,
++    output_directory: Path,
++) -> None:
++    output_directory.mkdir(parents=True, exist_ok=True)
++    for size in (2, 3):
++        for indices in combinations(range(len(PESTICIDES)), size):
++            names = [PESTICIDES[index] for index in indices]
++            true_joint = np.all(y_true[:, indices] > 0, axis=1).astype(np.int64)
++            pred_joint = np.all(y_pred[:, indices] > 0, axis=1).astype(np.int64)
++            matrix = confusion_matrix(true_joint, pred_joint, labels=[0, 1])
++            stem = "_".join(names)
++            pd.DataFrame(
++                matrix,
++                index=["true_not_joint", "true_joint"],
++                columns=["pred_not_joint", "pred_joint"],
++            ).to_csv(output_directory / f"{stem}.csv")
++            _plot_matrix(
++                matrix,
++                ["Not joint", "Joint"],
++                f"{' + '.join(names)} co-occurrence",
++                output_directory / f"{stem}.png",
++            )
++
++
++def _save_roc_plot(
++    y_true: np.ndarray,
++    probabilities: np.ndarray,
++    output_path: Path,
++) -> None:
++    fig, ax = plt.subplots(figsize=(6, 5))
++    valid_curves: list[tuple[np.ndarray, np.ndarray]] = []
++    for index, pesticide in enumerate(PESTICIDES):
++        truth = y_true[:, index]
++        if np.unique(truth).size < 2:
++            continue
++        fpr, tpr, _ = roc_curve(truth, probabilities[:, index])
++        label_auc = auc(fpr, tpr)
++        ax.plot(fpr, tpr, label=f"{pesticide} (AUC={label_auc:.3f})")
++        valid_curves.append((fpr, tpr))
++
++    if valid_curves:
++        grid = np.linspace(0.0, 1.0, 201)
++        interpolated = [np.interp(grid, fpr, tpr) for fpr, tpr in valid_curves]
++        macro_tpr = np.mean(interpolated, axis=0)
++        macro_auc = auc(grid, macro_tpr)
++        ax.plot(grid, macro_tpr, linestyle="--", label=f"Macro ROC (AUC={macro_auc:.3f})")
++
++    ax.plot([0, 1], [0, 1], linestyle=":", label="Chance")
++    ax.set_xlabel("False Positive Rate")
++    ax.set_ylabel("True Positive Rate")
++    ax.set_title("Multilabel ROC curves")
++    ax.legend()
++    fig.tight_layout()
++    output_path.parent.mkdir(parents=True, exist_ok=True)
++    fig.savefig(output_path, dpi=300, bbox_inches="tight")
++    plt.close(fig)
++
++
++def _save_regression_plots(
++    frame: pd.DataFrame,
++    output_directory: Path,
++    target_mode: str,
++) -> None:
++    output_directory.mkdir(parents=True, exist_ok=True)
++    y_label = "Concentration" if target_mode == "physical" else "Concentration level code"
++
++    for pesticide in PESTICIDES:
++        truth_class = frame[f"true_class_{pesticide}"].to_numpy(dtype=int)
++        present = truth_class > 0
++        truth = frame[f"true_concentration_{pesticide}"].to_numpy(dtype=float)
++        pred = frame[f"pred_concentration_{pesticide}"].to_numpy(dtype=float)
++
++        fig, ax = plt.subplots(figsize=(5, 5))
++        ax.scatter(truth[present], pred[present], s=18, alpha=0.7)
++        if present.any():
++            lo = float(min(np.min(truth[present]), np.min(pred[present])))
++            hi = float(max(np.max(truth[present]), np.max(pred[present])))
++            ax.plot([lo, hi], [lo, hi], linestyle="--")
++        ax.set_xlabel(f"True {y_label}")
++        ax.set_ylabel(f"Predicted {y_label}")
++        ax.set_title(f"{pesticide}: predicted vs true")
++        fig.tight_layout()
++        fig.savefig(
++            output_directory / f"{pesticide}_predicted_vs_true.png",
++            dpi=300,
++            bbox_inches="tight",
++        )
++        plt.close(fig)
++
++        # Article-style concentration violin: prediction distributions grouped by
++        # the corresponding true concentration/level.
++        unique_targets = np.unique(truth[present]) if present.any() else np.array([])
++        groups = [pred[present & np.isclose(truth, value)] for value in unique_targets]
++        groups = [group for group in groups if group.size > 0]
++        if groups:
++            fig, ax = plt.subplots(figsize=(6, 5))
++            positions = np.arange(1, len(groups) + 1)
++            ax.violinplot(groups, positions=positions, showmeans=True, showmedians=True)
++            ax.set_xticks(positions)
++            ax.set_xticklabels([f"{value:g}" for value in unique_targets])
++            ax.set_xlabel(f"True {y_label}")
++            ax.set_ylabel(f"Predicted {y_label}")
++            ax.set_title(f"{pesticide}: prediction distribution by true level")
++            fig.tight_layout()
++            fig.savefig(
++                output_directory / f"{pesticide}_violin.png",
++                dpi=300,
++                bbox_inches="tight",
++            )
++            plt.close(fig)
++
++
++def _stratified_metrics(
++    frame: pd.DataFrame,
++    threshold: float,
++) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
++    class_true = frame[[f"true_class_{p}" for p in PESTICIDES]].to_numpy(dtype=int)
++    class_prob = frame[[f"prob_class_{p}" for p in PESTICIDES]].to_numpy(dtype=float)
++    complexity = class_true.sum(axis=1)
++
++    def compute_subset(mask: np.ndarray, label: str, category: str) -> dict[str, Any]:
++        y = class_true[mask]
++        p = class_prob[mask]
++        if y.shape[0] == 0:
++            return {"category": category, "group": label, "n": 0}
++        metrics, _, _ = _classification_metrics(y, p, threshold)
++        return {"category": category, "group": label, "n": int(y.shape[0]), **metrics}
++
++    complexity_rows = []
++    names = {1: "single", 2: "binary", 3: "ternary"}
++    for value in (1, 2, 3):
++        complexity_rows.append(
++            compute_subset(complexity == value, names[value], "mixture_complexity")
++        )
++
++    matrix_rows = []
++    matrix_values = frame["matrix"].astype(str).to_numpy()
++    for matrix_name in sorted(set(matrix_values.tolist())):
++        matrix_rows.append(
++            compute_subset(matrix_values == matrix_name, matrix_name, "matrix")
++        )
++
++    combination_rows = []
++    pattern_names = []
++    for row in class_true:
++        names_present = [p for p, value in zip(PESTICIDES, row) if value > 0]
++        pattern_names.append("+".join(names_present) if names_present else "none")
++    pattern_names = np.asarray(pattern_names, dtype=object)
++    for pattern in sorted(set(pattern_names.tolist())):
++        combination_rows.append(
++            compute_subset(pattern_names == pattern, pattern, "pesticide_combination")
++        )
++
++    return (
++        pd.DataFrame(complexity_rows),
++        pd.DataFrame(matrix_rows),
++        pd.DataFrame(combination_rows),
+     )
+-    dataset = {
+-        "train": train_dataset,
+-        "validation": validation_dataset,
+-        "test": test_dataset,
+-    }[args.split]
+ 
++
++def _plot_training_history(history_path: Path, output_directory: Path) -> None:
++    if not history_path.exists():
++        return
++    frame = pd.read_csv(history_path)
++    if frame.empty or "epoch" not in frame.columns:
++        return
++    output_directory.mkdir(parents=True, exist_ok=True)
++
++    groups = [
++        (
++            "loss_curves.png",
++            ["train_loss_total", "validation_loss_total", "train_loss_class", "validation_loss_class", "train_loss_reg", "validation_loss_reg"],
++            "Training and validation losses",
++            "Loss",
++        ),
++        (
++            "classification_curves.png",
++            ["train_class_f1_micro", "validation_class_f1_micro", "train_class_f1_macro", "validation_class_f1_macro", "train_class_auroc_macro", "validation_class_auroc_macro"],
++            "Classification metrics during training",
++            "Score",
++        ),
++        (
++            "regression_curves.png",
++            ["train_reg_rmse_present", "validation_reg_rmse_present", "train_reg_mae_present", "validation_reg_mae_present", "train_reg_r2_present", "validation_reg_r2_present"],
++            "Regression metrics during training",
++            "Metric",
++        ),
++    ]
++    for filename, candidates, title, ylabel in groups:
++        available = [column for column in candidates if column in frame.columns]
++        if not available:
++            continue
++        fig, ax = plt.subplots(figsize=(7, 5))
++        for column in available:
++            ax.plot(frame["epoch"], frame[column], label=column)
++        ax.set_xlabel("Epoch")
++        ax.set_ylabel(ylabel)
++        ax.set_title(title)
++        ax.legend(fontsize=8)
++        fig.tight_layout()
++        fig.savefig(output_directory / filename, dpi=300, bbox_inches="tight")
++        plt.close(fig)
++
++
++def _collect_predictions(
++    checkpoint: dict[str, Any],
++    dataset,
++    device: torch.device,
++    batch_size: int,
++    num_workers: int,
++) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, pd.DataFrame]:
+     loader = DataLoader(
+         dataset,
+-        batch_size=args.batch_size,
++        batch_size=batch_size,
+         shuffle=False,
+-        num_workers=args.num_workers,
++        num_workers=num_workers,
+         pin_memory=(device.type == "cuda"),
+-        persistent_workers=(args.num_workers > 0),
++        persistent_workers=(num_workers > 0),
+     )
+ 
+     model = TransformerClassifyRegress_sep(**checkpoint["model_config"])
+@@ -68,7 +545,7 @@ def main() -> None:
+     class_probabilities: list[np.ndarray] = []
+     concentration_targets: list[np.ndarray] = []
+     concentration_predictions: list[np.ndarray] = []
+-    rows: list[dict[str, object]] = []
++    rows: list[dict[str, Any]] = []
+ 
+     with torch.no_grad():
+         for batch in loader:
+@@ -79,7 +556,6 @@ def main() -> None:
+                 "valid_mask": batch["valid_mask"].to(device, non_blocking=True),
+             }
+             class_pred, reg_pred = model(model_batch)
+-
+             class_true_np = batch["class_target"].numpy()
+             class_prob_np = class_pred.cpu().numpy()
+             reg_true_np = batch["concentration_target"].numpy()
+@@ -90,9 +566,8 @@ def main() -> None:
+             concentration_targets.append(reg_true_np)
+             concentration_predictions.append(reg_pred_np)
+ 
+-            batch_size = class_true_np.shape[0]
+-            for row_index in range(batch_size):
+-                row: dict[str, object] = {
++            for row_index in range(class_true_np.shape[0]):
++                row: dict[str, Any] = {
+                     "condition": batch["condition"][row_index],
+                     "matrix": batch["matrix_name"][row_index],
+                     "source": batch["source"][row_index],
+@@ -102,13 +577,11 @@ def main() -> None:
+                     "target_mode": batch["target_mode"][row_index],
+                 }
+                 for pesticide_index, pesticide in enumerate(PESTICIDES):
+-                    probability = float(class_prob_np[row_index, pesticide_index])
+                     row[f"true_class_{pesticide}"] = int(
+                         class_true_np[row_index, pesticide_index]
+                     )
+-                    row[f"prob_class_{pesticide}"] = probability
+-                    row[f"pred_class_{pesticide}"] = int(
+-                        probability >= args.classification_threshold
++                    row[f"prob_class_{pesticide}"] = float(
++                        class_prob_np[row_index, pesticide_index]
+                     )
+                     row[f"true_concentration_{pesticide}"] = float(
+                         reg_true_np[row_index, pesticide_index]
+@@ -118,31 +591,233 @@ def main() -> None:
+                     )
+                 rows.append(row)
+ 
+-    y_class = np.concatenate(class_targets, axis=0)
+-    p_class = np.concatenate(class_probabilities, axis=0)
+-    y_reg = np.concatenate(concentration_targets, axis=0)
+-    p_reg = np.concatenate(concentration_predictions, axis=0)
++    return (
++        np.concatenate(class_targets, axis=0),
++        np.concatenate(class_probabilities, axis=0),
++        np.concatenate(concentration_targets, axis=0),
++        np.concatenate(concentration_predictions, axis=0),
++        pd.DataFrame(rows),
++    )
+ 
+-    metrics = merge_metrics(
+-        multilabel_classification_metrics(
+-            y_class, p_class, threshold=args.classification_threshold
+-        ),
+-        regression_metrics(y_reg, p_reg, y_class),
++
++def evaluate_split(
++    *,
++    checkpoint: dict[str, Any],
++    dataset,
++    split: str,
++    output_directory: Path,
++    device: torch.device,
++    batch_size: int,
++    num_workers: int,
++    classification_threshold: float,
++) -> dict[str, Any]:
++    split_dir = output_directory / split
++    split_dir.mkdir(parents=True, exist_ok=True)
++
++    y_class, p_class, y_reg, p_reg, frame = _collect_predictions(
++        checkpoint,
++        dataset,
++        device,
++        batch_size,
++        num_workers,
++    )
++    classification, per_pesticide, y_pred = _classification_metrics(
++        y_class,
++        p_class,
++        classification_threshold,
++    )
++    regression, regression_per_pesticide = _regression_metrics(
++        y_reg,
++        p_reg,
++        y_class,
++        y_pred,
++    )
++
++    for index, pesticide in enumerate(PESTICIDES):
++        frame[f"pred_class_{pesticide}"] = y_pred[:, index]
++    frame.to_csv(split_dir / "predictions.csv", index=False)
++    per_pesticide.to_csv(split_dir / "classification_per_pesticide.csv", index=False)
++    regression_per_pesticide.to_csv(
++        split_dir / "regression_per_pesticide.csv", index=False
++    )
++
++    complexity, matrix_metrics, combination_metrics = _stratified_metrics(
++        frame, classification_threshold
++    )
++    complexity.to_csv(split_dir / "metrics_by_mixture_complexity.csv", index=False)
++    matrix_metrics.to_csv(split_dir / "metrics_by_matrix.csv", index=False)
++    combination_metrics.to_csv(split_dir / "metrics_by_pesticide_combination.csv", index=False)
++
++    _save_confusion_matrices(
++        y_class,
++        y_pred,
++        split_dir / "confusion_matrices",
++    )
++    _save_cooccurrence_matrices(
++        y_class,
++        y_pred,
++        split_dir / "cooccurrence_matrices",
++    )
++    _save_roc_plot(y_class, p_class, split_dir / "roc_curves.png")
++    target_mode = str(frame["target_mode"].iloc[0]) if not frame.empty else "unknown"
++    _save_regression_plots(
++        frame,
++        split_dir / "regression_plots",
++        target_mode,
+     )
+ 
+-    args.output_directory.mkdir(parents=True, exist_ok=True)
+-    predictions_path = args.output_directory / f"predictions_{args.split}.csv"
+-    metrics_path = args.output_directory / f"metrics_{args.split}.json"
+-    pd.DataFrame(rows).to_csv(predictions_path, index=False)
+-    with metrics_path.open("w", encoding="utf-8") as handle:
+-        json.dump(metrics, handle, ensure_ascii=False, indent=2)
++    result = {
++        "split": split,
++        "samples": int(len(dataset)),
++        "target_mode": target_mode,
++        "classification": classification,
++        "regression": regression,
++    }
++    with (split_dir / "metrics.json").open("w", encoding="utf-8") as handle:
++        json.dump(result, handle, ensure_ascii=False, indent=2, allow_nan=True)
+ 
+-    print(f"split: {args.split}")
++    lines = [
++        f"split: {split}",
++        f"samples: {len(dataset)}",
++        f"target_mode: {target_mode}",
++        "",
++        "[Multilabel classification]",
++    ]
++    for key, value in classification.items():
++        lines.append(f"{key}: {value}")
++    lines.extend(["", "[Regression]"])
++    for scope, values in regression.items():
++        lines.append(f"{scope}: {values}")
++    if target_mode != "physical":
++        lines.extend(
++            [
++                "",
++                "WARNING: concentration targets are ordinal level codes 0/1/2/3,",
++                "not physical concentration values. Do not report these regression",
++                "numbers as final quantitative concentration performance.",
++            ]
++        )
++    (split_dir / "evaluation_report.txt").write_text("\n".join(lines), encoding="utf-8")
++
++    print(f"===== {split.upper()} EVALUATION =====")
+     print(f"samples: {len(dataset)}")
+-    print(f"predictions: {predictions_path}")
+-    print(f"metrics: {metrics_path}")
+-    for key in sorted(metrics):
+-        print(f"{key}: {metrics[key]}")
++    print(
++        "classification: "
++        f"exact_acc={classification['multilabel_exact_match_accuracy']:.4f}, "
++        f"F1_macro={classification['f1_macro']:.4f}, "
++        f"F1_micro={classification['f1_micro']:.4f}, "
++        f"AUROC_macro={classification['auroc_macro']:.4f}"
++    )
++    present_metrics = regression["present_targets_only"]
++    print(
++        "regression present-only: "
++        f"MAE={present_metrics['mae']}, RMSE={present_metrics['rmse']}, "
++        f"R2={present_metrics['r2']}"
++    )
++    print(f"saved: {split_dir}")
++    return result
++
++
++def evaluate_checkpoint(
++    *,
++    checkpoint_path: str | Path,
++    output_directory: str | Path,
++    device_name: str = "cuda",
++    batch_size: int = 64,
++    num_workers: int = 4,
++    classification_threshold: float = 0.5,
++    splits: Iterable[str] = ("test",),
++    training_history_path: str | Path | None = None,
++) -> dict[str, Any]:
++    checkpoint_path = Path(checkpoint_path)
++    output_directory = Path(output_directory)
++    output_directory.mkdir(parents=True, exist_ok=True)
++    device = _resolve_device(device_name)
++
++    checkpoint = torch.load(checkpoint_path, map_location="cpu")
++    concentration_map = checkpoint.get("concentration_map")
++    train_dataset, validation_dataset, test_dataset = build_datasets(
++        include_generated_train=False,
++        concentration_map=concentration_map,
++    )
++    datasets = {
++        "train": train_dataset,
++        "validation": validation_dataset,
++        "test": test_dataset,
++    }
++
++    split_results: dict[str, Any] = {}
++    for split in splits:
++        if split not in datasets:
++            raise ValueError(f"Unknown split for evaluation: {split}")
++        split_results[split] = evaluate_split(
++            checkpoint=checkpoint,
++            dataset=datasets[split],
++            split=split,
++            output_directory=output_directory,
++            device=device,
++            batch_size=batch_size,
++            num_workers=num_workers,
++            classification_threshold=classification_threshold,
++        )
++
++    if training_history_path is not None:
++        _plot_training_history(Path(training_history_path), output_directory / "training_curves")
++
++    split_description = str(checkpoint.get("data_config", {}).get("split", "unknown"))
++    split_warning = None
++    if "within each source file" in split_description.lower() or "12/4/4" in split_description.lower():
++        split_warning = (
++            "Current 12/4/4 split places mapping spectra from the same source file in "
++            "train/validation/test. If one source file represents one independent sample, "
++            "these metrics are not an independent-sample generalization estimate. A final "
++            "paper experiment should split by source_file/sample_id."
++        )
++
++    summary = {
++        "checkpoint": str(checkpoint_path.resolve()),
++        "classification_threshold": float(classification_threshold),
++        "splits": split_results,
++        "evaluation_notes": {
++            "threshold_policy": (
++                "Fixed threshold supplied before test evaluation; test set is not used "
++                "for threshold tuning."
++            ),
++            "sersformer2_metrics": (
++                "multilabel accuracy/precision/recall/F1, per-label confusion matrices, "
++                "co-occurrence matrices, ROC/AUROC, MSE/R2 and concentration violins"
++            ),
++            "additional_metrics": (
++                "MAE/RMSE, per-pesticide regression, classification-gated end-to-end "
++                "regression, and single/binary/ternary + matrix stratification"
++            ),
++            "data_split": split_description,
++            "data_split_warning": split_warning,
++        },
++    }
++    with (output_directory / "evaluation_summary.json").open(
++        "w", encoding="utf-8"
++    ) as handle:
++        json.dump(summary, handle, ensure_ascii=False, indent=2, allow_nan=True)
++    return summary
++
++
++def main() -> None:
++    args = parse_args()
++    if args.split == "all":
++        splits = ("train", "validation", "test")
++    else:
++        splits = (args.split,)
++    evaluate_checkpoint(
++        checkpoint_path=args.checkpoint,
++        output_directory=args.output_directory,
++        device_name=args.device,
++        batch_size=args.batch_size,
++        num_workers=args.num_workers,
++        classification_threshold=args.classification_threshold,
++        splits=splits,
++        training_history_path=args.training_history,
++    )
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/Model_v2.py b/Model_v2.py
+index 3f81f41..1e67f1c 100644
+--- a/Model_v2.py
++++ b/Model_v2.py
+@@ -14,8 +14,9 @@ Key design points:
+ - Every query can attend to every *valid* Raman token.
+ - Training-data-derived peak priors add a positive soft bias to attention logits;
+   they never delete non-peak regions.
+-- valid_mask remains authoritative. A short 1401-point spectrum cannot attend to
+-  padded 2000-2500 cm^-1 positions even if a pesticide prior has a peak there.
++- valid_mask remains authoritative for any unavailable Raman positions.
++- The formal downstream model uses the common 600-2000 cm^-1 range to prevent
++  source-axis length from leaking the CHL label.
+ - The public forward interface remains [classification_probability, concentration].
+ """
+ 
+@@ -30,7 +31,7 @@ import torch.nn.functional as F
+ from torch import Tensor
+ 
+ 
+-DEFAULT_MODEL_LENGTH = 1901
++DEFAULT_MODEL_LENGTH = 1401
+ 
+ 
+ def _conv_pool_output_length(length: int) -> int:
+diff --git a/SERSFormer_Training.py b/SERSFormer_Training.py
+index bec9856..f446a83 100644
+--- a/SERSFormer_Training.py
++++ b/SERSFormer_Training.py
+@@ -21,8 +21,10 @@ import torch.nn as nn
+ from torch.utils.data import DataLoader
+ 
+ from Dataset import (
++    MODEL_LENGTH,
+     MODEL_RAMAN_AXIS,
+     PESTICIDES,
++    build_axis_label_audit,
+     build_datasets,
+     build_training_peak_priors,
+     load_concentration_map,
+@@ -81,6 +83,25 @@ def parse_args() -> argparse.Namespace:
+ 
+     parser.add_argument("--max-train-batches", type=int, default=None)
+     parser.add_argument("--max-validation-batches", type=int, default=None)
++    parser.add_argument(
++        "--skip-final-evaluation",
++        action="store_true",
++        help="Skip automatic validation/test evaluation after training (useful for smoke tests).",
++    )
++    parser.add_argument(
++        "--final-test-evaluation",
++        action="store_true",
++        help=(
++            "After training, also open the held-out test set for final reporting. "
++            "Leave this off during model development/tuning."
++        ),
++    )
++    parser.add_argument(
++        "--evaluation-threshold",
++        type=float,
++        default=0.5,
++        help="Fixed multilabel probability threshold. Test data are never used to tune it.",
++    )
+     return parser.parse_args()
+ 
+ 
+@@ -264,6 +285,18 @@ def main() -> None:
+         concentration_map=concentration_map,
+     )
+ 
++    axis_audit = build_axis_label_audit(train_dataset.repository)
++    with (output_directory / "axis_label_audit.json").open("w", encoding="utf-8") as handle:
++        json.dump(axis_audit, handle, ensure_ascii=False, indent=2)
++
++    print("===== Source-axis label audit =====")
++    print(json.dumps(axis_audit["pesticide_by_source_axis"], ensure_ascii=False, indent=2))
++    print(
++        f"Model input is restricted to common Raman range "
++        f"{MODEL_RAMAN_AXIS[0]:.0f}-{MODEL_RAMAN_AXIS[-1]:.0f} cm^-1 "
++        f"({MODEL_LENGTH} points) to prevent axis-length label leakage."
++    )
++
+     print("===== Dataset =====")
+     print(f"train      : {len(train_dataset)}")
+     print(f"validation : {len(validation_dataset)}")
+@@ -316,7 +349,7 @@ def main() -> None:
+         "batch_f": True,
+         "encoder_layers": args.encoder_layers,
+         "n_labels": len(PESTICIDES),
+-        "model_length": 1901,
++        "model_length": MODEL_LENGTH,
+         "peak_guidance_strength_init": args.peak_guidance_strength,
+     }
+     model = TransformerClassifyRegress_sep(**model_config)
+@@ -355,8 +388,12 @@ def main() -> None:
+         "include_generated": bool(args.include_generated),
+         "maximum_generated_per_condition": args.maximum_generated_per_condition,
+         "split": "12/4/4 within each source file",
+-        "model_axis": "600-2500 cm^-1, 1901 points",
+-        "short_axis_handling": "zero padding + valid_mask; generated tail masked by matching real condition",
++        "model_axis": "600-2000 cm^-1 common range, 1401 points",
++        "source_axis_handling": (
++            "original 1401/1901-point acquisitions are both restricted to the common "
++            "600-2000 cm^-1 model range; valid_mask remains supported"
++        ),
++        "axis_label_audit": axis_audit,
+         "peak_prior_fit": "real training spectra only; validation/test/generated excluded",
+         "peak_prior_summary": peak_prior_summary,
+         "target_mode": train_dataset.repository.target_mode,
+@@ -484,7 +521,30 @@ def main() -> None:
+             indent=2,
+         )
+ 
+-    print(f"Training complete. Best checkpoint: {checkpoint_directory / 'best.pt'}")
++    best_checkpoint = checkpoint_directory / "best.pt"
++    print(f"Training complete. Best checkpoint: {best_checkpoint}")
++
++    if not args.skip_final_evaluation:
++        print("===== Automatic comprehensive evaluation =====")
++        from Inference import evaluate_checkpoint
++
++        evaluation_splits = ("validation", "test") if args.final_test_evaluation else ("validation",)
++        if not args.final_test_evaluation:
++            print(
++                "Held-out test set remains sealed. Use --final-test-evaluation only "
++                "for the final frozen model."
++            )
++
++        evaluate_checkpoint(
++            checkpoint_path=best_checkpoint,
++            output_directory=output_directory / "evaluation",
++            device_name=args.device,
++            batch_size=max(args.batch_size, 64),
++            num_workers=args.num_workers,
++            classification_threshold=args.evaluation_threshold,
++            splits=evaluation_splits,
++            training_history_path=output_directory / "training_history.csv",
++        )
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/tests/test_common_axis_and_evaluation.py b/tests/test_common_axis_and_evaluation.py
+new file mode 100644
+index 0000000..3ad919b
+--- /dev/null
++++ b/tests/test_common_axis_and_evaluation.py
+@@ -0,0 +1,84 @@
++import numpy as np
++
++from Dataset import (
++    MODEL_LENGTH,
++    MODEL_RAMAN_AXIS,
++    _adapt_spectrum_to_model_axis,
++)
++from Inference import _classification_metrics, _regression_metrics
++
++
++def test_common_axis_removes_1401_1901_length_cue():
++    short_axis = np.arange(600.0, 2001.0, 1.0)
++    long_axis = np.arange(600.0, 2501.0, 1.0)
++    short_signal = np.sin(short_axis / 100.0)
++    long_signal = np.sin(long_axis / 100.0)
++
++    short_adapted, short_mask = _adapt_spectrum_to_model_axis(
++        short_axis, short_signal
++    )
++    long_adapted, long_mask = _adapt_spectrum_to_model_axis(
++        long_axis, long_signal
++    )
++
++    assert MODEL_LENGTH == 1401
++    assert MODEL_RAMAN_AXIS[0] == 600.0
++    assert MODEL_RAMAN_AXIS[-1] == 2000.0
++    assert short_adapted.shape == (1401,)
++    assert long_adapted.shape == (1401,)
++    assert short_mask.all()
++    assert long_mask.all()
++    np.testing.assert_allclose(short_adapted, long_adapted, atol=1e-6)
++
++
++def test_multilabel_metrics_and_regression_scopes_are_finite():
++    y_true = np.array(
++        [
++            [1, 0, 0],
++            [1, 1, 0],
++            [0, 1, 1],
++            [1, 1, 1],
++        ],
++        dtype=np.int64,
++    )
++    probabilities = np.array(
++        [
++            [0.9, 0.2, 0.1],
++            [0.8, 0.7, 0.2],
++            [0.2, 0.8, 0.9],
++            [0.8, 0.9, 0.7],
++        ],
++        dtype=np.float64,
++    )
++    classification, per_pesticide, y_pred = _classification_metrics(
++        y_true, probabilities, 0.5
++    )
++
++    assert classification["multilabel_exact_match_accuracy"] == 1.0
++    assert classification["f1_macro"] == 1.0
++    assert len(per_pesticide) == 3
++
++    y_reg = np.array(
++        [
++            [1.0, 0.0, 0.0],
++            [2.0, 1.0, 0.0],
++            [0.0, 2.0, 1.0],
++            [3.0, 3.0, 3.0],
++        ]
++    )
++    p_reg = y_reg + np.array(
++        [
++            [0.1, 0.1, 0.0],
++            [-0.1, 0.1, 0.1],
++            [0.0, -0.1, 0.1],
++            [0.1, -0.1, 0.1],
++        ]
++    )
++    regression, per_reg = _regression_metrics(y_reg, p_reg, y_true, y_pred)
++
++    assert regression["present_targets_only"]["n"] == int(y_true.sum())
++    assert regression["sersformer2_conditional_correctly_detected_present"]["n"] == int(
++        y_true.sum()
++    )
++    assert np.isfinite(regression["present_targets_only"]["mae"])
++    assert len(per_reg) == 9

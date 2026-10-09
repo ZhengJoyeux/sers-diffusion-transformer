@@ -7,7 +7,7 @@ Engineering adaptations only (not paper-method innovations):
 - fixed 12/4/4 real split per source file
 - generated spectra are training-only
 - use a uniform 600-2500 cm^-1 model axis (1901 points)
-- require every real source spectrum to genuinely cover the full model range
+- complete missing high-wavenumber tails in memory with reproducible background noise
 - preserve negative baseline-corrected SERS values with signed-log1p preprocessing
 
 The output order of pesticide targets is always: [DEL, CHL, TEB].
@@ -237,6 +237,18 @@ def _adapt_spectrum_to_model_axis(
     if axis.size != spectrum.size:
         raise ValueError("axis and spectrum lengths differ")
 
+    # Direct single-spectrum callers use the same runtime completion as
+    # repository loading. No source file is opened for writing.
+    if _classify_raw_axis_coverage(axis) in {"short_2000", "short_tail"}:
+        source_digest = hashlib.sha256(
+            axis.tobytes() + spectrum.tobytes()
+        ).hexdigest()
+        axis, completed, _ = _impute_missing_tail_to_2500_with_noise(
+            axis, spectrum[:, np.newaxis],
+            source_key=f"single-spectrum|{source_digest}",
+        )
+        spectrum = completed[:, 0]
+
     valid_mask = _mask_for_source_axis(axis)
     if allowed_mask is not None:
         allowed_mask = np.asarray(allowed_mask, dtype=np.bool_)
@@ -444,19 +456,19 @@ def _estimate_background_noise_sigma(
     return background_level, sigma
 
 
-def _impute_missing_2000_2500_tail_with_noise(
+def _impute_missing_tail_to_2500_with_noise(
     axis: np.ndarray,
     spectra: np.ndarray,
     *,
     source_key: str,
 ) -> tuple[np.ndarray, np.ndarray, bool]:
     """
-    Extend ONLY genuine 600-2000 cm^-1 real spectra to 2500 cm^-1.
+    Complete any valid spectrum starting near 600 and ending before 2500.
 
-    Existing 600-2000 values are preserved.
+    Only model-axis positions beyond the actual measured endpoint are filled.
     Existing 600-2500 spectra are returned unchanged.
 
-    Missing 2001-2500 points are filled with deterministic correlated
+    Missing tail points are filled with deterministic correlated
     background noise whose scale is estimated independently from each
     measured spectrum.
 
@@ -480,15 +492,21 @@ def _impute_missing_2000_2500_tail_with_noise(
             f"Expected spectra matrix [points, spectra], got {spectra.shape}"
         )
 
+    if (
+        axis.ndim != 1 or axis.size < 2
+        or spectra.shape[0] != axis.size or spectra.shape[1] < 1
+        or not np.isfinite(axis).all() or not np.isfinite(spectra).all()
+        or not np.all(np.diff(axis) > 0)
+    ):
+        raise ValueError("Expected a finite increasing axis and matching finite spectra")
+
     # --------------------------------------------------------
     # Case 1:
     # Already contains genuine 600-2500 data -> DO NOTHING.
     # --------------------------------------------------------
     if (
-        float(axis[0])
-        <= 600.0 + FULL_AXIS_COVERAGE_TOLERANCE_CM1
-        and float(axis[-1])
-        >= 2500.0 - FULL_AXIS_COVERAGE_TOLERANCE_CM1
+        abs(float(axis[0]) - 600.0) <= FULL_AXIS_COVERAGE_TOLERANCE_CM1
+        and float(axis[-1]) >= 2500.0
     ):
         return (
             axis.astype(np.float32, copy=False),
@@ -498,30 +516,28 @@ def _impute_missing_2000_2500_tail_with_noise(
 
     # --------------------------------------------------------
     # Case 2:
-    # The intended special case: genuine 600-2000 data.
-    # Only this case is allowed to use noise-tail imputation.
+    # General missing high-wavenumber tail, based on the actual endpoint.
     # --------------------------------------------------------
     if not (
-        float(axis[0])
-        <= 600.0 + FULL_AXIS_COVERAGE_TOLERANCE_CM1
-        and 1999.0
-        <= float(axis[-1])
-        <= 2001.0
+        abs(float(axis[0]) - 600.0) <= FULL_AXIS_COVERAGE_TOLERANCE_CM1
+        and axis.size >= 31
+        and 600.0 < float(axis[-1]) < 2500.0
     ):
         raise RuntimeError(
-            "Noise-tail imputation is only allowed for real spectra "
-            "that genuinely cover approximately 600-2000 cm^-1. "
+            "Runtime tail completion requires at least 31 finite measured "
+            "points, an increasing axis starting near 600 cm^-1, "
+            "and an endpoint below 2500 cm^-1. "
             f"Received axis {float(axis[0]):.1f}-"
             f"{float(axis[-1]):.1f} cm^-1 "
             f"({int(axis.size)} points)."
         )
 
     measured_axis = MODEL_RAMAN_AXIS[
-        MODEL_RAMAN_AXIS <= 2000.0
+        MODEL_RAMAN_AXIS <= float(axis[-1])
     ]
 
     tail_axis = MODEL_RAMAN_AXIS[
-        MODEL_RAMAN_AXIS > 2000.0
+        MODEL_RAMAN_AXIS > float(axis[-1])
     ]
 
     number_of_spectra = int(
@@ -536,7 +552,7 @@ def _impute_missing_2000_2500_tail_with_noise(
         dtype=np.float32,
     )
 
-    # Preserve/interpolate the genuinely measured 600-2000 range only.
+    # Preserve/interpolate only the genuinely measured range.
     for spectrum_index in range(number_of_spectra):
         measured = np.interp(
             measured_axis.astype(np.float64),
@@ -662,9 +678,9 @@ def _impute_missing_2000_2500_tail_with_noise(
                 )
             )
 
-        # Blend the baseline from the measured 2000 cm^-1 end point
+        # Blend the baseline from the last measured model-axis point
         # toward the estimated local background. This avoids a sharp
-        # discontinuity exactly at 2000/2001 cm^-1.
+        # discontinuity at the measured/synthetic boundary.
         measured_end = float(
             measured[-1]
         )
@@ -709,6 +725,18 @@ def _impute_missing_2000_2500_tail_with_noise(
 
 
 
+def _impute_missing_2000_2500_tail_with_noise(
+    axis: np.ndarray,
+    spectra: np.ndarray,
+    *,
+    source_key: str,
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Compatibility alias; now accepts any valid missing tail before 2500."""
+    return _impute_missing_tail_to_2500_with_noise(
+        axis, spectra, source_key=source_key,
+    )
+
+
 def _classify_raw_axis_coverage(
     axis: np.ndarray,
 ) -> str:
@@ -717,7 +745,8 @@ def _classify_raw_axis_coverage(
 
     Returns:
         "full_2500"  : approximately 600-2500 cm^-1
-        "short_2000" : approximately 600-2000 cm^-1
+        "short_2000" : approximately 600-2000 cm^-1 (legacy category)
+        "short_tail" : another valid endpoint below 2500 cm^-1
         "other"      : unexpected range; never silently imputed
     """
     axis = np.asarray(
@@ -725,7 +754,10 @@ def _classify_raw_axis_coverage(
         dtype=np.float64,
     )
 
-    if axis.size < 2:
+    if (
+        axis.ndim != 1 or axis.size < 2
+        or not np.isfinite(axis).all() or not np.all(np.diff(axis) > 0)
+    ):
         return "other"
 
     start = float(axis[0])
@@ -743,17 +775,20 @@ def _classify_raw_axis_coverage(
         start_ok
         and end
         >= float(MODEL_RAMAN_AXIS[-1])
-        - FULL_AXIS_COVERAGE_TOLERANCE_CM1
     ):
         return "full_2500"
 
     if (
         start_ok
+        and axis.size >= 31
         and 1999.0
         <= end
         <= 2001.0
     ):
         return "short_2000"
+
+    if start_ok and axis.size >= 31 and 600.0 < end < 2500.0:
+        return "short_tail"
 
     return "other"
 
@@ -768,7 +803,7 @@ def _audit_raw_input_root(
     Important:
     - every spectrum column is counted;
     - nothing is written back to disk;
-    - this audit happens before any 2001-2500 tail is synthesized.
+    - this audit happens before any missing tail is synthesized.
     """
     root = Path(root)
 
@@ -820,7 +855,7 @@ def _audit_raw_input_root(
             )
         )
 
-        if coverage == "short_2000":
+        if coverage in {"short_2000", "short_tail"}:
             short_file_count += 1
             short_spectrum_count += (
                 number_of_spectra
@@ -938,7 +973,7 @@ def audit_input_axis_coverage(
         )
 
         print(
-            "point counts          =",
+            "raw point counts      =",
             summary[
                 "point_count_distribution"
             ],
@@ -993,8 +1028,8 @@ def audit_input_axis_coverage(
         )
 
         raise RuntimeError(
-            "Found Raman-axis ranges other than "
-            "approximately 600-2000 or 600-2500 cm^-1. "
+            "Found invalid axes or axes not starting near 600 cm^-1. "
+            "Missing-tail sources must have at least 31 measured points. "
             "These files will NOT be silently completed:\n"
             + preview
         )
@@ -1006,6 +1041,8 @@ def audit_input_axis_coverage(
     print(
         "No Excel/CSV file has been modified."
     )
+    print("Runtime model axis: 600-2500 cm^-1, 1901 points.")
+    print("Raw point counts describe stored files BEFORE in-memory completion.")
     print(
         "========================================"
     )
@@ -1043,7 +1080,8 @@ class SERSDataRepository:
 
         self.generated_tail_imputation_summary: dict[str, Any] = {
             "method": "deterministic_background_noise_tail",
-            "range_cm-1": [2001.0, 2500.0],
+            "range_policy": "model-axis positions beyond each source endpoint up to 2500 cm^-1",
+            "target_end_cm-1": 2500.0,
             "imputed_file_count": 0,
             "imputed_spectrum_count": 0,
             "note": (
@@ -1074,7 +1112,7 @@ class SERSDataRepository:
             original_axis_points = int(axis.size)
 
             axis, spectra, tail_imputed = (
-                _impute_missing_2000_2500_tail_with_noise(
+                _impute_missing_tail_to_2500_with_noise(
                     axis,
                     spectra,
                     source_key=str(path),
@@ -1103,17 +1141,22 @@ class SERSDataRepository:
                 "axis": axis,
                 "spectra": spectra,
                 "names": names,
+                "original_axis_start_cm-1": original_axis_start,
+                "original_axis_end_cm-1": original_axis_end,
+                "original_axis_points": original_axis_points,
+                "tail_imputed": bool(tail_imputed),
                 "valid_mask": _mask_for_source_axis(axis),
                 "condition_info": info,
             }
 
         self.tail_imputation_summary = {
             "method": "deterministic_background_noise_tail",
-            "range_cm-1": [2001.0, 2500.0],
+            "range_policy": "model-axis positions beyond each source endpoint up to 2500 cm^-1",
+            "target_end_cm-1": 2500.0,
             "imputed_file_count": int(len(imputed_full_axis)),
             "imputed_files": list(imputed_full_axis),
             "note": (
-                "Only real source files ending near 2000 cm^-1 are extended. "
+                "All valid real source files ending before 2500 cm^-1 are completed in memory. "
                 "Existing genuine 600-2500 cm^-1 files are unchanged."
             ),
         }
@@ -1126,7 +1169,7 @@ class SERSDataRepository:
                 f"imputed files: {len(imputed_full_axis)}"
             )
             print(
-                "range: 2001-2500 cm^-1"
+                "range: beyond each measured endpoint to 2500 cm^-1"
             )
             print(
                 "method: deterministic background-matched noise"
@@ -1166,9 +1209,12 @@ class SERSDataRepository:
             original_number_of_spectra = int(
                 spectra.shape[1]
             )
+            original_axis_start = float(axis[0])
+            original_axis_end = float(axis[-1])
+            original_axis_points = int(axis.size)
 
             axis, spectra, tail_imputed = (
-                _impute_missing_2000_2500_tail_with_noise(
+                _impute_missing_tail_to_2500_with_noise(
                     axis,
                     spectra,
                     source_key=f"generated|{path}",
@@ -1187,6 +1233,9 @@ class SERSDataRepository:
                 "spectra": spectra,
                 "names": names,
                 "original_axis_coverage": original_coverage,
+                "original_axis_start_cm-1": original_axis_start,
+                "original_axis_end_cm-1": original_axis_end,
+                "original_axis_points": original_axis_points,
                 "tail_imputed": bool(
                     tail_imputed
                 ),
@@ -1197,7 +1246,8 @@ class SERSDataRepository:
 
         self.generated_tail_imputation_summary = {
             "method": "deterministic_background_noise_tail",
-            "range_cm-1": [2001.0, 2500.0],
+            "range_policy": "model-axis positions beyond each source endpoint up to 2500 cm^-1",
+            "target_end_cm-1": 2500.0,
             "imputed_file_count": int(
                 imputed_generated_files
             ),
@@ -1205,8 +1255,8 @@ class SERSDataRepository:
                 imputed_generated_spectra
             ),
             "note": (
-                "Only generated source files ending near "
-                "2000 cm^-1 were completed. "
+                "All valid generated source files ending before "
+                "2500 cm^-1 were completed in memory. "
                 "Existing 600-2500 cm^-1 generated spectra "
                 "were left unchanged."
             ),
@@ -1226,7 +1276,7 @@ class SERSDataRepository:
             imputed_generated_spectra,
         )
         print(
-            "range           = 2001-2500 cm^-1"
+            "range           = beyond each measured endpoint to 2500 cm^-1"
         )
         print(
             "disk files      = unchanged"
@@ -1246,7 +1296,7 @@ def build_axis_label_audit(repository: SERSDataRepository) -> dict[str, Any]:
     axis_lengths: dict[int, int] = {}
 
     for record in repository.real_data.values():
-        source_length = int(len(record["axis"]))
+        source_length = int(record.get("original_axis_points", len(record["axis"])))
         axis_lengths[source_length] = axis_lengths.get(source_length, 0) + 1
         info: ConditionInfo = record["condition_info"]
         for pesticide_index, pesticide in enumerate(PESTICIDES):
@@ -1263,8 +1313,8 @@ def build_axis_label_audit(repository: SERSDataRepository) -> dict[str, Any]:
         "model_axis_points": int(MODEL_LENGTH),
         "mitigation": (
             "Before training, all raw real/generated source axes are audited. "
-            "Files genuinely ending near 2000 cm^-1 are completed only in memory "
-            "for 2001-2500 cm^-1 using deterministic background-matched noise. "
+            "All valid files ending below 2500 cm^-1 are completed only in memory "
+            "beyond their measured endpoints using deterministic background-matched noise. "
             "Existing 600-2500 cm^-1 spectra are left unchanged."
         ),
     }
@@ -2152,6 +2202,24 @@ def build_chemistry_hybrid_peak_priors(
     return hybrid_prior, summary
 
 
+# Fixed per-condition generated subset, seed=2026 (random24-v1).
+def _generated_sample_indices(condition, number, maximum, seed=2026):
+    if maximum is None:
+        return list(range(number))
+    maximum = int(maximum)
+    if maximum < 0:
+        raise ValueError("maximum_generated_per_condition must be non-negative")
+    if maximum >= number:
+        return list(range(number))
+    # A separate stable stream for each full condition; independent of file order.
+    digest = hashlib.sha256(f"{seed}\0{condition}".encode("utf-8")).digest()
+    condition_seed = int.from_bytes(digest[:16], "big")
+    rng = np.random.Generator(np.random.PCG64(condition_seed))
+    # Prefixes of the same permutation support nested 12/24/48 subset comparisons.
+    selected = rng.permutation(number)[:maximum]
+    return sorted(int(index) for index in selected)
+
+
 class SERSDataset(Dataset):
     """
     Real-only validation/test; generated spectra may be added only to training.
@@ -2200,9 +2268,10 @@ class SERSDataset(Dataset):
             assert repository.generated_data is not None
             for condition in sorted(repository.generated_data):
                 number = int(repository.generated_data[condition]["spectra"].shape[1])
-                if maximum_generated_per_condition is not None:
-                    number = min(number, int(maximum_generated_per_condition))
-                for spectrum_index in range(number):
+                selected_indices = _generated_sample_indices(
+                    condition, number, maximum_generated_per_condition, seed=2026
+                )
+                for spectrum_index in selected_indices:
                     self.samples.append(
                         SampleRef(
                             source="generated",
@@ -2233,9 +2302,9 @@ class SERSDataset(Dataset):
             source_path = generated_record["path"]
             spectrum_name = generated_record["names"][ref.spectrum_index]
 
-            # Generated files may extend to 2500 cm^-1, but the downstream
-            # model deliberately uses only the common 600-2000 cm^-1 range so
-            # Raman-axis length cannot leak the CHL label.
+            # Both sources are completed in memory to the same model range.
+            # Respect any repository-level allowed_mask without discarding
+            # measured data merely because another source was shorter.
             adapted, valid_mask = _adapt_spectrum_to_model_axis(
                 axis,
                 spectrum,
@@ -2246,6 +2315,7 @@ class SERSDataset(Dataset):
 
         return {
             "raw": torch.from_numpy(raw).float(),
+            "raw_intensity": torch.from_numpy(adapted[np.newaxis, :].copy()).float(),
             "percentile": torch.from_numpy(percentile).float(),
             "smoothed": torch.from_numpy(smoothed).float(),
             "valid_mask": torch.from_numpy(valid_mask.copy()).bool(),
@@ -2266,6 +2336,40 @@ class SERSDataset(Dataset):
             "spectrum_index": int(ref.spectrum_index),
             "target_mode": self.repository.target_mode,
         }
+
+
+def collect_real_training_intensities(dataset: SERSDataset) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """T3.13: normalization input from fixed real training rows, never generated.
+
+    Source-axis adaptation follows the existing dataset path; this helper does
+    not alter the split, file contents, tail policy or the three legacy inputs.
+    """
+    if dataset.split != "train":
+        raise ValueError("Local quantitative normalization accepts the training dataset only")
+    rows: list[np.ndarray] = []
+    masks: list[np.ndarray] = []
+    per_condition: dict[str, int] = {}
+    seen: set[tuple[str, int]] = set()
+    for ref in dataset.samples:
+        if ref.source != "real":
+            continue
+        key = (ref.condition, int(ref.spectrum_index))
+        if ref.spectrum_index not in REAL_TRAIN_INDICES or key in seen:
+            raise RuntimeError("Local normalization received a non-training or duplicate real row")
+        seen.add(key)
+        record = dataset.repository.real_data[ref.condition]
+        values, valid = _adapt_spectrum_to_model_axis(record["axis"], record["spectra"][:, ref.spectrum_index])
+        rows.append(values[np.newaxis, :])
+        masks.append(valid)
+        per_condition[ref.condition] = per_condition.get(ref.condition, 0) + 1
+    if (not rows or set(per_condition) != set(dataset.repository.real_data)
+            or any(count != len(REAL_TRAIN_INDICES) for count in per_condition.values())):
+        raise RuntimeError("Local normalization requires exactly 12 real training rows per condition")
+    return np.stack(rows).astype(np.float32), np.stack(masks), {
+        "real_training_rows": len(rows), "conditions": len(per_condition),
+        "spectra_per_condition": len(REAL_TRAIN_INDICES),
+        "generated_rows_used": 0, "validation_rows_used": 0, "test_rows_used": 0,
+    }
 
 
 def build_datasets(

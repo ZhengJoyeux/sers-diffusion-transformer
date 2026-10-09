@@ -1,0 +1,95 @@
+{
+  "status": "PASS",
+  "scope": "Local artificial spectra/checkpoints only",
+  "python": "3.12.14",
+  "pytorch": "2.11.0+cpu",
+  "python_311_syntax": "PASS",
+  "model_tests": 15,
+  "model_test_duration_seconds": 57.088,
+  "model_checks": [
+    "Pre-fusion query cache and exact zero-change initialization",
+    "Only permitted parameters have requires_grad",
+    "Fusion/head/residual weights actually update",
+    "Original state and classification probabilities remain unchanged",
+    "Residual control matches previous residual math",
+    "CORN ordering and labels absent from inference",
+    "Train-only normalization and measured-tail masks",
+    "Self-contained checkpoint reload preserves trained copied modules",
+    "Same adoption guard rejects actual historical regressions",
+    "CORN masking and matched loss",
+    "Accepted and original-fallback checkpoint branches",
+    "Two-arm scheduler and full cache building"
+  ],
+  "entry_validation": {
+    "status": "PASS",
+    "scope": "Artificial spectra and artificial checkpoint only; actual main functions with explicit dataset mocks",
+    "training_mains": [
+      "concentration_update",
+      "residual_control"
+    ],
+    "inference_mains": [
+      "concentration_update",
+      "residual_control"
+    ],
+    "no_refits_during_inference": true,
+    "test_reads": 0,
+    "no_training_reads_during_inference": true,
+    "history_report_and_transitions": true,
+    "historical_comparison_table": true,
+    "server_real_training": false
+  },
+  "source_guard_validation": {
+    "status": "PASS",
+    "artificial_data_only": true,
+    "check_entry_passed": true,
+    "restore_passed": true,
+    "original_files_unchanged": true,
+    "rejections": [
+      {
+        "target": "project/Dataset.py",
+        "returncode": 1
+      },
+      {
+        "target": "baseline/checkpoints/best_ordinal.pt",
+        "returncode": 1
+      },
+      {
+        "target": "weighted.pt",
+        "returncode": 1
+      },
+      {
+        "target": "project/data/real/artificial_0.csv",
+        "returncode": 1
+      },
+      {
+        "target": "previous/no_reference/checkpoints/recommended.pt",
+        "returncode": 1
+      },
+      {
+        "target": "protected_previous/protected/checkpoints/best_candidate.pt",
+        "returncode": 1
+      }
+    ],
+    "server_training": false
+  },
+  "configuration": {
+    "epochs": 50,
+    "batch_size": 16,
+    "learning_rate": 1e-05,
+    "minimum_learning_rate": 1e-07,
+    "warmup_epochs": 3,
+    "train_sources": {
+      "real": 1512,
+      "generated": 6048
+    },
+    "validation": 504,
+    "test_predictions": 0,
+    "baseline_parameters": 1267823,
+    "residual_control_trainable": 40742,
+    "concentration_update_trainable": 185583,
+    "concentration_update_total": 1453406,
+    "residual_control_total": 1308565
+  },
+  "server_training_performed": false,
+  "real_accuracy_improvement_claimed": false
+}

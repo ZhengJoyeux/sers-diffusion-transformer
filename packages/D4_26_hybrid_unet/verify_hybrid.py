@@ -1,0 +1,155 @@
+"""Synthetic optimizer/EMA smoke check; does not alter a trained checkpoint."""
+import argparse
+import copy
+import json
+from pathlib import Path
+import sys
+import torch
+from contextlib import contextmanager
+
+
+@contextmanager
+def controlled_copy_inference(model, ema_model):
+    """Check copied weights under matching, deterministic FP32 execution.
+
+    Scoped to this diagnostic process; never changes training configuration.
+    Restore every flag even when the strict comparison raises.
+    """
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+    parameters = [(p, p.requires_grad) for net in (model, ema_model) for p in net.parameters()]
+    settings = (
+        torch.backends.mha.get_fastpath_enabled(),
+        torch.backends.cudnn.benchmark,
+        torch.backends.cudnn.deterministic,
+        torch.backends.cudnn.allow_tf32,
+        torch.backends.cuda.matmul.allow_tf32,
+    )
+    try:
+        for param, _ in parameters:
+            param.requires_grad_(False)
+        torch.backends.mha.set_fastpath_enabled(False)
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.allow_tf32 = False
+        torch.backends.cuda.matmul.allow_tf32 = False
+        with torch.no_grad(), sdpa_kernel(SDPBackend.MATH):
+            yield
+    finally:
+        for param, flag in parameters:
+            param.requires_grad_(flag)
+        torch.backends.mha.set_fastpath_enabled(settings[0])
+        torch.backends.cudnn.benchmark = settings[1]
+        torch.backends.cudnn.deterministic = settings[2]
+        torch.backends.cudnn.allow_tf32 = settings[3]
+        torch.backends.cuda.matmul.allow_tf32 = settings[4]
+
+
+def verify_ema_copy(model, ema_model, x, time, mask, condition, base):
+    online_state, copied_state = model.state_dict(), ema_model.state_dict()
+    if online_state.keys() != copied_state.keys():
+        raise RuntimeError('EMA复制状态键不一致。')
+    for name, value in online_state.items():
+        copied = copied_state[name]
+        if value.dtype != copied.dtype or value.device != copied.device or not torch.equal(value, copied):
+            raise RuntimeError(f'EMA初次复制状态不一致: {name}')
+        if value.numel() and value.data_ptr() == copied.data_ptr():
+            raise RuntimeError(f'EMA与原模型共享状态存储: {name}')
+    if any(net.training for net in (model, ema_model)):
+        raise RuntimeError('EMA输出比较要求两个模型均为eval。')
+
+    def outputs():
+        kwargs = dict(valid_mask=mask, condition=condition, prior_conditioning=base)
+        y = model(x, time, **kwargs)
+        z = ema_model(x, time, **kwargs)
+        for label, result in (('online', y), ('ema', z)):
+            if result.shape != x.shape or not torch.isfinite(result).all():
+                raise RuntimeError(f'{label}推理输出形状错误或含非有限值。')
+            if torch.count_nonzero(result * (1 - mask)):
+                raise RuntimeError(f'{label}推理输出无效尾部未归零。')
+        return y, z
+
+    with torch.no_grad():
+        native_y, native_z = outputs()
+    native_difference = float((native_y - native_z).abs().max().cpu())
+    native_close = bool(torch.isclose(native_y, native_z, rtol=1e-5, atol=1e-6).all())
+    # Do not relax tolerances to hide dispatch differences. Instead compare
+    # matching frozen models with the SAME explicit math/backend settings.
+    with controlled_copy_inference(model, ema_model):
+        y, z = outputs()
+        torch.testing.assert_close(y, z, rtol=1e-5, atol=1e-6)
+    return {
+        'ema_deepcopy_match': True,
+        'ema_state_exact_match': True,
+        'ema_state_storage_independent': True,
+        'ema_native_output_max_abs_difference': native_difference,
+        'ema_native_output_within_strict_tolerance': native_close,
+        'ema_output_max_abs_difference': float((y-z).abs().max().cpu()),
+        'ema_output_rtol': 1e-5, 'ema_output_atol': 1e-6,
+        'ema_comparison_mode': 'frozen_eval_math_sdpa_no_tf32_deterministic_cudnn',
+    }
+
+
+def main():
+    p=argparse.ArgumentParser();p.add_argument('--project',required=True,type=Path)
+    p.add_argument('--config',required=True,type=Path);p.add_argument('--device',default='cpu')
+    p.add_argument('--checkpoint',type=Path);a=p.parse_args()
+    sys.path.insert(0,str(a.project.resolve()))
+    from src.configuration_loader import load_configuration
+    from src.model_builder import build_diffusion_model
+    from src.hybrid_unet_configuration import validate_hybrid_context
+    cfg=load_configuration(a.config);torch.manual_seed(2026)
+    if a.checkpoint:
+        from src.checkpoint_manager import load_checkpoint_file
+        from src.conditional_prior_residual import ConditionalPriorResidualBank
+        from scripts.generate_conditional_spectra import _load_model_state
+        checkpoint=load_checkpoint_file(a.checkpoint)
+        cfg=checkpoint['configuration'];hybrid=validate_hybrid_context(cfg)
+        expected=validate_hybrid_context(load_configuration(a.config))
+        if hybrid!=expected:raise RuntimeError('配置与checkpoint的Transformer架构不符。')
+        model,diffusion=build_diffusion_model(cfg,1904)
+        if (cfg.get('diversity_constraints',{}) or {}).get('enabled',False):
+            state=checkpoint['metadata'].get('diversity_constraint_state')
+            if not isinstance(state,dict):raise RuntimeError('checkpoint缺少多样性约束状态。')
+            diffusion.configure_diversity_constraints(diversity_constraint_state=state)
+        _load_model_state(diffusion,checkpoint,'ema')
+        bank=ConditionalPriorResidualBank.from_state_dict(checkpoint['metadata']['conditional_prior_residual_state'])
+        summary=bank.summary()
+        if (summary['number_of_conditions']!=126 or summary['total_training_spectra']!=1512
+            or summary['training_spectra_per_condition']!=[12]
+            or summary['valid_lengths']!={'1401':30,'1901':96}):
+            raise RuntimeError('checkpoint没有完整的126条件/1512训练谱。')
+        print('CHECKPOINT EMA STRICT LOAD PASS',json.dumps(summary,ensure_ascii=False))
+        return
+    model,_=build_diffusion_model(cfg,1904)
+    if model.bottleneck_transformer is None:raise RuntimeError('验证脚本要求启用新结构。')
+    if str(a.device).startswith('cuda') and not torch.cuda.is_available():raise RuntimeError('CUDA不可用。')
+    model=model.to(a.device);model.train()
+    x=torch.randn(2,1,1904,device=a.device)*.1;m=torch.zeros_like(x);m[0,:,:1401]=1;m[1,:,:1901]=1
+    condition=torch.randn(2,14,device=a.device);base=torch.randn_like(x)*.1
+    time=torch.tensor([0,100],device=a.device)
+    optimizer=torch.optim.Adam(model.parameters(),lr=1e-3)
+    losses=[]
+    for _ in range(3):
+        optimizer.zero_grad();y=model(x,time,valid_mask=m,condition=condition,prior_conditioning=base)
+        loss=(((y-x)*m)**2).sum()/m.sum()
+        if not torch.isfinite(loss):raise RuntimeError('合成检查loss非有限。')
+        loss.backward();optimizer.step();losses.append(float(loss.detach().cpu()))
+    gradients={}
+    for name,param in model.named_parameters():
+        if any(s in name for s in ('self_attention.in_proj_weight','cross_attention.in_proj_weight','condition_film.weight')):
+            if param.grad is None or not torch.isfinite(param.grad).all() or not param.grad.abs().sum()>0:
+                raise RuntimeError(f'缺少有限非零梯度: {name}')
+            gradients[name]=float(param.grad.abs().sum().cpu())
+    if torch.count_nonzero(y*(1-m)):raise RuntimeError('输出无效尾部未归零。')
+    from ema_pytorch import EMA
+    ema=EMA(model,beta=.995,update_after_step=0);ema.update()
+    model.eval();ema.ema_model.eval()
+    ema_checks=verify_ema_copy(model,ema.ema_model,x,time,m,condition,base)
+    result={'synthetic_only':True,'device':a.device,'losses':losses,'gradient_checks':gradients,
+            'masked_tail_zero':True,**ema_checks,'parameter_count':sum(p.numel() for p in model.parameters())}
+    if str(a.device).startswith('cuda'):result['peak_cuda_memory_bytes']=torch.cuda.max_memory_allocated()
+    print('HYBRID SYNTHETIC CHECK PASS');print(json.dumps(result,ensure_ascii=False,indent=2))
+    print('只更新内存中的合成检查模型；未保存checkpoint；不能代表生成质量。')
+
+
+if __name__=='__main__':main()

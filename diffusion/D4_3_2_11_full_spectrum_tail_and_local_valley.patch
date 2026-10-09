@@ -1,0 +1,1231 @@
+diff --git a/config/ddpm_training_d4_3_formal.yaml b/config/ddpm_training_d4_3_formal.yaml
+index d49b844..1a10446 100644
+--- a/config/ddpm_training_d4_3_formal.yaml
++++ b/config/ddpm_training_d4_3_formal.yaml
+@@ -1,7 +1,7 @@
+ project:
+-  # D4.3.2.10让残差U-Net显式接收本批次实际抽取的条件先验谱，
+-  # 训练和生成统一学习p(local residual | sampled prior, condition)。
+-  name: d4_3_2_10_prior_conditioned_residual_formal
++  # D4.3.2.11不修改QQ评价定义：训练端在完整归一化重建谱上约束
++  # 四段分位跨度；生成端仅用同条件training分布做双向软校准。
++  name: d4_3_2_11_full_spectrum_tail_guided_formal
+   random_seed: 2026
+ diagnostic_overfit:
+   enabled: false
+@@ -192,8 +192,8 @@ diversity_constraints:
+     enabled: false
+   quality_fidelity:
+     enabled: true
+-    total_weight: 0.08
+-    maximum_total_ratio_to_ddpm: 0.08
++    total_weight: 0.1
++    maximum_total_ratio_to_ddpm: 0.1
+     high_noise_sampling:
+       enabled: true
+       sampling_probability: 0.25
+@@ -250,6 +250,34 @@ diversity_constraints:
+       smooth_l1_beta: 0.05
+       minimum_group_size: 4
+       weight: 1.0
++    # 关键修复：原约束只看到robust-asinh缩放后的local residual。
++    # 这里用train-only反变换局部斜率，把pred_x0误差映射回完整的
++    # checkpoint归一化光谱，再同时限制四段QQ跨度过宽和过窄。
++    full_spectrum_tail_distribution:
++      enabled: true
++      piecewise_probabilities:
++      - 0.01
++      - 0.1
++      - 0.5
++      - 0.9
++      - 0.99
++      segment_weights:
++      - 1.5
++      - 0.5
++      - 0.5
++      - 1.5
++      minimum_segment_span_ratio: 0.9
++      maximum_segment_span_ratio: 1.1
++      maximum_timestep_fraction: 0.5
++      minimum_group_size: 4
++      pointwise_scale_floor_quantile: 10.0
++      reconstruction_smooth_l1_beta: 0.01
++      span_smooth_l1_beta: 0.02
++      reconstruction_weight: 0.75
++      span_weight: 1.0
++      short_axis_maximum_points: 1500
++      short_axis_weight_multiplier: 1.4
++      epsilon: 1.0e-6
+ feature_peak_residual_limiter:
+   enabled: false
+ local_peak_distribution_constraints:
+@@ -299,11 +327,11 @@ training:
+   maximum_validation_batches: 0
+   validation_random_seed: 2026001
+ output:
+-  output_directory: outputs/experiments/d4_3_2_10_prior_conditioned_residual_formal
+-  checkpoint_directory: outputs/experiments/d4_3_2_10_prior_conditioned_residual_formal/checkpoints
+-  log_directory: outputs/experiments/d4_3_2_10_prior_conditioned_residual_formal/logs
+-  generated_spectrum_directory: outputs/experiments/d4_3_2_10_prior_conditioned_residual_formal/generated
+-  preview_plot_directory: outputs/experiments/d4_3_2_10_prior_conditioned_residual_formal/plots
++  output_directory: outputs/experiments/d4_3_2_11_full_spectrum_tail_guided_formal
++  checkpoint_directory: outputs/experiments/d4_3_2_11_full_spectrum_tail_guided_formal/checkpoints
++  log_directory: outputs/experiments/d4_3_2_11_full_spectrum_tail_guided_formal/logs
++  generated_spectrum_directory: outputs/experiments/d4_3_2_11_full_spectrum_tail_guided_formal/generated
++  preview_plot_directory: outputs/experiments/d4_3_2_11_full_spectrum_tail_guided_formal/plots
+   latest_checkpoint_name: latest.pt
+   best_checkpoint_name: best.pt
+   training_log_name: training_log.csv
+@@ -346,13 +374,13 @@ generation:
+     - 0.5
+     - 0.9
+     - 0.99
+-    minimum_segment_span_ratio: 0.9
+-    maximum_segment_span_ratio: 1.1
+-    correction_strength: 0.6
++    minimum_segment_span_ratio: 0.92
++    maximum_segment_span_ratio: 1.08
++    correction_strength: 0.75
+     maximum_absolute_correction_z: 0.4
+     axis_profiles:
+       '1401':
+-        correction_strength_multiplier: 1.25
++        correction_strength_multiplier: 1.1
+         maximum_absolute_correction_z_multiplier: 1.5
+       '1901':
+         correction_strength_multiplier: 0.75
+@@ -364,7 +392,7 @@ generation:
+         correction_strength_multiplier: 1.15
+       '3':
+         correction_strength_multiplier: 0.9
+-    minimum_postcalibration_pairwise_mse_ratio: 0.82
++    minimum_postcalibration_pairwise_mse_ratio: 0.86
+     diversity_guard_search_iterations: 20
+     diversity_guard_pair_count: 10000
+     lower_probability: 0.01
+@@ -398,6 +426,14 @@ generation:
+     maximum_softness_intensity: 2.0
+     enforce_training_global_extrema: true
+     maximum_modified_fraction: 0.05
++    # 条件自适应连续深谷保护。只使用当前条件自己的12条training，
++    # 不设置统一-40下限；若该条件真实负背景可到-100则自动保留。
++    condition_negative_background_quantile: 0.01
++    condition_negative_background_iqr_margin: 0.5
++    minimum_condition_negative_count: 64
++    local_negative_support_quantile: 0.1
++    minimum_negative_valley_contiguous_points: 3
++    severe_negative_depth_iqr_multiplier: 3.0
+   peak_diversity_evaluation:
+     baseline_sigma_cm1: 30.0
+     smoothing_sigma_cm1: 2.0
+diff --git a/scripts/generate_conditional_spectra.py b/scripts/generate_conditional_spectra.py
+index 51cd1dc..2399343 100644
+--- a/scripts/generate_conditional_spectra.py
++++ b/scripts/generate_conditional_spectra.py
+@@ -636,6 +636,15 @@ def main() -> None:
+                 f"{envelope_diagnostics['maximum_before']:.3f} -> "
+                 f"{envelope_diagnostics['maximum_after']:.3f}"
+             )
++            print(
++                "  条件负背景深谷保护：training背景下限="
++                f"{envelope_diagnostics['condition_negative_background_floor']:.3f}；"
++                "候选/实际回拉点="
++                f"{envelope_diagnostics['negative_valley_candidate_point_count']}/"
++                f"{envelope_diagnostics['negative_valley_retained_point_count']}；"
++                "最小连续点="
++                f"{envelope_diagnostics['minimum_negative_valley_contiguous_points']}"
++            )
+         for path in paths:
+             print(f"  已写出：{path}")
+ 
+diff --git a/scripts/start_ddpm_training.py b/scripts/start_ddpm_training.py
+index c5581d9..c02b387 100644
+--- a/scripts/start_ddpm_training.py
++++ b/scripts/start_ddpm_training.py
+@@ -1747,6 +1747,7 @@ def main() -> None:
+ 
+     constraint_reconstruction_bases_full = None
+     prior_conditionings_full = None
++    local_inverse_slopes_full = None
+ 
+     spectra_for_model = (
+         normalized_full_spectra.copy()
+@@ -1794,6 +1795,14 @@ def main() -> None:
+                 valid_masks=valid_masks_on_model_axis,
+                 condition_ids=condition_ids_on_spectra,
+             )
++            local_inverse_slopes_full = (
++                conditional_prior_residual_bank
++                .local_inverse_linearization_slopes(
++                    spectra_for_model,
++                    valid_masks=valid_masks_on_model_axis,
++                    condition_ids=condition_ids_on_spectra,
++                )
++            )
+         else:
+             spectra_for_model = conditional_prior_residual_bank.transform(
+                 normalized_full_spectra,
+@@ -2446,6 +2455,22 @@ def main() -> None:
+             padded_prior_conditionings * padded_valid_masks
+         ).astype(np.float32, copy=False)
+ 
++    padded_full_spectrum_targets = None
++    padded_local_inverse_slopes = None
++    if local_inverse_slopes_full is not None:
++        padded_full_spectrum_targets = length_adapter.adapt(
++            normalized_full_spectra
++        )
++        padded_full_spectrum_targets = (
++            padded_full_spectrum_targets * padded_valid_masks
++        ).astype(np.float32, copy=False)
++        padded_local_inverse_slopes = length_adapter.adapt(
++            local_inverse_slopes_full
++        )
++        padded_local_inverse_slopes = (
++            padded_local_inverse_slopes * padded_valid_masks
++        ).astype(np.float32, copy=False)
++
+     if not np.isfinite(
+         padded_spectra
+     ).all():
+@@ -2507,6 +2532,8 @@ def main() -> None:
+             ),
+             conditions=conditions_on_spectra,
+             prior_conditionings=padded_prior_conditionings,
++            full_spectrum_targets=padded_full_spectrum_targets,
++            local_inverse_slopes=padded_local_inverse_slopes,
+         )
+     )
+ 
+@@ -2848,6 +2875,8 @@ def main() -> None:
+         valid_mask = batch.get("valid_mask")
+         condition = batch.get("condition")
+         prior_conditioning = batch.get("prior_conditioning")
++        full_spectrum_target = batch.get("full_spectrum_target")
++        local_inverse_slope = batch.get("local_inverse_slope")
+         if valid_mask is None or condition is None:
+             raise RuntimeError(
+                 "D4.2管线自检缺少valid_mask或condition。"
+@@ -2858,12 +2887,18 @@ def main() -> None:
+         condition = condition.to(device)
+         if prior_conditioning is not None:
+             prior_conditioning = prior_conditioning.to(device)
++        if full_spectrum_target is not None:
++            full_spectrum_target = full_spectrum_target.to(device)
++        if local_inverse_slope is not None:
++            local_inverse_slope = local_inverse_slope.to(device)
+         diffusion = diffusion.to(device).train()
+         loss = diffusion(
+             spectrum,
+             valid_mask=valid_mask,
+             condition=condition,
+             prior_conditioning=prior_conditioning,
++            full_spectrum_target=full_spectrum_target,
++            local_inverse_slope=local_inverse_slope,
+         )
+         if loss.ndim != 0 or not torch.isfinite(loss):
+             raise RuntimeError("D4.2真实batch损失不是有限标量。")
+diff --git a/src/conditional_prior_residual.py b/src/conditional_prior_residual.py
+index 25f2e28..06c2d68 100644
+--- a/src/conditional_prior_residual.py
++++ b/src/conditional_prior_residual.py
+@@ -390,6 +390,64 @@ class ConditionalPriorResidualBank:
+             raise RuntimeError("条件先验残差重建产生NaN或无穷值。")
+         return reconstructed.astype(np.float32, copy=False)
+ 
++    def local_inverse_linearization_slopes(
++        self,
++        scaled_local_residuals: np.ndarray,
++        *,
++        valid_masks: np.ndarray,
++        condition_ids: Sequence[str],
++        finite_difference_step: float = 1.0e-3,
++    ) -> np.ndarray:
++        """Return d(local_raw)/d(local_scaled) around every real spectrum.
++
++        The local residual uses a nonlinear robust-asinh transform.  Training
++        losses that are evaluated only in that scaled domain can therefore
++        under-penalize an error that becomes a very high peak or a deep valley
++        after inverse transformation.  These train-only finite-difference
++        slopes provide a differentiable first-order reconstruction around the
++        true local residual.  The corresponding full-spectrum loss is gated to
++        low/middle noise levels where this local approximation is reliable.
++        """
++
++        values = _as_2d_finite(
++            scaled_local_residuals, "scaled_local_residuals"
++        )
++        masks = _as_2d_finite(valid_masks, "valid_masks")
++        if values.shape != masks.shape:
++            raise ValueError(
++                "scaled_local_residuals与valid_masks形状必须一致。"
++            )
++        if self.model_axis is None or values.shape[1] != self.model_axis.size:
++            raise ValueError("局部残差长度与条件先验库模型轴不一致。")
++        conditions = self._condition_array(condition_ids, values.shape[0])
++        step = float(finite_difference_step)
++        if not np.isfinite(step) or not 1.0e-5 <= step <= 1.0e-1:
++            raise ValueError("finite_difference_step必须位于[1e-5,1e-1]。")
++
++        slopes = np.zeros_like(values, dtype=np.float32)
++        for condition_id in sorted(set(str(value) for value in conditions)):
++            entry = self._entry(condition_id)
++            indices = np.flatnonzero(conditions == condition_id)
++            for index in indices:
++                if _valid_prefix_length(masks[index]) != entry.valid_length:
++                    raise ValueError(
++                        f"条件{condition_id}的线性化掩码与训练状态不一致。"
++                    )
++            active = values[indices, : entry.valid_length]
++            upper = entry.broad_local.inverse_local_transform(active + step)
++            lower = entry.broad_local.inverse_local_transform(active - step)
++            active_slopes = (upper - lower) / (2.0 * step)
++            if not np.isfinite(active_slopes).all() or np.any(
++                active_slopes <= 0.0
++            ):
++                raise RuntimeError(
++                    f"条件{condition_id}的局部残差反变换斜率无效。"
++                )
++            slopes[indices, : entry.valid_length] = active_slopes.astype(
++                np.float32, copy=False
++            )
++        return slopes
++
+     def valid_length(self, condition_id: str) -> int:
+         return self._entry(condition_id).valid_length
+ 
+diff --git a/src/ddpm_trainer.py b/src/ddpm_trainer.py
+index 547a637..e234984 100644
+--- a/src/ddpm_trainer.py
++++ b/src/ddpm_trainer.py
+@@ -219,6 +219,8 @@ class DdpmTrainer:
+         torch.Tensor | None,
+         torch.Tensor | None,
+         torch.Tensor | None,
++        torch.Tensor | None,
++        torch.Tensor | None,
+     ]:
+         """兼容历史batch、PCA先验、D4掩码和D4.1条件。"""
+ 
+@@ -226,6 +228,8 @@ class DdpmTrainer:
+         valid_mask = None
+         condition = None
+         prior_conditioning = None
++        full_spectrum_target = None
++        local_inverse_slope = None
+         if isinstance(batch, dict):
+             if "spectrum" not in batch:
+                 raise KeyError("数据集字典batch缺少spectrum。")
+@@ -234,6 +238,8 @@ class DdpmTrainer:
+             valid_mask = batch.get("valid_mask")
+             condition = batch.get("condition")
+             prior_conditioning = batch.get("prior_conditioning")
++            full_spectrum_target = batch.get("full_spectrum_target")
++            local_inverse_slope = batch.get("local_inverse_slope")
+         elif isinstance(batch, (tuple, list)):
+             spectrum = batch[0]
+             if len(batch) > 1:
+@@ -287,12 +293,38 @@ class DdpmTrainer:
+             if not torch.isfinite(prior_conditioning).all():
+                 raise ValueError("prior_conditioning包含NaN或无穷值。")
+ 
++        for name, value in (
++            ("full_spectrum_target", full_spectrum_target),
++            ("local_inverse_slope", local_inverse_slope),
++        ):
++            if value is None:
++                continue
++            if not torch.is_tensor(value):
++                raise TypeError(f"{name}必须是torch.Tensor。")
++            value = value.to(self.device, non_blocking=True)
++            if value.shape != spectrum.shape:
++                raise ValueError(f"{name}形状必须与spectrum一致。")
++            if not torch.isfinite(value).all():
++                raise ValueError(f"{name}包含NaN或无穷值。")
++            if name == "full_spectrum_target":
++                full_spectrum_target = value
++            else:
++                if torch.any(value < 0.0):
++                    raise ValueError("local_inverse_slope不能为负。")
++                local_inverse_slope = value
++        if (full_spectrum_target is None) != (local_inverse_slope is None):
++            raise ValueError(
++                "full_spectrum_target与local_inverse_slope必须同时提供。"
++            )
++
+         return (
+             spectrum,
+             reference_prior,
+             valid_mask,
+             condition,
+             prior_conditioning,
++            full_spectrum_target,
++            local_inverse_slope,
+         )
+ 
+     def _calculate_loss(
+@@ -302,6 +334,8 @@ class DdpmTrainer:
+         valid_mask: torch.Tensor | None,
+         condition: torch.Tensor | None = None,
+         prior_conditioning: torch.Tensor | None = None,
++        full_spectrum_target: torch.Tensor | None = None,
++        local_inverse_slope: torch.Tensor | None = None,
+     ) -> torch.Tensor:
+         arguments = {}
+ 
+@@ -330,6 +364,12 @@ class DdpmTrainer:
+                 raise RuntimeError("当前扩散模型不支持prior_conditioning。")
+             arguments["prior_conditioning"] = prior_conditioning
+ 
++        if full_spectrum_target is not None or local_inverse_slope is not None:
++            if full_spectrum_target is None or local_inverse_slope is None:
++                raise ValueError("完整谱训练上下文必须成对提供。")
++            arguments["full_spectrum_target"] = full_spectrum_target
++            arguments["local_inverse_slope"] = local_inverse_slope
++
+         if constraint_reference_prior is None:
+             return self.diffusion(spectrum, **arguments)
+         if not bool(
+@@ -353,6 +393,8 @@ class DdpmTrainer:
+         torch.Tensor | None,
+         torch.Tensor | None,
+         torch.Tensor | None,
++        torch.Tensor | None,
++        torch.Tensor | None,
+     ]:
+         if self._training_iterator is None:
+             self._training_iterator = iter(self.training_loader)
+@@ -491,6 +533,8 @@ class DdpmTrainer:
+                         valid_mask,
+                         condition,
+                         prior_conditioning,
++                        full_spectrum_target,
++                        local_inverse_slope,
+                     ) = (
+                         self._move_batch_to_device(batch)
+                     )
+@@ -506,6 +550,8 @@ class DdpmTrainer:
+                             valid_mask,
+                             condition,
+                             prior_conditioning,
++                            full_spectrum_target,
++                            local_inverse_slope,
+                         )
+ 
+                     detached_loss = loss.detach()
+@@ -585,6 +631,8 @@ class DdpmTrainer:
+                     valid_mask,
+                     condition,
+                     prior_conditioning,
++                    full_spectrum_target,
++                    local_inverse_slope,
+                 ) = (
+                     self._next_training_batch()
+                 )
+@@ -600,6 +648,8 @@ class DdpmTrainer:
+                         valid_mask,
+                         condition,
+                         prior_conditioning,
++                        full_spectrum_target,
++                        local_inverse_slope,
+                     )
+                     backward_loss = (
+                         loss / self.gradient_accumulation_steps
+diff --git a/src/masked_diffusion.py b/src/masked_diffusion.py
+index 8eec860..e1904c6 100644
+--- a/src/masked_diffusion.py
++++ b/src/masked_diffusion.py
+@@ -76,6 +76,7 @@ def _normalize_quality_fidelity_configuration(
+     ) or {}
+     condition_mean = source.get("condition_mean", {}) or {}
+     envelope = source.get("condition_pointwise_envelope", {}) or {}
++    full_tail = source.get("full_spectrum_tail_distribution", {}) or {}
+     if not all(
+         isinstance(item, dict)
+         for item in (
+@@ -87,6 +88,7 @@ def _normalize_quality_fidelity_configuration(
+             derivative_variance,
+             condition_mean,
+             envelope,
++            full_tail,
+         )
+     ):
+         raise ValueError("quality_fidelity的子配置必须是字典。")
+@@ -270,6 +272,76 @@ def _normalize_quality_fidelity_configuration(
+         and bounds["weight"] > 0.0
+     ):
+         raise ValueError("condition_pointwise_envelope配置无效。")
++
++    probabilities = [
++        float(value)
++        for value in full_tail.get(
++            "piecewise_probabilities", [0.01, 0.10, 0.50, 0.90, 0.99]
++        )
++    ]
++    segment_weights = [
++        float(value)
++        for value in full_tail.get("segment_weights", [1.5, 0.5, 0.5, 1.5])
++    ]
++    normalized["full_spectrum_tail_distribution"] = {
++        "enabled": bool(full_tail.get("enabled", False)),
++        "piecewise_probabilities": probabilities,
++        "segment_weights": segment_weights,
++        "minimum_segment_span_ratio": float(
++            full_tail.get("minimum_segment_span_ratio", 0.90)
++        ),
++        "maximum_segment_span_ratio": float(
++            full_tail.get("maximum_segment_span_ratio", 1.10)
++        ),
++        "maximum_timestep_fraction": float(
++            full_tail.get("maximum_timestep_fraction", 0.50)
++        ),
++        "minimum_group_size": int(full_tail.get("minimum_group_size", 4)),
++        "pointwise_scale_floor_quantile": float(
++            full_tail.get("pointwise_scale_floor_quantile", 10.0)
++        ),
++        "reconstruction_smooth_l1_beta": float(
++            full_tail.get("reconstruction_smooth_l1_beta", 0.01)
++        ),
++        "span_smooth_l1_beta": float(
++            full_tail.get("span_smooth_l1_beta", 0.02)
++        ),
++        "reconstruction_weight": float(
++            full_tail.get("reconstruction_weight", 0.5)
++        ),
++        "span_weight": float(full_tail.get("span_weight", 1.0)),
++        "short_axis_maximum_points": int(
++            full_tail.get("short_axis_maximum_points", 1500)
++        ),
++        "short_axis_weight_multiplier": float(
++            full_tail.get("short_axis_weight_multiplier", 1.5)
++        ),
++        "epsilon": float(full_tail.get("epsilon", 1.0e-6)),
++    }
++    tail = normalized["full_spectrum_tail_distribution"]
++    if tail["enabled"] and not (
++        len(probabilities) == 5
++        and all(0.0 < value < 1.0 for value in probabilities)
++        and all(
++            probabilities[index] < probabilities[index + 1]
++            for index in range(4)
++        )
++        and len(segment_weights) == 4
++        and all(value > 0.0 for value in segment_weights)
++        and 0.50 <= tail["minimum_segment_span_ratio"] < 1.0
++        and 1.0 < tail["maximum_segment_span_ratio"] <= 1.50
++        and 0.0 < tail["maximum_timestep_fraction"] <= 0.75
++        and tail["minimum_group_size"] >= 3
++        and 0.0 <= tail["pointwise_scale_floor_quantile"] <= 50.0
++        and tail["reconstruction_smooth_l1_beta"] > 0.0
++        and tail["span_smooth_l1_beta"] > 0.0
++        and tail["reconstruction_weight"] > 0.0
++        and tail["span_weight"] > 0.0
++        and tail["short_axis_maximum_points"] >= 2
++        and tail["short_axis_weight_multiplier"] >= 1.0
++        and tail["epsilon"] > 0.0
++    ):
++        raise ValueError("full_spectrum_tail_distribution配置无效。")
+     if not any(
+         (
+             first["enabled"],
+@@ -278,6 +350,7 @@ def _normalize_quality_fidelity_configuration(
+             derivative_floor["enabled"],
+             mean["enabled"],
+             bounds["enabled"],
++            tail["enabled"],
+         )
+     ):
+         raise ValueError("quality_fidelity至少需要启用一个保真损失。")
+@@ -290,6 +363,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+     supports_valid_mask = True
+     supports_condition = True
+     supports_prior_conditioning = True
++    supports_full_spectrum_training_context = True
+ 
+     def __init__(
+         self,
+@@ -401,6 +475,161 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+         count = mask.sum().clamp_min(1.0)
+         return (value * mask).sum() / count
+ 
++    def _full_spectrum_tail_losses(
++        self,
++        *,
++        prediction: torch.Tensor,
++        target: torch.Tensor,
++        full_spectrum_target: torch.Tensor,
++        local_inverse_slope: torch.Tensor,
++        valid_mask: torch.Tensor,
++        condition: torch.Tensor,
++        timesteps: torch.Tensor | None,
++        configuration: dict[str, Any],
++    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++        """Constrain the actual reconstructed spectrum, not only its residual.
++
++        The robust-asinh inverse is locally linearized around each real local
++        residual.  This loss is used only at low/middle noise, where pred_x0 is
++        close enough to the target for that train-only linearization to be
++        reliable.  Four standardized QQ spans are matched with a dead band,
++        so both over-wide and collapsed tails are corrected without forcing
++        every condition to an identical global distribution.
++        """
++
++        zero = prediction.sum() * 0.0
++        for name, value in (
++            ("full_spectrum_target", full_spectrum_target),
++            ("local_inverse_slope", local_inverse_slope),
++        ):
++            if value.shape != prediction.shape:
++                raise ValueError(f"{name}形状必须与prediction一致。")
++            if not torch.isfinite(value).all():
++                raise ValueError(f"{name}包含NaN或无穷值。")
++        if torch.any(local_inverse_slope < 0.0):
++            raise ValueError("local_inverse_slope不能为负。")
++
++        reconstructed_prediction = (
++            full_spectrum_target
++            + local_inverse_slope * (prediction - target)
++        ) * valid_mask
++        probabilities = prediction.new_tensor(
++            configuration["piecewise_probabilities"]
++        )
++        segment_weights = prediction.new_tensor(
++            configuration["segment_weights"]
++        )
++        minimum_ratio = float(configuration["minimum_segment_span_ratio"])
++        maximum_ratio = float(configuration["maximum_segment_span_ratio"])
++        maximum_timestep_fraction = float(
++            configuration["maximum_timestep_fraction"]
++        )
++        epsilon = float(configuration["epsilon"])
++
++        _, inverse = torch.unique(
++            condition.detach(), dim=0, sorted=True, return_inverse=True
++        )
++        reconstruction_losses: list[torch.Tensor] = []
++        span_losses: list[torch.Tensor] = []
++        active_group_count = 0
++        for group_index in range(int(inverse.max().item()) + 1):
++            selected = inverse == group_index
++            if int(selected.sum().item()) < int(
++                configuration["minimum_group_size"]
++            ):
++                continue
++            if timesteps is not None:
++                group_fraction = (
++                    timesteps[selected].to(dtype=torch.float32).mean()
++                    / float(max(self.num_timesteps - 1, 1))
++                )
++                if bool(group_fraction.item() > maximum_timestep_fraction):
++                    continue
++
++            group_mask = valid_mask[selected]
++            group_target = full_spectrum_target[selected]
++            group_prediction = reconstructed_prediction[selected]
++            common_mask = torch.min(group_mask, dim=0, keepdim=True).values
++            valid_length = int(common_mask.sum().item())
++            if valid_length < 2:
++                continue
++            axis_weight = (
++                float(configuration["short_axis_weight_multiplier"])
++                if valid_length
++                <= int(configuration["short_axis_maximum_points"])
++                else 1.0
++            )
++
++            reconstruction_pointwise = F.smooth_l1_loss(
++                group_prediction,
++                group_target,
++                reduction="none",
++                beta=float(configuration["reconstruction_smooth_l1_beta"]),
++            )
++            reconstruction_losses.append(
++                axis_weight
++                * self._masked_mean(reconstruction_pointwise, group_mask)
++            )
++
++            center = torch.quantile(
++                group_target.detach(), 0.50, dim=0, keepdim=True
++            )
++            q25 = torch.quantile(
++                group_target.detach(), 0.25, dim=0, keepdim=True
++            )
++            q75 = torch.quantile(
++                group_target.detach(), 0.75, dim=0, keepdim=True
++            )
++            pointwise_scale = (q75 - q25).abs() / 1.349
++            valid_scales = pointwise_scale[common_mask > 0.5]
++            scale_floor = torch.quantile(
++                valid_scales,
++                float(configuration["pointwise_scale_floor_quantile"])
++                / 100.0,
++            ).clamp_min(epsilon)
++            pointwise_scale = pointwise_scale.clamp_min(scale_floor).detach()
++            target_z = (group_target - center) / pointwise_scale
++            prediction_z = (group_prediction - center) / pointwise_scale
++            expanded_common = common_mask.expand_as(group_target) > 0.5
++            target_quantiles = torch.quantile(
++                target_z[expanded_common], probabilities
++            ).detach()
++            prediction_quantiles = torch.quantile(
++                prediction_z[expanded_common], probabilities
++            )
++            target_spans = torch.diff(target_quantiles).clamp_min(epsilon)
++            prediction_spans = torch.diff(prediction_quantiles).clamp_min(
++                epsilon
++            )
++            ratios = prediction_spans / target_spans
++            violation = F.relu(minimum_ratio - ratios) + F.relu(
++                ratios - maximum_ratio
++            )
++            segment_loss = F.smooth_l1_loss(
++                violation,
++                torch.zeros_like(violation),
++                reduction="none",
++                beta=float(configuration["span_smooth_l1_beta"]),
++            )
++            span_losses.append(
++                axis_weight
++                * (segment_loss * segment_weights).sum()
++                / segment_weights.sum()
++            )
++            active_group_count += 1
++
++        reconstruction_loss = (
++            torch.stack(reconstruction_losses).mean()
++            if reconstruction_losses
++            else zero
++        )
++        span_loss = torch.stack(span_losses).mean() if span_losses else zero
++        return (
++            reconstruction_loss,
++            span_loss,
++            prediction.new_tensor(float(active_group_count)),
++        )
++
+     def _quality_fidelity_losses(
+         self,
+         *,
+@@ -409,6 +638,8 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+         valid_mask: torch.Tensor,
+         condition: torch.Tensor,
+         timesteps: torch.Tensor | None = None,
++        full_spectrum_target: torch.Tensor | None = None,
++        local_inverse_slope: torch.Tensor | None = None,
+     ) -> dict[str, torch.Tensor]:
+         zero = prediction.sum() * 0.0
+         derivative_loss = zero
+@@ -417,6 +648,9 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+         derivative_variance_loss = zero
+         condition_mean_loss = zero
+         envelope_loss = zero
++        full_reconstruction_loss = zero
++        full_tail_span_loss = zero
++        full_tail_active_groups = zero
+         active_groups = zero
+ 
+         derivative = self.quality_fidelity_configuration.get(
+@@ -485,6 +719,30 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+         derivative_floor = self.quality_fidelity_configuration.get(
+             "condition_derivative_variance_floor", {}
+         )
++        full_tail = self.quality_fidelity_configuration.get(
++            "full_spectrum_tail_distribution", {}
++        )
++
++        if bool(full_tail.get("enabled", False)):
++            if full_spectrum_target is None or local_inverse_slope is None:
++                raise RuntimeError(
++                    "完整谱尾部分布损失缺少full_spectrum_target或"
++                    "local_inverse_slope。"
++                )
++            (
++                full_reconstruction_loss,
++                full_tail_span_loss,
++                full_tail_active_groups,
++            ) = self._full_spectrum_tail_losses(
++                prediction=prediction,
++                target=target,
++                full_spectrum_target=full_spectrum_target,
++                local_inverse_slope=local_inverse_slope,
++                valid_mask=valid_mask,
++                condition=condition,
++                timesteps=timesteps,
++                configuration=full_tail,
++            )
+         needs_condition_groups = bool(condition_mean.get("enabled", False)) or bool(
+             envelope.get("enabled", False)
+         ) or bool(variance_floor.get("enabled", False))
+@@ -779,6 +1037,10 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             * derivative_variance_loss
+             + float(condition_mean.get("weight", 0.0)) * condition_mean_loss
+             + float(envelope.get("weight", 0.0)) * envelope_loss
++            + float(full_tail.get("reconstruction_weight", 0.0))
++            * full_reconstruction_loss
++            + float(full_tail.get("span_weight", 0.0))
++            * full_tail_span_loss
+         )
+         return {
+             "quality_fidelity_raw_loss": raw,
+@@ -788,6 +1050,9 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             "condition_derivative_variance_floor_loss": derivative_variance_loss,
+             "condition_mean_fidelity_loss": condition_mean_loss,
+             "condition_envelope_loss": envelope_loss,
++            "full_spectrum_reconstruction_loss": full_reconstruction_loss,
++            "full_spectrum_tail_span_loss": full_tail_span_loss,
++            "full_spectrum_tail_active_groups": full_tail_active_groups,
+             "quality_fidelity_active_groups": active_groups,
+         }
+ 
+@@ -911,6 +1176,8 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+         valid_mask: torch.Tensor | None = None,
+         condition: torch.Tensor | None = None,
+         prior_conditioning: torch.Tensor | None = None,
++        full_spectrum_target: torch.Tensor | None = None,
++        local_inverse_slope: torch.Tensor | None = None,
+         **kwargs,
+     ) -> torch.Tensor:
+         batch_size, channels, sequence_length = img.shape
+@@ -933,6 +1200,30 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+         )
+         if prepared_prior is not None:
+             prepared_prior = prepared_prior * mask
++        prepared_full_target = None
++        prepared_inverse_slope = None
++        if full_spectrum_target is not None or local_inverse_slope is not None:
++            if full_spectrum_target is None or local_inverse_slope is None:
++                raise ValueError("完整谱训练上下文必须成对提供。")
++            prepared_full_target = full_spectrum_target.to(
++                device=img.device, dtype=img.dtype
++            )
++            prepared_inverse_slope = local_inverse_slope.to(
++                device=img.device, dtype=img.dtype
++            )
++            if (
++                prepared_full_target.shape != img.shape
++                or prepared_inverse_slope.shape != img.shape
++            ):
++                raise ValueError("完整谱训练上下文形状必须与输入光谱一致。")
++            if not torch.isfinite(prepared_full_target).all() or not torch.isfinite(
++                prepared_inverse_slope
++            ).all():
++                raise ValueError("完整谱训练上下文包含NaN或无穷值。")
++            if torch.any(prepared_inverse_slope < 0.0):
++                raise ValueError("local_inverse_slope不能为负。")
++            prepared_full_target = prepared_full_target * mask
++            prepared_inverse_slope = prepared_inverse_slope * mask
+         if self.diversity_enabled:
+             if prepared_condition is None:
+                 raise RuntimeError("D4.3多样性约束要求提供condition。")
+@@ -957,6 +1248,8 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             valid_mask=mask,
+             condition=prepared_condition,
+             prior_conditioning=prepared_prior,
++            full_spectrum_target=prepared_full_target,
++            local_inverse_slope=prepared_inverse_slope,
+             **kwargs,
+         )
+ 
+@@ -971,6 +1264,8 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+         valid_mask: torch.Tensor | None = None,
+         condition: torch.Tensor | None = None,
+         prior_conditioning: torch.Tensor | None = None,
++        full_spectrum_target: torch.Tensor | None = None,
++        local_inverse_slope: torch.Tensor | None = None,
+     ) -> torch.Tensor:
+         if model_forward_kwargs is None:
+             model_forward_kwargs = {}
+@@ -989,6 +1284,22 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+         )
+         if prepared_prior is not None:
+             prepared_prior = prepared_prior * mask
++        if full_spectrum_target is not None or local_inverse_slope is not None:
++            if full_spectrum_target is None or local_inverse_slope is None:
++                raise ValueError("完整谱训练上下文必须成对提供。")
++            full_spectrum_target = full_spectrum_target.to(
++                device=x_start.device, dtype=x_start.dtype
++            )
++            local_inverse_slope = local_inverse_slope.to(
++                device=x_start.device, dtype=x_start.dtype
++            )
++            if (
++                full_spectrum_target.shape != x_start.shape
++                or local_inverse_slope.shape != x_start.shape
++            ):
++                raise ValueError("完整谱训练上下文形状必须与x_start一致。")
++            full_spectrum_target = full_spectrum_target * mask
++            local_inverse_slope = local_inverse_slope * mask
+         x_start = x_start * mask
+         if noise is None:
+             noise = torch.randn_like(x_start)
+@@ -1102,6 +1413,8 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+                 valid_mask=mask,
+                 condition=prepared_condition,
+                 timesteps=t,
++                full_spectrum_target=full_spectrum_target,
++                local_inverse_slope=local_inverse_slope,
+             )
+             uncapped_quality = (
+                 float(self.quality_fidelity_configuration["total_weight"])
+@@ -1189,6 +1502,15 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             "condition_envelope_loss": quality.get(
+                 "condition_envelope_loss", zero
+             ).detach(),
++            "full_spectrum_reconstruction_loss": quality.get(
++                "full_spectrum_reconstruction_loss", zero
++            ).detach(),
++            "full_spectrum_tail_span_loss": quality.get(
++                "full_spectrum_tail_span_loss", zero
++            ).detach(),
++            "full_spectrum_tail_active_groups": quality.get(
++                "full_spectrum_tail_active_groups", zero
++            ).detach(),
+             "quality_fidelity_active_groups": quality.get(
+                 "quality_fidelity_active_groups", zero
+             ).detach(),
+diff --git a/src/spectrum_dataset.py b/src/spectrum_dataset.py
+index 0d1eb35..31f96e3 100644
+--- a/src/spectrum_dataset.py
++++ b/src/spectrum_dataset.py
+@@ -37,6 +37,8 @@ class SpectrumDataset(
+         conditions: np.ndarray | None = None,
+         constraint_reference_priors: np.ndarray | None = None,
+         prior_conditionings: np.ndarray | None = None,
++        full_spectrum_targets: np.ndarray | None = None,
++        local_inverse_slopes: np.ndarray | None = None,
+     ) -> None:
+         values = np.asarray(
+             spectra,
+@@ -128,6 +130,28 @@ class SpectrumDataset(
+             if not np.isfinite(prior_values).all():
+                 raise ValueError("prior_conditionings中存在NaN或无穷大。")
+ 
++        full_targets = None
++        inverse_slopes = None
++        if full_spectrum_targets is not None or local_inverse_slopes is not None:
++            if full_spectrum_targets is None or local_inverse_slopes is None:
++                raise ValueError(
++                    "full_spectrum_targets与local_inverse_slopes必须同时提供。"
++                )
++            full_targets = np.asarray(full_spectrum_targets, dtype=np.float32)
++            inverse_slopes = np.asarray(local_inverse_slopes, dtype=np.float32)
++            if full_targets.shape != values.shape:
++                raise ValueError(
++                    "full_spectrum_targets形状必须与spectra一致。"
++                )
++            if inverse_slopes.shape != values.shape:
++                raise ValueError("local_inverse_slopes形状必须与spectra一致。")
++            if not np.isfinite(full_targets).all():
++                raise ValueError("full_spectrum_targets包含NaN或无穷值。")
++            if not np.isfinite(inverse_slopes).all() or np.any(
++                inverse_slopes < 0.0
++            ):
++                raise ValueError("local_inverse_slopes必须是有限非负数。")
++
+         masks = None
+         if valid_masks is not None:
+             masks = np.asarray(
+@@ -220,6 +244,17 @@ class SpectrumDataset(
+             else torch.from_numpy(prior_values).unsqueeze(1)
+         )
+ 
++        self.full_spectrum_targets = (
++            None
++            if full_targets is None
++            else torch.from_numpy(full_targets).unsqueeze(1)
++        )
++        self.local_inverse_slopes = (
++            None
++            if inverse_slopes is None
++            else torch.from_numpy(inverse_slopes).unsqueeze(1)
++        )
++
+         self.valid_masks = (
+             None
+             if masks is None
+@@ -249,6 +284,8 @@ class SpectrumDataset(
+             and self.valid_masks is None
+             and self.conditions is None
+             and self.prior_conditionings is None
++            and self.full_spectrum_targets is None
++            and self.local_inverse_slopes is None
+         ):
+             return spectrum
+ 
+@@ -263,6 +300,9 @@ class SpectrumDataset(
+             )
+         if self.prior_conditionings is not None:
+             item["prior_conditioning"] = self.prior_conditionings[index]
++        if self.full_spectrum_targets is not None:
++            item["full_spectrum_target"] = self.full_spectrum_targets[index]
++            item["local_inverse_slope"] = self.local_inverse_slopes[index]
+         return item
+ 
+     def get_original_metadata(
+diff --git a/src/spectrum_generator.py b/src/spectrum_generator.py
+index 808d9b0..d5ee218 100644
+--- a/src/spectrum_generator.py
++++ b/src/spectrum_generator.py
+@@ -1149,6 +1149,24 @@ def apply_condition_intensity_envelope_guard(
+     enforce_global_extrema = bool(
+         configuration.get("enforce_training_global_extrema", False)
+     )
++    background_quantile = float(
++        configuration.get("condition_negative_background_quantile", 0.01)
++    )
++    background_iqr_margin = float(
++        configuration.get("condition_negative_background_iqr_margin", 0.50)
++    )
++    minimum_negative_count = int(
++        configuration.get("minimum_condition_negative_count", 64)
++    )
++    local_support_quantile = float(
++        configuration.get("local_negative_support_quantile", 0.10)
++    )
++    minimum_contiguous_points = int(
++        configuration.get("minimum_negative_valley_contiguous_points", 3)
++    )
++    severe_depth_iqr_multiplier = float(
++        configuration.get("severe_negative_depth_iqr_multiplier", 3.0)
++    )
+ 
+     if not 0.0 <= training_quantile <= 0.25:
+         raise ValueError("training_lower_quantile必须位于[0, 0.25]。")
+@@ -1183,6 +1201,16 @@ def apply_condition_intensity_envelope_guard(
+         raise ValueError("负值回拉softness配置无效。")
+     if not 0.0 < maximum_modified_fraction <= 0.20:
+         raise ValueError("maximum_modified_fraction必须位于(0, 0.20]。")
++    if not 0.0 <= background_quantile <= 0.10:
++        raise ValueError("condition_negative_background_quantile必须位于[0,0.10]。")
++    if background_iqr_margin < 0.0 or minimum_negative_count < 4:
++        raise ValueError("条件负背景分布配置无效。")
++    if not 0.0 <= local_support_quantile <= 0.25:
++        raise ValueError("local_negative_support_quantile必须位于[0,0.25]。")
++    if not 1 <= minimum_contiguous_points <= 31:
++        raise ValueError("minimum_negative_valley_contiguous_points必须位于[1,31]。")
++    if severe_depth_iqr_multiplier <= 0.0:
++        raise ValueError("severe_negative_depth_iqr_multiplier必须大于0。")
+ 
+     train_q = np.quantile(training, training_quantile, axis=0)
+     train_upper_q = np.quantile(training, training_upper_quantile, axis=0)
+@@ -1220,6 +1248,46 @@ def apply_condition_intensity_envelope_guard(
+     allowed_floor = training_floor.copy()
+     allowed_ceiling = training_ceiling.copy()
+ 
++    # Build one condition-level negative background boundary from all of this
++    # condition's train-only points.  This is intentionally not a universal
++    # -40 rule: a condition whose ordinary background reaches -100 keeps that
++    # range, while a condition whose noise lives around -10..-20 cannot create
++    # an unsupported -70 valley.  A Raman position with repeated training
++    # support below that boundary is exempted and retains its pointwise floor.
++    negative_training = training[training < 0.0]
++    used_negative_background = negative_training.size >= minimum_negative_count
++    if used_negative_background:
++        background_q = float(
++            np.quantile(negative_training, background_quantile)
++        )
++        background_q25 = float(np.quantile(negative_training, 0.25))
++        background_q75 = float(np.quantile(negative_training, 0.75))
++        background_iqr = max(background_q75 - background_q25, 0.0)
++        condition_background_floor = (
++            background_q - background_iqr_margin * background_iqr
++        )
++    else:
++        flattened = training.reshape(-1)
++        background_q = float(np.quantile(flattened, training_quantile))
++        background_q25 = float(np.quantile(flattened, 0.25))
++        background_q75 = float(np.quantile(flattened, 0.75))
++        background_iqr = max(background_q75 - background_q25, 0.0)
++        condition_background_floor = (
++            background_q - background_iqr_margin * background_iqr
++        )
++    condition_background_floor = min(
++        float(condition_background_floor), activation_maximum
++    )
++    pointwise_support = np.quantile(
++        training, local_support_quantile, axis=0
++    ) <= condition_background_floor
++    condition_limited_floor = np.maximum(
++        allowed_floor, condition_background_floor
++    )
++    allowed_floor = np.where(
++        pointwise_support, allowed_floor, condition_limited_floor
++    )
++
+     # The lower side is exclusively a negative-valley guard: a low but
+     # positive peak is not lifted merely because training intensities are
+     # higher.  The upper side independently limits unsupported peak strength.
+@@ -1230,7 +1298,7 @@ def apply_condition_intensity_envelope_guard(
+         allowed_floor = np.maximum(allowed_floor, training_global_minimum)
+         allowed_ceiling = np.minimum(allowed_ceiling, training_global_maximum)
+ 
+-    lower_violation = np.logical_and(
++    lower_candidate = np.logical_and(
+         lower_rank_gate,
+         np.logical_and(
+             np.logical_and(
+@@ -1240,6 +1308,29 @@ def apply_condition_intensity_envelope_guard(
+             allowed_floor[np.newaxis, :] - generated > minimum_deficit,
+         ),
+     )
++    # Keep only coherent valleys (or an exceptionally deep isolated point).
++    # This leaves ordinary one-point negative noise untouched while catching
++    # the broad 1270--1288 cm-1 type deformation seen in generated spectra.
++    lower_violation = np.zeros_like(lower_candidate, dtype=bool)
++    severe_depth = max(
++        minimum_deficit,
++        severe_depth_iqr_multiplier * max(background_iqr, minimum_softness),
++    )
++    lower_deficit = allowed_floor[np.newaxis, :] - generated
++    for spectrum_index in range(lower_candidate.shape[0]):
++        row = lower_candidate[spectrum_index]
++        padded = np.pad(row.astype(np.int8), (1, 1), constant_values=0)
++        changes = np.diff(padded)
++        starts = np.flatnonzero(changes == 1)
++        stops = np.flatnonzero(changes == -1)
++        for start, stop in zip(starts, stops, strict=True):
++            coherent = int(stop - start) >= minimum_contiguous_points
++            exceptionally_deep = bool(
++                np.max(lower_deficit[spectrum_index, start:stop])
++                >= severe_depth
++            )
++            if coherent or exceptionally_deep:
++                lower_violation[spectrum_index, start:stop] = True
+     upper_violation = np.logical_and(
+         upper_rank_gate,
+         np.logical_and(
+@@ -1304,6 +1395,26 @@ def apply_condition_intensity_envelope_guard(
+         "maximum_after": float(np.max(corrected)),
+         "correction_rmse": float(np.sqrt(np.mean(np.square(difference)))),
+         "maximum_absolute_correction": float(np.max(np.abs(difference))),
++        "condition_negative_background_floor": float(
++            condition_background_floor
++        ),
++        "condition_negative_background_quantile": background_quantile,
++        "condition_negative_background_iqr": float(background_iqr),
++        "condition_negative_training_point_count": int(
++            negative_training.size
++        ),
++        "used_condition_negative_background": bool(
++            used_negative_background
++        ),
++        "minimum_negative_valley_contiguous_points": int(
++            minimum_contiguous_points
++        ),
++        "negative_valley_candidate_point_count": int(
++            np.sum(lower_candidate)
++        ),
++        "negative_valley_retained_point_count": int(
++            np.sum(lower_violation)
++        ),
+     }
+     return corrected.astype(np.float32, copy=False), diagnostics
+ 
+diff --git a/tests/test_spectrum_generation.py b/tests/test_spectrum_generation.py
+index e015fd9..11601c3 100644
+--- a/tests/test_spectrum_generation.py
++++ b/tests/test_spectrum_generation.py
+@@ -226,6 +226,103 @@ def test_generated_outliers_cannot_loosen_training_owned_envelope():
+     assert diagnostics["generated_batch_is_rank_gate_only"] is True
+ 
+ 
++def test_condition_negative_background_controls_coherent_valley_without_global_floor():
++    random_generator = np.random.default_rng(2041)
++    training_shallow = random_generator.uniform(-20.0, -8.0, size=(12, 100))
++    training_deep = random_generator.uniform(-105.0, -75.0, size=(12, 100))
++    generated_shallow = np.repeat(training_shallow[[0]], 20, axis=0)
++    generated_deep = np.repeat(training_deep[[0]], 20, axis=0)
++    generated_shallow[2, 40:51] = -72.0
++    generated_shallow[3, 20] = -18.0
++    generated_deep[2, 40:51] = -95.0
++    configuration = {
++        "training_lower_quantile": 0.05,
++        "training_upper_quantile": 0.95,
++        "training_iqr_margin": 0.5,
++        "training_extrema_margin_iqr_fraction": 0.1,
++        "minimum_extrema_margin_intensity": 2.0,
++        "generated_lower_quantile": 0.025,
++        "generated_upper_quantile": 0.975,
++        "minimum_generated_count": 20,
++        "activation_maximum_intensity": -18.0,
++        "minimum_deficit_intensity": 5.0,
++        "minimum_excess_intensity": 1.0e9,
++        "softness_iqr_fraction": 0.05,
++        "minimum_softness_intensity": 0.25,
++        "maximum_softness_intensity": 2.0,
++        "enforce_training_global_extrema": False,
++        "maximum_modified_fraction": 0.20,
++        "condition_negative_background_quantile": 0.01,
++        "condition_negative_background_iqr_margin": 0.5,
++        "minimum_condition_negative_count": 64,
++        "local_negative_support_quantile": 0.1,
++        "minimum_negative_valley_contiguous_points": 3,
++        "severe_negative_depth_iqr_multiplier": 3.0,
++    }
++
++    corrected_shallow, shallow_diagnostics = (
++        apply_condition_intensity_envelope_guard(
++            generated_shallow,
++            training_shallow,
++            configuration=configuration,
++        )
++    )
++    corrected_deep, deep_diagnostics = apply_condition_intensity_envelope_guard(
++        generated_deep,
++        training_deep,
++        configuration=configuration,
++    )
++
++    assert np.min(corrected_shallow[2, 40:51]) > -30.0
++    assert corrected_shallow[3, 20] == generated_shallow[3, 20]
++    np.testing.assert_allclose(corrected_deep, generated_deep)
++    assert shallow_diagnostics["condition_negative_background_floor"] > -30.0
++    assert deep_diagnostics["condition_negative_background_floor"] < -75.0
++
++
++def test_full_spectrum_tail_loss_penalizes_reconstructed_qq_overrun():
++    diffusion = object.__new__(MaskedGaussianDiffusion1D)
++    nn.Module.__init__(diffusion)
++    diffusion.num_timesteps = 200
++    full_target = torch.tensor([-1.0, -0.5, 0.5, 1.0]).reshape(4, 1, 1)
++    full_target = full_target.expand(-1, -1, 64).clone()
++    target_residual = torch.zeros_like(full_target)
++    prediction_residual = full_target.clone().requires_grad_(True)
++    mask = torch.ones_like(full_target)
++    condition = torch.tensor([[1.0, 0.0]]).repeat(4, 1)
++    configuration = {
++        "piecewise_probabilities": [0.01, 0.10, 0.50, 0.90, 0.99],
++        "segment_weights": [1.5, 0.5, 0.5, 1.5],
++        "minimum_segment_span_ratio": 0.90,
++        "maximum_segment_span_ratio": 1.10,
++        "maximum_timestep_fraction": 0.50,
++        "minimum_group_size": 4,
++        "pointwise_scale_floor_quantile": 10.0,
++        "reconstruction_smooth_l1_beta": 0.01,
++        "span_smooth_l1_beta": 0.02,
++        "short_axis_maximum_points": 1500,
++        "short_axis_weight_multiplier": 1.4,
++        "epsilon": 1.0e-6,
++    }
++    reconstruction, span, active = diffusion._full_spectrum_tail_losses(
++        prediction=prediction_residual,
++        target=target_residual,
++        full_spectrum_target=full_target,
++        local_inverse_slope=torch.ones_like(full_target),
++        valid_mask=mask,
++        condition=condition,
++        timesteps=torch.full((4,), 20, dtype=torch.long),
++        configuration=configuration,
++    )
++    loss = reconstruction + span
++    assert reconstruction.item() > 0.0
++    assert span.item() > 0.0
++    assert active.item() == 1.0
++    loss.backward()
++    assert prediction_residual.grad is not None
++    assert torch.isfinite(prediction_residual.grad).all()
++
++
+ def test_mean_fidelity_calibration_reduces_bias_without_changing_pairwise_mse():
+     random_generator = np.random.default_rng(2026)
+     training = random_generator.normal(10.0, 2.0, size=(12, 80))

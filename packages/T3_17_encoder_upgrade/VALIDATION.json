@@ -1,0 +1,8 @@
+{
+  "static_tests": {"status": "passed", "count": 6},
+  "python_compile": "passed",
+  "bash_syntax": "passed",
+  "pytorch_model_tests": {"status": "not_run", "count": 4, "reason": "PyTorch not installed in generation environment"},
+  "real_data_smoke": {"status": "not_run", "reason": "Server data and checkpoints not present"},
+  "performance_improvement": "not_evaluated"
+}

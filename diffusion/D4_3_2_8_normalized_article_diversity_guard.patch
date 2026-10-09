@@ -1,0 +1,844 @@
+From 4f7ec3677f4e84652339a4b1fcbca463d4bd5ffd Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Mon, 14 Sep 2026 11:52:01 +0900
+Subject: [PATCH] D4.3.2.8 normalize paper evaluation and guard diversity
+
+---
+ config/ddpm_training_d4_3_formal.yaml   |  22 +-
+ scripts/evaluate_d4_2_generation.py     | 261 +++++++++++++-----------
+ scripts/generate_conditional_spectra.py |  13 ++
+ src/spectrum_generator.py               | 190 ++++++++++++++++-
+ tests/test_sers_generation_evaluator.py |  14 ++
+ tests/test_spectrum_generation.py       |  30 +++
+ 6 files changed, 399 insertions(+), 131 deletions(-)
+
+diff --git a/config/ddpm_training_d4_3_formal.yaml b/config/ddpm_training_d4_3_formal.yaml
+index 7b2c281..1672def 100644
+--- a/config/ddpm_training_d4_3_formal.yaml
++++ b/config/ddpm_training_d4_3_formal.yaml
+@@ -1,8 +1,8 @@
+ project:
+-  # D4.3.2.7针对全部126条件QQ的S形弯曲：限制全局PCA扩展，并用
+-  # training-only oracle门控的四段单调映射分别修正内段和外尾。
++  # D4.3.2.8将论文主指标和三类论文图统一到checkpoint归一化空间，
++  # 并限制四段QQ校准对同条件pairwise-MSE多样性的意外压缩。
+   # 扩散训练链由100增加到200；DDIM生成由50增加到100步。
+-  name: d4_3_2_7_piecewise_qq_balance_formal
++  name: d4_3_2_8_normalized_article_diversity_guard_formal
+   random_seed: 2026
+ diagnostic_overfit:
+   enabled: false
+@@ -299,11 +299,11 @@ training:
+   maximum_validation_batches: 0
+   validation_random_seed: 2026001
+ output:
+-  output_directory: outputs/experiments/d4_3_2_7_piecewise_qq_balance_formal
+-  checkpoint_directory: outputs/experiments/d4_3_2_7_piecewise_qq_balance_formal/checkpoints
+-  log_directory: outputs/experiments/d4_3_2_7_piecewise_qq_balance_formal/logs
+-  generated_spectrum_directory: outputs/experiments/d4_3_2_7_piecewise_qq_balance_formal/generated
+-  preview_plot_directory: outputs/experiments/d4_3_2_7_piecewise_qq_balance_formal/plots
++  output_directory: outputs/experiments/d4_3_2_8_normalized_article_diversity_guard_formal
++  checkpoint_directory: outputs/experiments/d4_3_2_8_normalized_article_diversity_guard_formal/checkpoints
++  log_directory: outputs/experiments/d4_3_2_8_normalized_article_diversity_guard_formal/logs
++  generated_spectrum_directory: outputs/experiments/d4_3_2_8_normalized_article_diversity_guard_formal/generated
++  preview_plot_directory: outputs/experiments/d4_3_2_8_normalized_article_diversity_guard_formal/plots
+   latest_checkpoint_name: latest.pt
+   best_checkpoint_name: best.pt
+   training_log_name: training_log.csv
+@@ -356,6 +356,12 @@ generation:
+     maximum_segment_span_ratio: 1.10
+     correction_strength: 0.60
+     maximum_absolute_correction_z: 0.40
++    # 2.7全部126条件结果中QQ改善，但最终pairwise-MSE多样性比降到
++    # 0.756。若四段映射会把条件内多样性压到training的82%以下，
++    # 自动减弱本条件的QQ修正；原本已低于82%时至少不继续降低。
++    minimum_postcalibration_pairwise_mse_ratio: 0.82
++    diversity_guard_search_iterations: 20
++    diversity_guard_pair_count: 10000
+     lower_probability: 0.01
+     upper_probability: 0.99
+     lower_anchor_probability: 0.05
+diff --git a/scripts/evaluate_d4_2_generation.py b/scripts/evaluate_d4_2_generation.py
+index ced7f1f..256d77f 100644
+--- a/scripts/evaluate_d4_2_generation.py
++++ b/scripts/evaluate_d4_2_generation.py
+@@ -174,6 +174,19 @@ def _center_metrics(
+     }
+ 
+ 
++def _model_normalized_center_metrics(
++    reference: np.ndarray,
++    generated: np.ndarray,
++) -> dict[str, float]:
++    """Return mean-spectrum metrics in the checkpoint normalization space."""
++
++    raw = _center_metrics(reference, generated)
++    return {
++        key.replace("mean_spectrum_", "model_normalized_mean_spectrum_"): value
++        for key, value in raw.items()
++    }
++
++
+ def _pointwise_wasserstein(
+     *,
+     training: np.ndarray,
+@@ -954,72 +967,43 @@ def _qq_table(
+ 
+ 
+ def _plot_qq(table: pd.DataFrame, condition: str, output: Path) -> None:
+-    figure, axes = plt.subplots(1, 3, figsize=(15.0, 4.4))
+-    panels = (
++    """Plot the paper-primary QQ relation only in checkpoint-normalized space."""
++
++    real = table["reference_model_normalized"].to_numpy(dtype=np.float64)
++    generated = table["generated_model_normalized"].to_numpy(dtype=np.float64)
++    lower = float(min(np.min(real), np.min(generated)))
++    upper = float(max(np.max(real), np.max(generated)))
++    figure, axis = plt.subplots(figsize=(5.8, 5.2))
++    axis.plot(
++        [lower, upper], [lower, upper], "--", color="#777777", linewidth=1.0
++    )
++    axis.fill_between(
++        real,
++        table["oracle_model_normalized_lower"].to_numpy(dtype=np.float64),
++        table["oracle_model_normalized_upper"].to_numpy(dtype=np.float64),
++        color="#B8D8F0",
++        alpha=0.45,
++        label="real-vs-real oracle band",
++    )
++    axis.scatter(real, generated, s=16, color="#1769AA", alpha=0.82)
++    agreement = _qq_agreement_metrics(real, generated, "panel")
++    axis.text(
++        0.03,
++        0.96,
+         (
+-            "reference_raw_intensity",
+-            "generated_raw_intensity",
+-            "oracle_raw_lower",
+-            "oracle_raw_upper",
+-            "Raw intensity QQ",
++            f"$R^2$={agreement['panel_r2']:.4f}\n"
++            f"identity RMSE={agreement['panel_rmse']:.4g}"
+         ),
+-        (
+-            "reference_model_normalized",
+-            "generated_model_normalized",
+-            "oracle_model_normalized_lower",
+-            "oracle_model_normalized_upper",
+-            "Checkpoint-normalized QQ (paper-compatible)",
+-        ),
+-        (
+-            "reference_training_standardized",
+-            "generated_training_standardized",
+-            "oracle_standardized_lower",
+-            "oracle_standardized_upper",
+-            "Training-standardized QQ",
+-        ),
+-    )
+-    for axis, (
+-        real_column,
+-        generated_column,
+-        oracle_lower_column,
+-        oracle_upper_column,
+-        title,
+-    ) in zip(axes, panels):
+-        real = table[real_column].to_numpy(dtype=np.float64)
+-        generated = table[generated_column].to_numpy(dtype=np.float64)
+-        lower = float(min(np.min(real), np.min(generated)))
+-        upper = float(max(np.max(real), np.max(generated)))
+-        axis.plot(
+-            [lower, upper], [lower, upper], "--", color="#777777", linewidth=1.0
+-        )
+-        axis.fill_between(
+-            real,
+-            table[oracle_lower_column].to_numpy(dtype=np.float64),
+-            table[oracle_upper_column].to_numpy(dtype=np.float64),
+-            color="#B8D8F0",
+-            alpha=0.45,
+-            label="real-vs-real oracle band",
+-        )
+-        axis.scatter(real, generated, s=13, color="#1769AA", alpha=0.8)
+-        agreement = _qq_agreement_metrics(real, generated, "panel")
+-        axis.text(
+-            0.03,
+-            0.96,
+-            (
+-                f"$R^2$={agreement['panel_r2']:.4f}\n"
+-                f"identity RMSE={agreement['panel_rmse']:.4g}"
+-            ),
+-            transform=axis.transAxes,
+-            va="top",
+-            fontsize=8,
+-            bbox={"facecolor": "white", "alpha": 0.78, "edgecolor": "none"},
+-        )
+-        axis.set_xlabel("Real reference quantile")
+-        axis.set_ylabel("Generated quantile")
+-        axis.set_title(title)
+-        axis.grid(alpha=0.2)
+-        axis.legend(fontsize=7, loc="best")
+-    figure.suptitle(condition)
++        transform=axis.transAxes,
++        va="top",
++        fontsize=9,
++        bbox={"facecolor": "white", "alpha": 0.78, "edgecolor": "none"},
++    )
++    axis.set_xlabel("Real reference quantile (checkpoint normalized)")
++    axis.set_ylabel("Generated quantile (checkpoint normalized)")
++    axis.set_title(f"{condition}: normalized Q-Q plot")
++    axis.grid(alpha=0.2)
++    axis.legend(fontsize=8, loc="best")
+     figure.tight_layout()
+     output.parent.mkdir(parents=True, exist_ok=True)
+     figure.savefig(output, dpi=220, bbox_inches="tight")
+@@ -1103,8 +1087,10 @@ def _plot_spectral_distribution(
+         linewidth=1.25,
+         label="generated mean",
+     )
+-    upper.set_ylabel("Intensity")
+-    upper.set_title(f"{condition}: real spectra and generated distribution")
++    upper.set_ylabel("Checkpoint-normalized intensity")
++    upper.set_title(
++        f"{condition}: normalized real and generated spectral distribution"
++    )
+     upper.grid(alpha=0.18)
+     upper.legend(fontsize=8, ncol=3, loc="best")
+ 
+@@ -1125,7 +1111,7 @@ def _plot_spectral_distribution(
+         label="training mean - held-out mean",
+     )
+     lower.set_xlabel("Raman shift (cm$^{-1}$)")
+-    lower.set_ylabel("Mean residual")
++    lower.set_ylabel("Normalized mean residual")
+     lower.grid(alpha=0.18)
+     lower.legend(fontsize=8, loc="best")
+     figure.tight_layout()
+@@ -1186,7 +1172,7 @@ def _plot_peak_intensity_violins(
+         )
+         panel.set_xticks([1.0, 2.0], ["training", "generated"])
+         panel.set_title(f"{axis[peak_index]:.0f} cm$^{{-1}}$")
+-        panel.set_ylabel("Raw intensity")
++        panel.set_ylabel("Checkpoint-normalized intensity")
+         panel.grid(axis="y", alpha=0.18)
+     for panel in axes.flat[centers.size:]:
+         panel.axis("off")
+@@ -1194,7 +1180,7 @@ def _plot_peak_intensity_violins(
+     if handles:
+         figure.legend(handles, labels, loc="upper right", fontsize=8)
+     figure.suptitle(
+-        f"{condition}: training-defined characteristic-peak intensities",
++        f"{condition}: normalized characteristic-peak intensities",
+         y=1.01,
+     )
+     figure.tight_layout()
+@@ -1216,10 +1202,15 @@ def _plot_quality_overview(frame: pd.DataFrame, output: Path) -> None:
+             "\n".join(
+                 [
+                     str(row["condition"]),
+-                    f"MSE: {row['nearest_reference_mse_mean']:.4g}",
+-                    f"Cosine: {row['nearest_reference_cosine_mean']:.4f}",
+-                    f"Pearson: {row['nearest_reference_pearson_mean']:.4f}",
+-                    f"Wasserstein: {row['wasserstein_raw_pointwise_mean']:.4g}",
++                    "Paper-primary checkpoint-normalized metrics",
++                    "MSE: "
++                    f"{row['nearest_reference_model_normalized_mse_mean']:.4g}",
++                    "Cosine: "
++                    f"{row['nearest_reference_model_normalized_cosine_mean']:.4f}",
++                    "Pearson: "
++                    f"{row['nearest_reference_model_normalized_pearson_mean']:.4f}",
++                    "Wasserstein: "
++                    f"{row['wasserstein_model_normalized_global_flattened']:.4g}",
+                 ]
+             ),
+             va="top",
+@@ -1262,7 +1253,9 @@ def _plot_quality_overview(frame: pd.DataFrame, output: Path) -> None:
+         plt.close(figure)
+         return
+     sorted_mse = np.sort(
+-        frame["nearest_reference_mse_mean"].to_numpy(dtype=np.float64)
++        frame["nearest_reference_model_normalized_mse_mean"].to_numpy(
++            dtype=np.float64
++        )
+     )
+     axes[0, 0].plot(
+         np.arange(1, sorted_mse.size + 1),
+@@ -1271,14 +1264,14 @@ def _plot_quality_overview(frame: pd.DataFrame, output: Path) -> None:
+     )
+     axes[0, 0].set_yscale("log")
+     axes[0, 0].set_xlabel("Condition rank")
+-    axes[0, 0].set_ylabel("Nearest-reference MSE (log)")
+-    axes[0, 0].set_title("Fidelity across all conditions")
++    axes[0, 0].set_ylabel("Checkpoint-normalized MSE (log)")
++    axes[0, 0].set_title("Normalized fidelity across all conditions")
+ 
+     mismatch = frame["qq_any_tail_mismatch"].astype(bool).to_numpy()
+     colors = np.where(mismatch, "#D32F2F", "#2E7D32")
+     axes[0, 1].scatter(
+         frame["diversity_pairwise_mse_ratio"],
+-        frame["nearest_reference_mse_mean"],
++        frame["nearest_reference_model_normalized_mse_mean"],
+         c=colors,
+         s=22,
+         alpha=0.78,
+@@ -1286,7 +1279,7 @@ def _plot_quality_overview(frame: pd.DataFrame, output: Path) -> None:
+     axes[0, 1].axvline(1.0, color="#777777", linestyle="--", linewidth=0.9)
+     axes[0, 1].set_yscale("log")
+     axes[0, 1].set_xlabel("Generated / training pairwise-MSE diversity")
+-    axes[0, 1].set_ylabel("Nearest-reference MSE (log)")
++    axes[0, 1].set_ylabel("Checkpoint-normalized MSE (log)")
+     axes[0, 1].set_title("Fidelity-diversity tradeoff (red: QQ mismatch)")
+ 
+     axes[1, 0].scatter(
+@@ -1508,6 +1501,10 @@ def _quality_stratified_summary(frame: pd.DataFrame) -> pd.DataFrame:
+         "nearest_reference_model_normalized_pearson_mean",
+         "nearest_reference_cosine_mean",
+         "nearest_reference_pearson_mean",
++        "model_normalized_mean_spectrum_mse",
++        "model_normalized_mean_spectrum_rmse",
++        "model_normalized_mean_spectrum_cosine",
++        "model_normalized_mean_spectrum_pearson",
+         "mean_spectrum_mse",
+         "wasserstein_raw_pointwise_mean",
+         "wasserstein_normalized_pointwise_mean",
+@@ -1798,9 +1795,9 @@ def main() -> None:
+                 )
+                 _plot_peak_intensity_violins(
+                     axis=axis,
+-                    training=training,
+-                    reference=reference,
+-                    generated=generated,
++                    training=training_model_normalized,
++                    reference=reference_model_normalized,
++                    generated=generated_model_normalized,
+                     details=peak_details,
+                     condition=source_name,
+                     output=(
+@@ -1831,9 +1828,9 @@ def main() -> None:
+             )
+             _plot_spectral_distribution(
+                 axis=axis,
+-                training=training,
+-                reference=reference,
+-                generated=generated,
++                training=training_model_normalized,
++                reference=reference_model_normalized,
++                generated=generated_model_normalized,
+                 condition=source_name,
+                 output=(
+                     output_root
+@@ -1865,7 +1862,6 @@ def main() -> None:
+             "raman_start_cm1": float(axis[0]),
+             "raman_end_cm1": float(axis[-1]),
+             "point_count": int(axis.size),
+-            **_metric_summary_fields(nearest),
+             **{
+                 f"nearest_reference_{metric}_{statistic}": float(
+                     summarize_vector(
+@@ -1880,18 +1876,18 @@ def main() -> None:
+                 )
+                 for statistic in ("mean", "std", "p05", "median", "p95")
+             },
++            **_metric_summary_fields(nearest),
+             **heldout_context,
+             **generated_training_context,
+             "generated_to_training_mse_ratio_vs_heldout": (
+                 generated_to_training_mse
+                 / max(heldout_to_training_mse, EPSILON)
+             ),
+-            **_center_metrics(reference, generated),
+-            **_pointwise_wasserstein(
+-                training=training,
+-                reference=reference,
+-                generated=generated,
++            **_model_normalized_center_metrics(
++                reference_model_normalized,
++                generated_model_normalized,
+             ),
++            **_center_metrics(reference, generated),
+             "wasserstein_model_normalized_pointwise_mean": (
+                 model_normalized_wasserstein[
+                     "wasserstein_raw_pointwise_mean"
+@@ -1913,6 +1909,11 @@ def main() -> None:
+                     generated_model_normalized.reshape(-1),
+                 )
+             ),
++            **_pointwise_wasserstein(
++                training=training,
++                reference=reference,
++                generated=generated,
++            ),
+             **_training_supported_intensity_metrics(
+                 training=training,
+                 generated=generated,
+@@ -1933,24 +1934,30 @@ def main() -> None:
+         summary_rows.append(row)
+         print(
+             f"[{condition_index + 1}/{len(conditions)}] {source_name}："
+-            f"MSE={row['nearest_reference_mse_mean']:.6g}；"
+-            f"RMSE={row['nearest_reference_rmse_mean']:.6g}；"
+-            "shape-MSE/RMSE="
+-            f"{row['nearest_reference_standardized_shape_mse_mean']:.6g}/"
+-            f"{row['nearest_reference_standardized_shape_rmse_mean']:.6g}；"
+-            "model-norm MSE/RMSE="
++            "论文主指标(model-normalized)：MSE/RMSE="
+             f"{row['nearest_reference_model_normalized_mse_mean']:.6g}/"
+             f"{row['nearest_reference_model_normalized_rmse_mean']:.6g}；"
+-            f"cos={row['nearest_reference_cosine_mean']:.6f}；"
+-            f"r={row['nearest_reference_pearson_mean']:.6f}；"
+-            f"W1raw={row['wasserstein_raw_pointwise_mean']:.6f}；"
+-            f"W1norm={row['wasserstein_normalized_pointwise_mean']:.6f}"
++            "cos="
++            f"{row['nearest_reference_model_normalized_cosine_mean']:.6f}；"
++            "r="
++            f"{row['nearest_reference_model_normalized_pearson_mean']:.6f}；"
++            "W1global="
++            f"{row['wasserstein_model_normalized_global_flattened']:.6f}；"
++            "W1point="
++            f"{row['wasserstein_model_normalized_pointwise_mean']:.6f}"
+         )
+         print(
+-            "  平均谱："
+-            f"MSE={row['mean_spectrum_mse']:.6g}；"
+-            f"cos={row['mean_spectrum_cosine']:.6f}；"
+-            f"r={row['mean_spectrum_pearson']:.6f}"
++            "  归一化平均谱：MSE/RMSE="
++            f"{row['model_normalized_mean_spectrum_mse']:.6g}/"
++            f"{row['model_normalized_mean_spectrum_rmse']:.6g}；"
++            f"cos={row['model_normalized_mean_spectrum_cosine']:.6f}；"
++            f"r={row['model_normalized_mean_spectrum_pearson']:.6f}"
++        )
++        print(
++            "  raw补充诊断：MSE/RMSE="
++            f"{row['nearest_reference_mse_mean']:.6g}/"
++            f"{row['nearest_reference_rmse_mean']:.6g}；"
++            f"W1point={row['wasserstein_raw_pointwise_mean']:.6f}"
+         )
+         print(
+             "  train分布参照：generated/train MSE="
+@@ -2102,21 +2109,15 @@ def main() -> None:
+         f"reference_split: {arguments.reference_split}",
+         f"condition_count: {condition_summary.shape[0]}",
+         f"plot_mode: {arguments.plot_mode}",
+-        "MSE/RMSE/cosine/Pearson: same Raman positions after selecting the nearest same-condition held-out spectrum; values are never sorted",
+-        "RMSE: mean per-spectrum raw RMSE; it is not QQ RMSE",
++        "Paper-primary MSE/RMSE/cosine/Pearson: checkpoint-normalized values paired at the same Raman positions; values are never sorted",
++        "Paper-primary Wasserstein: flattened checkpoint-normalized intensity distributions; pointwise W1 is retained separately",
++        "Paper-primary QQ: independently sorted checkpoint-normalized quantiles with R2 and identity-line RMSE",
++        "Raw-intensity metrics are supplementary physical-amplitude diagnostics only",
+         "Standardized shape MSE/RMSE: per-spectrum z-normalized shape comparison",
+         "Model-normalized metrics: final delivered spectra transformed with the checkpoint train-only normalizer",
+-        "Wasserstein global: flattened normalized intensity distributions; pointwise W1 is retained separately",
+         "Diversity: generated pairwise distance relative to 12 training spectra",
+-        "QQ: independently sorted quantiles; model-normalized QQ is paper-compatible",
+         "",
+-        "Overall original metric values (condition means):",
+-        f"nearest_reference_mse_mean: {overall_mean['nearest_reference_mse_mean']:.9g}",
+-        f"nearest_reference_rmse_mean: {overall_mean['nearest_reference_rmse_mean']:.9g}",
+-        "nearest_reference_standardized_shape_mse_mean: "
+-        f"{overall_mean['nearest_reference_standardized_shape_mse_mean']:.9g}",
+-        "nearest_reference_standardized_shape_rmse_mean: "
+-        f"{overall_mean['nearest_reference_standardized_shape_rmse_mean']:.9g}",
++        "Paper-primary checkpoint-normalized metrics (condition means):",
+         "nearest_reference_model_normalized_mse_mean: "
+         f"{overall_mean['nearest_reference_model_normalized_mse_mean']:.9g}",
+         "nearest_reference_model_normalized_rmse_mean: "
+@@ -2125,6 +2126,29 @@ def main() -> None:
+         f"{overall_mean['nearest_reference_model_normalized_cosine_mean']:.9g}",
+         "nearest_reference_model_normalized_pearson_mean: "
+         f"{overall_mean['nearest_reference_model_normalized_pearson_mean']:.9g}",
++        "wasserstein_model_normalized_global_flattened: "
++        f"{overall_mean['wasserstein_model_normalized_global_flattened']:.9g}",
++        "wasserstein_model_normalized_pointwise_mean: "
++        f"{overall_mean['wasserstein_model_normalized_pointwise_mean']:.9g}",
++        f"qq_model_normalized_r2: {overall_mean['qq_model_normalized_r2']:.9g}",
++        "qq_model_normalized_rmse: "
++        f"{overall_mean['qq_model_normalized_rmse']:.9g}",
++        "model_normalized_mean_spectrum_mse: "
++        f"{overall_mean['model_normalized_mean_spectrum_mse']:.9g}",
++        "model_normalized_mean_spectrum_rmse: "
++        f"{overall_mean['model_normalized_mean_spectrum_rmse']:.9g}",
++        "model_normalized_mean_spectrum_cosine: "
++        f"{overall_mean['model_normalized_mean_spectrum_cosine']:.9g}",
++        "model_normalized_mean_spectrum_pearson: "
++        f"{overall_mean['model_normalized_mean_spectrum_pearson']:.9g}",
++        "",
++        "Raw-intensity and shape diagnostics (supplementary):",
++        f"nearest_reference_mse_mean: {overall_mean['nearest_reference_mse_mean']:.9g}",
++        f"nearest_reference_rmse_mean: {overall_mean['nearest_reference_rmse_mean']:.9g}",
++        "nearest_reference_standardized_shape_mse_mean: "
++        f"{overall_mean['nearest_reference_standardized_shape_mse_mean']:.9g}",
++        "nearest_reference_standardized_shape_rmse_mean: "
++        f"{overall_mean['nearest_reference_standardized_shape_rmse_mean']:.9g}",
+         f"nearest_reference_cosine_mean: {overall_mean['nearest_reference_cosine_mean']:.9g}",
+         f"nearest_reference_pearson_mean: {overall_mean['nearest_reference_pearson_mean']:.9g}",
+         f"heldout_to_training_mse_mean: {overall_mean['heldout_to_training_mse_mean']:.9g}",
+@@ -2134,10 +2158,6 @@ def main() -> None:
+         f"mean_spectrum_mse: {overall_mean['mean_spectrum_mse']:.9g}",
+         f"wasserstein_raw_pointwise_mean: {overall_mean['wasserstein_raw_pointwise_mean']:.9g}",
+         f"wasserstein_normalized_pointwise_mean: {overall_mean['wasserstein_normalized_pointwise_mean']:.9g}",
+-        "wasserstein_model_normalized_pointwise_mean: "
+-        f"{overall_mean['wasserstein_model_normalized_pointwise_mean']:.9g}",
+-        "wasserstein_model_normalized_global_flattened: "
+-        f"{overall_mean['wasserstein_model_normalized_global_flattened']:.9g}",
+         f"diversity_pairwise_mse_ratio: {overall_mean['diversity_pairwise_mse_ratio']:.9g}",
+         f"diversity_pearson_distance_ratio: {overall_mean['diversity_pearson_distance_ratio']:.9g}",
+         f"peak_position_std_ratio_median: {overall_mean.get('peak_position_std_ratio_median', float('nan')):.9g}",
+@@ -2164,9 +2184,6 @@ def main() -> None:
+         f"{overall_mean['qq_oracle_outside_fraction']:.9g}",
+         f"qq_raw_r2: {overall_mean['qq_raw_r2']:.9g}",
+         f"qq_raw_rmse: {overall_mean['qq_raw_rmse']:.9g}",
+-        f"qq_model_normalized_r2: {overall_mean['qq_model_normalized_r2']:.9g}",
+-        "qq_model_normalized_rmse: "
+-        f"{overall_mean['qq_model_normalized_rmse']:.9g}",
+         "qq_training_standardized_r2: "
+         f"{overall_mean['qq_training_standardized_r2']:.9g}",
+         "qq_training_standardized_rmse: "
+diff --git a/scripts/generate_conditional_spectra.py b/scripts/generate_conditional_spectra.py
+index 525fc37..ab8bb3b 100644
+--- a/scripts/generate_conditional_spectra.py
++++ b/scripts/generate_conditional_spectra.py
+@@ -574,6 +574,19 @@ def main() -> None:
+                     "最大|delta-z|="
+                     f"{tail_diagnostics['maximum_absolute_correction_z_used']:.4f}"
+                 )
++                print(
++                    "  QQ后多样性保护：pairwise-MSE ratio="
++                    f"{tail_diagnostics['pairwise_mse_ratio_before']:.4f} -> "
++                    f"{tail_diagnostics['pairwise_mse_ratio_unguarded']:.4f}"
++                    "(未保护) -> "
++                    f"{tail_diagnostics['pairwise_mse_ratio_after']:.4f}；"
++                    "要求≥"
++                    f"{tail_diagnostics['pairwise_mse_ratio_required']:.4f}；"
++                    "QQ修正保留系数="
++                    f"{tail_diagnostics['calibration_blend_factor']:.4f}；"
++                    "触发="
++                    f"{tail_diagnostics['diversity_guard_activated']}"
++                )
+         if envelope_diagnostics is not None:
+             print(
+                 "  逐点强度包络：lower/upper修改点="
+diff --git a/src/spectrum_generator.py b/src/spectrum_generator.py
+index 5349b32..64f49ab 100644
+--- a/src/spectrum_generator.py
++++ b/src/spectrum_generator.py
+@@ -146,6 +146,161 @@ def _mean_pairwise_mse_from_variance(spectra: np.ndarray) -> float:
+     return float(2.0 * np.mean(pointwise_variance))
+ 
+ 
++def _pairwise_indices(
++    number: int,
++    *,
++    maximum_pair_count: int,
++    random_seed: int,
++) -> tuple[np.ndarray, np.ndarray]:
++    """Return every small-batch pair or a reproducible large-batch sample."""
++
++    total = number * (number - 1) // 2
++    requested = min(int(maximum_pair_count), total)
++    if requested <= 0:
++        raise ValueError("maximum_pair_count必须大于0。")
++    if requested == total:
++        return np.triu_indices(number, k=1)
++
++    random_generator = np.random.default_rng(int(random_seed))
++    all_left, all_right = np.triu_indices(number, k=1)
++    selected = random_generator.choice(total, size=requested, replace=False)
++    return all_left[selected], all_right[selected]
++
++
++def _pairwise_mse_values(
++    spectra: np.ndarray,
++    *,
++    maximum_pair_count: int = 10000,
++    random_seed: int = 2026,
++) -> np.ndarray:
++    """Return exact small-batch or sampled large-batch pairwise MSE values."""
++
++    array = np.asarray(spectra, dtype=np.float64)
++    if array.ndim != 2 or array.shape[0] < 2:
++        raise ValueError("pairwise-MSE至少需要二维数组中的2条光谱。")
++    left, right = _pairwise_indices(
++        array.shape[0],
++        maximum_pair_count=maximum_pair_count,
++        random_seed=random_seed,
++    )
++    values = np.empty(left.size, dtype=np.float64)
++    for start in range(0, left.size, 256):
++        stop = min(start + 256, left.size)
++        difference = array[left[start:stop]] - array[right[start:stop]]
++        values[start:stop] = np.mean(np.square(difference), axis=1)
++    return values
++
++
++def _protect_pairwise_diversity_after_calibration(
++    original: np.ndarray,
++    calibrated: np.ndarray,
++    training: np.ndarray,
++    *,
++    minimum_ratio: float,
++    search_iterations: int,
++    pair_count: int = 10000,
++    random_seed: int = 2026,
++) -> tuple[np.ndarray, dict[str, float | int | bool]]:
++    """Blend back only enough calibration to retain condition diversity.
++
++    The floor is measured with the same median all-pairs MSE used by the
++    evaluator.  When the original batch is already below the configured
++    training ratio, calibration is allowed only if it does not reduce that
++    batch's diversity further.
++    """
++
++    original = np.asarray(original, dtype=np.float64)
++    calibrated = np.asarray(calibrated, dtype=np.float64)
++    training = np.asarray(training, dtype=np.float64)
++    if original.shape != calibrated.shape or original.ndim != 2:
++        raise ValueError("多样性保护前后的生成谱形状必须一致且为二维。")
++    if training.ndim != 2 or training.shape[1] != original.shape[1]:
++        raise ValueError("多样性保护的training与生成谱Raman长度不一致。")
++    if not 0.0 <= minimum_ratio <= 1.0:
++        raise ValueError(
++            "minimum_postcalibration_pairwise_mse_ratio必须位于[0,1]。"
++        )
++    if not 4 <= int(search_iterations) <= 64:
++        raise ValueError("diversity_guard_search_iterations必须位于[4,64]。")
++    if int(pair_count) <= 0:
++        raise ValueError("diversity_guard_pair_count必须大于0。")
++
++    training_median = float(
++        np.median(
++            _pairwise_mse_values(
++                training,
++                maximum_pair_count=pair_count,
++                random_seed=random_seed,
++            )
++        )
++    )
++    left, right = _pairwise_indices(
++        original.shape[0],
++        maximum_pair_count=pair_count,
++        random_seed=random_seed,
++    )
++    constant = np.empty(left.size, dtype=np.float64)
++    linear = np.empty(left.size, dtype=np.float64)
++    quadratic = np.empty(left.size, dtype=np.float64)
++    delta = calibrated - original
++    for start in range(0, left.size, 256):
++        stop = min(start + 256, left.size)
++        base_difference = (
++            original[left[start:stop]] - original[right[start:stop]]
++        )
++        delta_difference = (
++            delta[left[start:stop]] - delta[right[start:stop]]
++        )
++        constant[start:stop] = np.mean(np.square(base_difference), axis=1)
++        linear[start:stop] = np.mean(base_difference * delta_difference, axis=1)
++        quadratic[start:stop] = np.mean(np.square(delta_difference), axis=1)
++    original_median = float(np.median(constant))
++    calibrated_median = float(np.median(constant + 2.0 * linear + quadratic))
++    denominator = max(training_median, 1.0e-12)
++    ratio_before = original_median / denominator
++    ratio_unguarded = calibrated_median / denominator
++    required_ratio = min(float(minimum_ratio), ratio_before)
++
++    blend = 1.0
++    activated = bool(
++        minimum_ratio > 0.0 and ratio_unguarded < required_ratio - 1.0e-12
++    )
++    if activated:
++        low = 0.0
++        high = 1.0
++        for _ in range(int(search_iterations)):
++            middle = 0.5 * (low + high)
++            pairwise = constant + 2.0 * middle * linear + middle * middle * quadratic
++            ratio = float(np.median(pairwise)) / denominator
++            if ratio >= required_ratio:
++                low = middle
++            else:
++                high = middle
++        blend = low
++
++    protected = original + blend * delta
++    protected_pairwise = (
++        constant + 2.0 * blend * linear + blend * blend * quadratic
++    )
++    ratio_after = float(np.median(protected_pairwise)) / denominator
++    if activated and ratio_after < required_ratio - 1.0e-9:
++        blend = 0.0
++        protected = original.copy()
++        ratio_after = ratio_before
++    diagnostics: dict[str, float | int | bool] = {
++        "diversity_guard_enabled": bool(minimum_ratio > 0.0),
++        "diversity_guard_activated": activated,
++        "pairwise_mse_ratio_before": ratio_before,
++        "pairwise_mse_ratio_unguarded": ratio_unguarded,
++        "pairwise_mse_ratio_required": required_ratio,
++        "pairwise_mse_ratio_after": ratio_after,
++        "calibration_blend_factor": float(blend),
++        "diversity_guard_search_iterations": int(search_iterations),
++        "diversity_guard_pair_count": int(left.size),
++    }
++    return protected, diagnostics
++
++
+ def apply_condition_pca_spread_calibration(
+     generated_spectra: np.ndarray,
+     training_spectra: np.ndarray,
+@@ -573,6 +728,17 @@ def _apply_condition_oracle_piecewise_quantile_calibration(
+     maximum_modified_fraction = float(
+         configuration.get("maximum_modified_fraction", 1.0)
+     )
++    minimum_pairwise_ratio = float(
++        configuration.get(
++            "minimum_postcalibration_pairwise_mse_ratio", 0.0
++        )
++    )
++    diversity_search_iterations = int(
++        configuration.get("diversity_guard_search_iterations", 20)
++    )
++    diversity_pair_count = int(
++        configuration.get("diversity_guard_pair_count", 10000)
++    )
+     random_seed = int(configuration.get("random_seed", 2026))
+     epsilon = float(configuration.get("epsilon", 1.0e-12))
+ 
+@@ -601,6 +767,16 @@ def _apply_condition_oracle_piecewise_quantile_calibration(
+         raise ValueError("maximum_absolute_correction_z必须为正数。")
+     if not 0.0 < maximum_modified_fraction <= 1.0 or epsilon <= 0.0:
+         raise ValueError("maximum_modified_fraction或epsilon无效。")
++    if not 0.0 <= minimum_pairwise_ratio <= 1.0:
++        raise ValueError(
++            "minimum_postcalibration_pairwise_mse_ratio必须位于[0,1]。"
++        )
++    if not 4 <= diversity_search_iterations <= 64:
++        raise ValueError(
++            "diversity_guard_search_iterations必须位于[4,64]。"
++        )
++    if diversity_pair_count <= 0:
++        raise ValueError("diversity_guard_pair_count必须大于0。")
+ 
+     generated_z, training_z, center, scale = _training_standardized_values(
+         generated, training
+@@ -683,6 +859,18 @@ def _apply_condition_oracle_piecewise_quantile_calibration(
+     else:
+         delta = np.zeros_like(flat)
+     corrected_z = (flat + delta).reshape(generated_z.shape)
++    unguarded = center[np.newaxis, :] + scale[np.newaxis, :] * corrected_z
++    corrected, diversity_guard = _protect_pairwise_diversity_after_calibration(
++        generated,
++        unguarded,
++        training,
++        minimum_ratio=minimum_pairwise_ratio,
++        search_iterations=diversity_search_iterations,
++        pair_count=diversity_pair_count,
++        random_seed=random_seed,
++    )
++    corrected_z = (corrected - center[np.newaxis, :]) / scale[np.newaxis, :]
++    delta = (corrected_z - generated_z).reshape(-1)
+     modified = np.abs(delta) > 1.0e-12
+     modified_fraction = float(np.mean(modified))
+     if modified_fraction > maximum_modified_fraction + 1.0e-12:
+@@ -693,7 +881,6 @@ def _apply_condition_oracle_piecewise_quantile_calibration(
+ 
+     corrected_q = np.quantile(corrected_z.reshape(-1), probabilities)
+     ratios_after = np.diff(corrected_q) / training_spans
+-    corrected = center[np.newaxis, :] + scale[np.newaxis, :] * corrected_z
+     lower_before = float(
+         (generated_q[2] - generated_q[0])
+         / max(float(training_q[2] - training_q[0]), epsilon)
+@@ -744,6 +931,7 @@ def _apply_condition_oracle_piecewise_quantile_calibration(
+             np.sum(np.any(modified.reshape(generated_z.shape), axis=1))
+         ),
+         "maximum_absolute_correction_z_used": float(np.max(np.abs(delta))),
++        **diversity_guard,
+     }
+     return corrected.astype(np.float32, copy=False), diagnostics
+ 
+diff --git a/tests/test_sers_generation_evaluator.py b/tests/test_sers_generation_evaluator.py
+index a77023b..eae8bbe 100644
+--- a/tests/test_sers_generation_evaluator.py
++++ b/tests/test_sers_generation_evaluator.py
+@@ -6,6 +6,7 @@ from scripts.evaluate_d4_2_generation import (
+     _comparison_summary_fields,
+     _diversity_fields,
+     _metric_summary_fields,
++    _model_normalized_center_metrics,
+     _pointwise_wasserstein,
+     _peak_morphology_diversity,
+     _qq_agreement_metrics,
+@@ -438,6 +439,15 @@ def test_identical_distributions_have_zero_pointwise_wasserstein():
+     assert metrics["wasserstein_normalized_pointwise_mean"] == 0.0
+ 
+ 
++def test_model_normalized_center_metrics_use_normalized_arrays():
++    reference = np.asarray([[0.0, 0.5, 1.0], [0.0, 0.4, 0.8]])
++    generated = reference + 0.1
++    metrics = _model_normalized_center_metrics(reference, generated)
++    assert np.isclose(metrics["model_normalized_mean_spectrum_mse"], 0.01)
++    assert np.isclose(metrics["model_normalized_mean_spectrum_rmse"], 0.1)
++    assert "mean_spectrum_mse" not in metrics
++
++
+ def test_quality_stratified_summary_covers_all_condition_families():
+     rows = []
+     for condition, points in (
+@@ -460,6 +470,10 @@ def test_quality_stratified_summary_covers_all_condition_families():
+                 "nearest_reference_model_normalized_pearson_mean": 0.96,
+                 "nearest_reference_cosine_mean": 0.98,
+                 "nearest_reference_pearson_mean": 0.97,
++                "model_normalized_mean_spectrum_mse": 0.008,
++                "model_normalized_mean_spectrum_rmse": 0.089,
++                "model_normalized_mean_spectrum_cosine": 0.99,
++                "model_normalized_mean_spectrum_pearson": 0.98,
+                 "mean_spectrum_mse": 20.0,
+                 "wasserstein_raw_pointwise_mean": 5.0,
+                 "wasserstein_normalized_pointwise_mean": 0.03,
+diff --git a/tests/test_spectrum_generation.py b/tests/test_spectrum_generation.py
+index 783bd30..50d7a62 100644
+--- a/tests/test_spectrum_generation.py
++++ b/tests/test_spectrum_generation.py
+@@ -9,6 +9,7 @@ from src.prior_residual import (
+     PriorResidualTransformer,
+ )
+ from src.spectrum_generator import (
++    _protect_pairwise_diversity_after_calibration,
+     apply_condition_intensity_envelope_guard,
+     apply_condition_mean_fidelity_calibration,
+     apply_condition_negative_floor_guard,
+@@ -456,6 +457,35 @@ def test_oracle_piecewise_quantile_calibration_reduces_s_shaped_qq_error():
+     assert abs(np.median(corrected_z) - np.median(generated_z)) < 1.0e-4
+ 
+ 
++def test_postcalibration_diversity_guard_limits_pairwise_mse_collapse():
++    random_generator = np.random.default_rng(2032)
++    training = random_generator.normal(0.0, 1.0, size=(12, 160))
++    original = random_generator.normal(0.0, 1.0, size=(20, 160))
++    collapsed = np.mean(original, axis=0, keepdims=True) + 0.20 * (
++        original - np.mean(original, axis=0, keepdims=True)
++    )
++
++    protected, diagnostics = _protect_pairwise_diversity_after_calibration(
++        original,
++        collapsed,
++        training,
++        minimum_ratio=0.82,
++        search_iterations=24,
++    )
++
++    assert diagnostics["diversity_guard_activated"] is True
++    assert 0.0 < diagnostics["calibration_blend_factor"] < 1.0
++    assert (
++        diagnostics["pairwise_mse_ratio_after"]
++        >= diagnostics["pairwise_mse_ratio_required"] - 1.0e-6
++    )
++    assert (
++        diagnostics["pairwise_mse_ratio_after"]
++        > diagnostics["pairwise_mse_ratio_unguarded"]
++    )
++    assert np.isfinite(protected).all()
++
++
+ def test_quality_fidelity_losses_detect_shape_mean_and_envelope_errors():
+     diffusion = object.__new__(MaskedGaussianDiffusion1D)
+     nn.Module.__init__(diffusion)
+-- 
+Codex
+

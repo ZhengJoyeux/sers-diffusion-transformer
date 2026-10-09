@@ -1,0 +1,259 @@
+"""Logged, resumable phases for the D4.26 suite. No implicit training."""
+import argparse
+import csv
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import statistics
+import subprocess
+import sys
+import time
+import numpy as np
+import yaml
+
+METRICS=['nearest_reference_mse_mean','nearest_reference_pearson_mean',
+ 'nearest_reference_cosine_mean','wasserstein_raw_pointwise_mean',
+ 'generated_to_training_mse_mean','heldout_to_training_mse_mean','generated_to_training_mse_ratio_vs_heldout',
+ 'nearest_reference_standardized_shape_mse_mean','diversity_pairwise_mse_ratio',
+ 'diversity_pearson_distance_ratio','qq_training_standardized_rmse',
+ 'qq_lower_tail_span_ratio','qq_upper_tail_span_ratio','qq_oracle_outside_fraction',
+ 'peak_position_std_ratio_median','peak_height_iqr_ratio_median','peak_width_iqr_ratio_median',
+ 'generated_below_training_envelope_point_fraction','generated_above_training_envelope_point_fraction']
+
+
+def digest(path): return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def expected_completed_steps(configuration, training_count=1512):
+    training = configuration['training']
+    size = int(training['batch_size'])
+    if size <= 0:
+        raise ValueError('batch_size必须为正。')
+    batches = training_count // size if training.get('drop_last',False) else math.ceil(training_count/size)
+    return batches * int(training['number_of_epochs'])
+
+
+def write_json(path,value):
+    path=Path(path);tmp=path.with_suffix(path.suffix+'.tmp')
+    tmp.write_text(json.dumps(value,ensure_ascii=False,indent=2,allow_nan=False));tmp.replace(path)
+
+
+def run_logged(command,project,environment,log):
+    log=Path(log);log.parent.mkdir(parents=True,exist_ok=True)
+    # New log for each invocation, including resume; preserve prior failures.
+    if log.exists():log=log.with_name(log.stem+'_'+str(time.time_ns())+log.suffix)
+    started=time.time();print('RUN:',' '.join(map(str,command)),flush=True)
+    with log.open('w',encoding='utf-8') as handle:
+        child=subprocess.Popen(command,cwd=project,env=environment,stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,text=True,bufsize=1)
+        for line in child.stdout:print(line,end='',flush=True);handle.write(line);handle.flush()
+        status=child.wait()
+    write_json(log.with_suffix('.status.json'),{'command':list(map(str,command)),
+        'exit_code':status,'wall_seconds':time.time()-started})
+    if status:raise RuntimeError(f'运行失败({status})；日志：{log}')
+
+
+def metrics_from(directory,condition):
+    with (directory/'condition_metrics.csv').open(encoding='utf-8-sig') as f:rows=list(csv.DictReader(f))
+    if len(rows)!=1 or rows[0]['condition']!=condition or rows[0]['reference_split']!='validation' or int(rows[0]['generated_count'])!=200:
+        raise ValueError('评价的条件/划分/条数不符。')
+    with (directory/'generated_to_reference_details.csv').open(encoding='utf-8-sig') as f:details=list(csv.DictReader(f))
+    derivatives=[float(r['first_derivative_pearson']) for r in details]
+    result={k:float(rows[0][k]) for k in METRICS}
+    result['first_derivative_pearson_mean']=statistics.mean(derivatives)
+    if len(derivatives)!=200 or not all(math.isfinite(x) for x in [*result.values(),*derivatives]):
+        raise ValueError('评价数值非有限或条数错误。')
+    return result
+
+
+def write_csv(path,rows):
+    if not rows:return
+    with Path(path).open('w',encoding='utf-8-sig',newline='') as f:
+        writer=csv.DictWriter(f,fieldnames=list(rows[0]));writer.writeheader();writer.writerows(rows)
+
+
+def load_suite(suite):
+    index=json.loads((suite/'run_index.json').read_text());project=Path(index['project'])
+    if index.get('schema')!='d4_26_hybrid_suite_v1':raise ValueError('不是本版suite。')
+    for relative,sha in index['source_hashes'].items():
+        if digest(project/relative)!=sha:raise ValueError(f'实验准备后代码发生变化：{relative}；停止。')
+    for variant,path in index['configs'].items():
+        if digest(path)!=index['config_sha256'][variant]:raise ValueError(f'{variant}配置发生变化；停止。')
+    if digest(index['baseline_checkpoint'])!=index['baseline_checkpoint_sha256']:
+        raise ValueError('原baseline checkpoint发生变化。')
+    return index,project
+
+
+def validate_checkpoint(path,variant,index,project):
+    from src.checkpoint_manager import load_checkpoint_file
+    from src.configuration_loader import validate_config
+    from src.hybrid_unet_configuration import validate_hybrid_context
+    from src.conditional_prior_residual import ConditionalPriorResidualBank
+    checkpoint=load_checkpoint_file(path)
+    expected=yaml.safe_load(Path(index['configs'][variant]).read_text())
+    actual=checkpoint['configuration']
+    validate_config(actual);validate_config(expected)
+    if validate_hybrid_context(actual)!=validate_hybrid_context(expected):raise ValueError('checkpoint的Transformer架构与配置不符。')
+    for key in ('data','conditioning','prior_residual','broad_local_residual','diversity_constraints','diffusion','normalization',
+                'training','physics_constraints','peak_derivative_constraints','relative_peak_intensity_constraints',
+                'peak_parameter_constraints','feature_peak_residual_limiter','local_peak_distribution_constraints'):
+        if actual.get(key)!=expected.get(key):raise ValueError(f'checkpoint与固定实验配置的{key}不同。')
+    am={k:v for k,v in actual['model'].items() if k!='bottleneck_transformer'}
+    em={k:v for k,v in expected['model'].items() if k!='bottleneck_transformer'}
+    if am!=em:raise ValueError('checkpoint其余U-Net设置发生变化。')
+    if actual['training']['number_of_epochs']!=expected['training']['number_of_epochs'] or actual['project']['random_seed']!=index['seed']:
+        raise ValueError('checkpoint训练预算/seed不符。')
+    metadata=checkpoint['metadata'];summary=ConditionalPriorResidualBank.from_state_dict(metadata['conditional_prior_residual_state']).summary()
+    if (summary['number_of_conditions']!=126 or summary['total_training_spectra']!=1512
+        or summary['training_spectra_per_condition']!=[12] or summary['valid_lengths']!={'1401':30,'1901':96}):
+        raise ValueError('必须为共享126条件、1512训练谱的checkpoint。')
+    splits=[set(metadata[k]) for k in ('training_indices','validation_indices','test_indices')]
+    if (list(map(len,splits))!=[1512,504,504] or splits[0]&splits[1] or splits[0]&splits[2]
+        or splits[1]&splits[2] or set.union(*splits)!=set(range(2520))):
+        raise ValueError('划分必须为不相交的1512/504/504、覆盖2520条真实谱。')
+    latest=load_checkpoint_file(Path(path).parent/'latest.pt')
+    completed_steps = expected_completed_steps(expected,len(splits[0]))
+    if int(latest['step'])!=completed_steps:
+        raise ValueError(f'latest.pt未完成{expected["training"]["number_of_epochs"]} epoch/{completed_steps} step；请先完成训练。')
+    return int(checkpoint['step'])
+
+
+def review(index,project,suite,variants,env,evaluate_only):
+    from src.generation_stage_trace import load_trace, mean_pairwise_mse
+    from src.stage_trace_replay import replay_final,verify_baseline_replay
+    from src.spectrum_exporter import export_generated_spectra
+    review_root=suite/'pilot_review';review_root.mkdir(exist_ok=True)
+    rows=[];reports=[];loaded={}
+    for variant in variants:
+        config=Path(index['configs'][variant]);cfg=yaml.safe_load(config.read_text())
+        checkpoint=(Path(index['baseline_checkpoint']) if variant=='baseline' else suite/variant/'checkpoints/best.pt')
+        if not checkpoint.is_file():raise FileNotFoundError(f'{variant}尚未训练完成，缺少{checkpoint}')
+        step=validate_checkpoint(checkpoint,variant,index,project)
+        signature={'checkpoint_sha256':digest(checkpoint),'config_sha256':digest(config),'checkpoint_step':step}
+        for condition in index['conditions']:
+            root=review_root/'generated'/variant/condition
+            td=root/'_diagnostics'/condition
+            provenance=root/'hybrid_provenance.json'
+            if root.exists():
+                if not provenance.is_file() or json.loads(provenance.read_text())!=signature:
+                    raise RuntimeError(f'部分生成或签名不符，保留目录并停止：{root}。请改名后重试。')
+            else:
+                if evaluate_only:raise FileNotFoundError(f'缺少阶段缓存：{root}')
+                run_logged([sys.executable,'-u','-m','scripts.generate_conditional_spectra','--config',str(config),
+                    '--checkpoint',str(checkpoint),'--condition',condition,'--number','200','--model-source','ema',
+                    '--device','cuda','--save-stage-trace','--output-directory',str(root)],project,env,
+                    review_root/f'generation_{variant}_{condition}.log')
+                write_json(provenance,signature)
+            trace,arrays=load_trace(td)
+            if (trace['status']!='complete' or trace['source_condition_name']!=condition or trace['checkpoint_step']!=step
+                or trace['generated_count']!=200 or trace['training_count']!=12 or trace['model_source']!='ema'
+                or trace['seed']!=2026 or trace['diffusion_timesteps']!=200 or trace['sampling_timesteps']!=100):
+                raise ValueError('阶段缓存模型/数量/实际采样配置不符。')
+            fingerprints=trace.get('sampling_rng_fingerprints',[])
+            if sum(x['batch_size'] for x in fingerprints)!=200 or any(len(x.get('cuda',''))!=64 for x in fingerprints):
+                raise ValueError('缺少完整的CUDA随机状态记录。')
+            if trace['generation_configuration'].get('joint_prior_sampling',{}).get('enabled',False):
+                raise ValueError('本次架构实验禁止联合采样。')
+            final,_=replay_final(trace,arrays,'baseline')
+            replay=verify_baseline_replay(arrays['07_terminal'],final)
+            manifest=json.loads((root/'generation_manifest.json').read_text())
+            if len(manifest['conditions'])!=1:raise ValueError('生成manifest必须恰好包含一个具体条件。')
+            record=manifest['conditions'][0]
+            rep={'condition':condition,'variant':variant,'checkpoint_step':step,'final_replay':replay,
+                 'qq_calibration':record.get('oracle_tail_calibration'),
+                 'terminal':record.get('d4_25_final_delivery_guard'),'stage_pairwise_mean_mse':{}}
+            for stage in trace['stages']:
+                rep['stage_pairwise_mean_mse'][stage['name']]=mean_pairwise_mse(arrays[stage['name']])
+            for stage in ('01_ddpm_reconstruction','07_terminal'):
+                values=arrays[stage]
+                if values.shape!=(200,len(arrays['raman_shift'])) or not np.isfinite(values).all():
+                    raise ValueError('阶段光谱形状或有限值无效。')
+                exported=review_root/'diagnostic_exports'/variant/condition/stage
+                evaluation=review_root/'evaluations'/variant/condition/stage
+                esig={**signature,'cache_sha256':trace['cache_sha256'],'stage':stage,'reference_split':'validation'}
+                ep=evaluation/'evaluation_provenance.json'
+                if not (ep.is_file() and json.loads(ep.read_text())==esig
+                        and (evaluation/'condition_metrics.csv').is_file() and (evaluation/'generated_to_reference_details.csv').is_file()):
+                    export_generated_spectra(raman_shift=arrays['raman_shift'],spectra=values,
+                       spectrum_output_directory=exported/condition,plot_output_directory=exported/'_plots',
+                       base_name=condition+'_generated',output_formats=['xlsx'])
+                    run_logged([sys.executable,'-u','-m','scripts.evaluate_d4_2_generation','--config',str(config),
+                      '--checkpoint',str(checkpoint),'--condition',condition,'--generated',str(exported),
+                      '--reference-split','validation','--plot-mode','all','--output-directory',str(evaluation)],
+                      project,env,review_root/f'evaluation_{variant}_{condition}_{stage}.log')
+                    write_json(ep,esig)
+                rows.append({'condition':condition,'variant':variant,'stage':stage,**metrics_from(evaluation,condition)})
+            reports.append(rep);loaded[(condition,variant)]=(trace,arrays)
+            write_csv(review_root/'hybrid_stage_summary.csv',rows);write_json(review_root/'hybrid_report.json',reports)
+    comparisons=[]
+    if 'baseline' in variants:
+        for variant in variants:
+            if variant=='baseline':continue
+            for condition in index['conditions']:
+                ta,aa=loaded[(condition,'baseline')];tb,bb=loaded[(condition,variant)]
+                if ta['sampling_rng_fingerprints']!=tb['sampling_rng_fingerprints']:
+                    raise ValueError('架构比较初始随机状态不一致，停止报告配对结论。')
+                for key in ('raman_shift','training_full','training_outer','training_broad','training_base','generated_outer','generated_broad','00_sampled_base'):
+                    if not np.array_equal(aa[key],bb[key]):raise ValueError(f'同条件底谱/训练参考不一致：{key}')
+                for key in ('generation_configuration','condition_vector','normalization_state','training_indices','delivery_configuration','support'):
+                    if ta[key]!=tb[key]:raise ValueError(f'架构比较的{key}发生变化。')
+                for stage in ('01_ddpm_reconstruction','07_terminal'):
+                    a=next(r for r in rows if r['condition']==condition and r['variant']=='baseline' and r['stage']==stage)
+                    b=next(r for r in rows if r['condition']==condition and r['variant']==variant and r['stage']==stage)
+                    baseline_training=yaml.safe_load(Path(index['configs']['baseline']).read_text())['training']
+                    candidate_training=yaml.safe_load(Path(index['configs'][variant]).read_text())['training']
+                    budget_matched=baseline_training==candidate_training
+                    pair={'condition':condition,'candidate':variant,'stage':stage,'paired_noise_and_base_match':True,
+                          'training_budget_matched':budget_matched,
+                          'baseline_epochs':baseline_training['number_of_epochs'],
+                          'candidate_epochs':candidate_training['number_of_epochs'],
+                          'baseline_batch_size':baseline_training['batch_size'],
+                          'candidate_batch_size':candidate_training['batch_size']}
+                    for metric in [*METRICS,'first_derivative_pearson_mean']:
+                        pair[metric+'_baseline']=a[metric];pair[metric+'_candidate']=b[metric]
+                        pair[metric+'_delta']=b[metric]-a[metric]
+                    comparisons.append(pair)
+        write_csv(review_root/'hybrid_paired_comparison.csv',comparisons)
+    print(f'HYBRID PILOT REVIEW COMPLETE: {review_root}')
+    print('01包含采样内部保护；阶段导出仅用于诊断。此脚本不会批准126条件全量生成或下游增强。')
+
+
+def main():
+    p=argparse.ArgumentParser();p.add_argument('--suite',required=True,type=Path)
+    p.add_argument('--phase',required=True,choices=('check','train','review'))
+    p.add_argument('--variant',choices=('self','cross'),default='cross')
+    p.add_argument('--variants',nargs='+',choices=('baseline','self','cross'),default=['baseline','cross'])
+    p.add_argument('--physical-gpu',default='1');p.add_argument('--resume',action='store_true')
+    p.add_argument('--evaluate-only',action='store_true');a=p.parse_args()
+    suite=a.suite.expanduser().resolve();index,project=load_suite(suite);sys.path.insert(0,str(project))
+    env=os.environ.copy();env['CUDA_VISIBLE_DEVICES']=a.physical_gpu
+    if a.phase=='review':
+        if a.resume:raise ValueError('--resume只用于训练；review自动复用完整缓存。')
+        review(index,project,suite,a.variants,env,a.evaluate_only);return
+    if a.evaluate_only:raise ValueError('--evaluate-only只用于review。')
+    config=index['configs'][a.variant];run=suite/a.variant
+    if a.phase=='check':
+        run_logged([sys.executable,'-u',str(Path(__file__).parent/'verify_hybrid.py'),'--project',str(project),
+                    '--config',config,'--device','cuda'],project,env,run/'hybrid_synthetic_check.log')
+        run_logged([sys.executable,'-u','-m','scripts.start_ddpm_training','--config',config,'--pipeline-check-only'],
+                   project,env,run/'pipeline_check.log')
+        write_json(run/'check_pass.json',{'config_sha256':digest(config),'source_hashes':index['source_hashes']});return
+    cp=run/'check_pass.json'
+    if not cp.is_file() or json.loads(cp.read_text())!={'config_sha256':digest(config),'source_hashes':index['source_hashes']}:
+        raise ValueError('必须先完成此变体的check阶段。')
+    checkpoints=run/'checkpoints'
+    cmd=[sys.executable,'-u','-m','scripts.start_ddpm_training','--config',config]
+    if a.resume:
+        latest=checkpoints/'latest.pt'
+        if not latest.is_file():raise FileNotFoundError('尚无latest.pt，不能resume。')
+        cmd+=['--resume',str(latest)]
+    elif checkpoints.exists() and any(checkpoints.glob('*.pt')):
+        raise ValueError('此目录已有checkpoint；续训用--resume，禁止隐式重训覆盖。')
+    run_logged(cmd,project,env,run/'training_console.log')
+    run_logged([sys.executable,'-u',str(Path(__file__).parent/'verify_hybrid.py'),'--project',str(project),
+               '--config',config,'--checkpoint',str(checkpoints/'best.pt')],project,env,run/'checkpoint_verify.log')
+
+
+if __name__=='__main__':main()

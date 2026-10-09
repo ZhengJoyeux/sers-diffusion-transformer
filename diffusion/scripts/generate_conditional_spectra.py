@@ -16,6 +16,11 @@ from src.conditional_diversity_constraints import (
 from src.conditional_prior_residual import ConditionalPriorResidualBank
 from src.configuration_loader import load_configuration, resolve_project_path
 from src.intensity_normalizer import GlobalMinMaxNormalizer
+from src.final_spectrum_delivery import apply_final_delivery_guard
+from src.generation_stage_trace import (
+    StageTrace, joint_component_summary, raw_components,
+    support_snapshot, training_components,
+)
 from src.model_builder import build_diffusion_model
 from src.random_seed_manager import set_random_seed
 from src.spectrum_conditioning import (
@@ -52,6 +57,10 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--number", type=int, default=None)
     parser.add_argument("--model-source", choices=("raw", "ema"), default=None)
     parser.add_argument("--device", default=None)
+    parser.add_argument(
+        "--save-stage-trace", action="store_true",
+        help="保存同一次抽样的各阶段诊断缓存；不改变生成设置。",
+    )
     parser.add_argument(
         "--output-directory",
         default=None,
@@ -490,12 +499,33 @@ def main() -> None:
     envelope_configuration = generation.get(
         "intensity_envelope_guard", {}
     ) or {}
+    delivery_configuration = generation.get("final_delivery_guard", {}) or {}
+    if not isinstance(delivery_configuration, dict):
+        raise ValueError("generation.final_delivery_guard必须为字典。")
+    delivery_enabled = bool(delivery_configuration.get("enabled", False))
+    delivery_configuration = {**envelope_configuration, **delivery_configuration}
+    if delivery_enabled and normalizer is None:
+        raise ValueError("final delivery要求inverse_normalize=True，使用真实强度域。")
+    trace_enabled = bool(arguments.save_stage_trace)
+    joint_configuration = generation.get('joint_prior_sampling', {}) or {}
+    if not isinstance(joint_configuration, dict):
+        raise ValueError('generation.joint_prior_sampling必须为字典。')
+    joint_enabled = bool(joint_configuration.get('enabled', False))
+    if joint_enabled and (normalizer is None or conditional_prior_bank is None
+                         or not bool(getattr(diffusion, 'configured_prior_conditioning_enabled', False)
+                                     or getattr(diffusion.model, 'prior_conditioning_enabled', False))):
+        raise ValueError('联合先验采样要求条件先验输入及真实强度逆归一化。')
+    if trace_enabled and (normalizer is None or conditional_prior_bank is None
+                          or not bool(getattr(diffusion, "configured_prior_conditioning_enabled", False)
+                                      or getattr(diffusion.model, "prior_conditioning_enabled", False))
+                          or number < 2):
+        raise ValueError("阶段追踪要求条件先验输入、真实强度逆归一化及至少2条生成谱。")
     mean_enabled = bool(mean_configuration.get("enabled", False))
     spread_enabled = bool(spread_configuration.get("enabled", False))
     tail_enabled = bool(tail_configuration.get("enabled", False))
     envelope_enabled = bool(envelope_configuration.get("enabled", False))
     condition_calibration_enabled = (
-        mean_enabled or spread_enabled or tail_enabled or envelope_enabled
+        mean_enabled or spread_enabled or tail_enabled or envelope_enabled or delivery_enabled or trace_enabled or joint_enabled
     )
     training_collection = None
     relative_source_files = None
@@ -605,8 +635,12 @@ def main() -> None:
             spread_configuration if spread_enabled else None
         ),
         "intensity_envelope_guard_configuration": (
-            envelope_configuration if envelope_enabled else None
+            envelope_configuration if envelope_enabled and not delivery_enabled else None
         ),
+        "final_delivery_guard_configuration": (
+            delivery_configuration if delivery_enabled else None
+        ),
+        "stage_trace_enabled": trace_enabled,
         "conditions": [],
     }
 
@@ -630,6 +664,22 @@ def main() -> None:
         )
         output_axis, profile_id = _axis_for_source(metadata, source_file)
         set_random_seed(random_seed=base_seed + condition_index)
+        sampled_components = [] if trace_enabled else None
+        sampling_rng_fingerprints = [] if trace_enabled else None
+        condition_training = None
+        joint_diagnostics = None
+        if joint_enabled:
+            if training_collection is None or relative_source_files is None:
+                raise RuntimeError('联合先验拟合缺少同条件训练数据。')
+            condition_training = _condition_training_spectra(
+                collection=training_collection, relative_source_files=relative_source_files,
+                training_indices=training_indices, source_file=source_file, output_axis=output_axis)
+            joint_diagnostics = conditional_prior_bank.configure_generation_joint_prior(
+                condition_id, normalizer.transform(condition_training), output_axis, joint_configuration)
+            print(f'联合先验采样：fit_on=train_only；training_count=12；cross strength={joint_diagnostics["cross_correlation_strength"]}；checkpoint PCA marginals retained')
+        trace_arguments = ({"generated_prior_components": sampled_components,
+                            "generated_sampling_rng_fingerprints": sampling_rng_fingerprints}
+                           if trace_enabled else {})
         scaled_residual_batches = [] if diversity_enabled else None
         spectra = generate_spectra(
             diffusion=diffusion,
@@ -643,6 +693,7 @@ def main() -> None:
             conditional_prior_residual_bank=conditional_prior_bank,
             prior_random_seed=base_seed + condition_index,
             generated_scaled_residual_batches=scaled_residual_batches,
+            **trace_arguments,
         )
         diversity_diagnostics = None
         if scaled_residual_batches is not None:
@@ -665,7 +716,8 @@ def main() -> None:
         tail_diagnostics = None
         tail_profile_diagnostics = None
         envelope_diagnostics = None
-        if condition_calibration_enabled:
+        trace = None
+        if condition_calibration_enabled and condition_training is None:
             if training_collection is None or relative_source_files is None:
                 raise RuntimeError("条件强度校准缺少训练数据。")
             condition_training = _condition_training_spectra(
@@ -675,6 +727,52 @@ def main() -> None:
                 source_file=source_file,
                 output_axis=output_axis,
             )
+        if trace_enabled:
+            if not sampled_components:
+                raise RuntimeError("追踪未捕获实际先验输入，停止以避免误比较。")
+            parts = {key: np.concatenate([p[key] for p in sampled_components], axis=0)
+                     for key in ("outer", "broad", "base")}
+            if parts["base"].shape != spectra.shape:
+                raise ValueError("追踪轴与条件有效模型轴不一致，禁止比较不同轴。")
+            train_parts = training_components(
+                conditional_prior_bank, condition_id,
+                normalizer.transform(condition_training), output_axis,
+            )
+            generated_raw_parts = raw_components(parts, normalizer)
+            training_raw_parts = raw_components(train_parts, normalizer)
+            trace = StageTrace(spectrum_root / "_diagnostics" / source_condition_name,
+                               output_axis, number, {
+                "source_condition_name": source_condition_name,
+                "condition_id": condition_id, "condition_vector": np.asarray(vector).tolist(),
+                "relative_source_file": source_file, "checkpoint": str(checkpoint_path.resolve()),
+                "checkpoint_step": checkpoint_step, "model_source": model_source,
+                "seed": base_seed + condition_index, "sampling_timesteps": built_sampling_timesteps,
+                "diffusion_timesteps": built_num_timesteps, "generation_batch_size": batch_size,
+                "normalization_state": normalizer.state_dict(),
+                "generation_configuration": generation,
+                "delivery_configuration": delivery_configuration,
+                "training_indices": sorted(i for i in training_indices if relative_source_files[i] == source_file),
+                "training_count": 12,
+                "sampling_rng_fingerprints": sampling_rng_fingerprints,
+                "joint_prior_sampling": joint_diagnostics,
+                "training_cross_fit": conditional_prior_bank.training_cross_fit_metadata(),
+                "support": support_snapshot(getattr(diffusion, "spectrum_support_module", None), vector),
+                "joint_component_diagnostics": joint_component_summary(
+                    training_raw_parts["outer"], training_raw_parts["broad"],
+                    generated_raw_parts["outer"], generated_raw_parts["broad"]),
+                "notes": ["01 includes checkpoint guards inside reverse diffusion; it is not unconstrained U-Net output.",
+                          "00 is the actual sampled base, not an independent extra draw.",
+                          "Diagnostic spectra are not approved Transformer training data."],
+            })
+            trace.reference("training_full", condition_training)
+            for key, value in training_raw_parts.items():
+                trace.reference("training_" + key, value)
+            trace.reference("training_local", condition_training - training_raw_parts["base"])
+            trace.reference("generated_outer", generated_raw_parts["outer"])
+            trace.reference("generated_broad", generated_raw_parts["broad"])
+            trace.reference("generated_local", spectra - generated_raw_parts["base"])
+            trace.capture("00_sampled_base", generated_raw_parts["base"], kind="diagnostic_base_without_local")
+            trace.capture("01_ddpm_reconstruction", spectra)
         if spread_enabled:
             spectra, spread_diagnostics = (
                 apply_condition_pca_spread_calibration(
@@ -683,6 +781,8 @@ def main() -> None:
                     configuration=spread_configuration,
                 )
             )
+        if trace is not None:
+            trace.capture("02_pca_spread", spectra, active=spread_enabled)
         if tail_enabled:
             (
                 condition_tail_configuration,
@@ -695,6 +795,8 @@ def main() -> None:
             condition_tail_configuration["random_seed"] = int(
                 tail_configuration.get("random_seed", base_seed)
             ) + condition_index
+            if trace is not None:
+                trace.metadata["resolved_tail_configuration"] = condition_tail_configuration
             spectra, tail_diagnostics = (
                 apply_condition_oracle_tail_calibration(
                     spectra,
@@ -702,6 +804,8 @@ def main() -> None:
                     configuration=condition_tail_configuration,
                 )
             )
+        if trace is not None:
+            trace.capture("03_qq", spectra, active=tail_enabled)
         # Shape/spread changes can reintroduce a small pointwise mean bias.
         # Run the bounded translation-only mean correction afterwards; it
         # leaves pairwise differences unchanged and improves final fidelity.
@@ -713,7 +817,9 @@ def main() -> None:
                     configuration=mean_configuration,
                 )
             )
-        if envelope_enabled:
+        if trace is not None:
+            trace.capture("04_mean", spectra, active=mean_enabled)
+        if envelope_enabled and not delivery_enabled:
             spectra, envelope_diagnostics = (
                 apply_condition_intensity_envelope_guard(
                     spectra,
@@ -722,6 +828,53 @@ def main() -> None:
                     raman_shift=output_axis,
                 )
             )
+        if trace is not None:
+            trace.capture("05_legacy_envelope", spectra, active=envelope_enabled and not delivery_enabled)
+        # Later spread/QQ/mean calibration can exceed the sampling support.
+        # Reapply the SAME train-only bounds in normalized full-spectrum units.
+        support_diagnostics = None
+        support_module = getattr(diffusion, "spectrum_support_module", None)
+        if support_module is not None and support_module.configuration["sampling_soft_guard"]:
+            if normalizer is None:
+                raise ValueError("D4.25 final support要求checkpoint train-only normalizer。")
+            before = np.asarray(spectra, dtype=np.float32)
+            normalized = torch.as_tensor(normalizer.transform(before), device=device).unsqueeze(1)
+            support_conditions = torch.as_tensor(vector, dtype=torch.float32, device=device).reshape(1, -1).expand(len(before), -1)
+            with torch.no_grad():
+                bounded = support_module.bound_full_spectrum(
+                    normalized, support_conditions, torch.ones_like(normalized)
+                ).squeeze(1).cpu().numpy()
+            spectra = normalizer.inverse_transform(bounded)
+            def pairwise_mse(values):
+                centered = np.asarray(values, dtype=np.float64) - np.mean(values, axis=0)
+                return float(2.0 * np.mean(centered ** 2) * len(values) / max(len(values) - 1, 1))
+            original_diversity = pairwise_mse(before)
+            support_diagnostics = {
+                "fit_on": "train_only", "number_of_training_spectra_per_condition":
+                    support_module.training_counts[int(support_module.indices(support_conditions[:1]).item())],
+                "modified_point_fraction": float(np.mean(np.abs(spectra - before) > 1e-5)),
+                "correction_rmse": float(np.sqrt(np.mean((spectra - before) ** 2))),
+                "pairwise_mse_before": original_diversity,
+                "pairwise_mse_after": pairwise_mse(spectra),
+                "pairwise_mse_retained_fraction": pairwise_mse(spectra) / max(original_diversity, 1e-12),
+            }
+        if trace is not None:
+            trace.capture("06_full_support", spectra, active=support_diagnostics is not None)
+        # Terminal raw-intensity check must follow every calibration/support
+        # transform. No spectrum mutation is permitted between this and export.
+        delivery_diagnostics = None
+        if delivery_enabled:
+            try:
+                spectra, delivery_diagnostics = apply_final_delivery_guard(
+                    spectra, condition_training,
+                    configuration=delivery_configuration, raman_shift=output_axis,
+                )
+            except (ValueError, RuntimeError) as error:
+                if trace is not None:
+                    trace.save(status="failed_before_export", error=str(error))
+                raise RuntimeError(f"{source_condition_name}: {error}") from error
+        if trace is not None:
+            trace.capture("07_terminal", spectra, active=delivery_enabled)
         condition_spectrum_directory = spectrum_root / source_condition_name
         condition_plot_directory = plot_root / source_condition_name
         paths = export_generated_spectra(
@@ -742,6 +895,12 @@ def main() -> None:
             "point_count": int(output_axis.size),
             "output_files": [str(Path(path).resolve()) for path in paths],
         }
+        if trace is not None:
+            trace_path = trace.save()
+            condition_record["diagnostic_stage_trace_manifest"] = str(trace_path.resolve())
+            print(f"  阶段缓存（仅诊断）：{trace_path}")
+        if joint_diagnostics is not None:
+            condition_record['joint_prior_sampling'] = joint_diagnostics
         if diversity_diagnostics is not None:
             condition_record["d4_3_diversity_diagnostics"] = (
                 diversity_diagnostics
@@ -758,6 +917,20 @@ def main() -> None:
             )
         if envelope_diagnostics is not None:
             condition_record["intensity_envelope_guard"] = envelope_diagnostics
+        if support_diagnostics is not None:
+            condition_record["d4_25_final_spectrum_support"] = support_diagnostics
+            print(f"  D4.25 final support: changed={support_diagnostics['modified_point_fraction']:.3%}; "
+                  f"pairwise-MSE retained={support_diagnostics['pairwise_mse_retained_fraction']:.4f}")
+        if delivery_diagnostics is not None:
+            condition_record["d4_25_final_delivery_guard"] = delivery_diagnostics
+            print("  D4.25 terminal delivery: "
+                  f"changed={delivery_diagnostics['modified_point_fraction']:.3%}; "
+                  f"min={delivery_diagnostics['minimum_before']:.4f}"
+                  f"->{delivery_diagnostics['minimum_after']:.4f}; "
+                  f"max={delivery_diagnostics['maximum_before']:.4f}"
+                  f"->{delivery_diagnostics['maximum_after']:.4f}; "
+                  f"remaining={delivery_diagnostics['remaining_violation_point_count']}; "
+                  f"pairwise-MSE retained={delivery_diagnostics['pairwise_mse_retained_fraction']}")
         manifest["conditions"].append(condition_record)
         print(
             f"[{condition_index + 1}/{len(condition_queries)}] "

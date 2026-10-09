@@ -1,0 +1,506 @@
+diff --git a/Inference.py b/Inference.py
+index 8d9dd97..2240c60 100644
+--- a/Inference.py
++++ b/Inference.py
+@@ -40,7 +40,7 @@ from sklearn.metrics import (
+ )
+ from torch.utils.data import DataLoader
+ 
+-from Dataset import PESTICIDES, build_datasets
++from Dataset import MODEL_RAMAN_AXIS, PESTICIDES, build_datasets
+ from Model_v2 import TransformerClassifyRegress_sep
+ 
+ 
+@@ -520,13 +520,104 @@ def _plot_training_history(history_path: Path, output_directory: Path) -> None:
+         plt.close(fig)
+ 
+ 
++def _query_token_raman_axis(token_length: int) -> np.ndarray:
++    """Approximate Raman center of each token after Conv3/Pool3/Conv3/Pool3.
++
++    With stride-1 valid Conv1d(kernel=3) and MaxPool1d(kernel=3, stride=3),
++    token k has receptive-field center at original point index 8 + 9*k.
++    """
++    centers = 8 + 9 * np.arange(int(token_length), dtype=np.int64)
++    if centers.size == 0 or centers[-1] >= len(MODEL_RAMAN_AXIS):
++        raise ValueError(
++            f"Cannot map token_length={token_length} to model axis length "
++            f"{len(MODEL_RAMAN_AXIS)}"
++        )
++    return np.asarray(MODEL_RAMAN_AXIS, dtype=np.float64)[centers]
++
++
++def _save_query_attention_profiles(
++    attention: np.ndarray,
++    y_true: np.ndarray,
++    output_directory: Path,
++) -> None:
++    """Export interpretable pesticide-query attention without changing predictions."""
++    attention = np.asarray(attention, dtype=np.float64)
++    y_true = np.asarray(y_true, dtype=np.int64)
++    if attention.ndim != 3 or attention.shape[1] != len(PESTICIDES):
++        raise ValueError(
++            "attention must be [samples, pesticides, tokens], got "
++            f"{attention.shape}"
++        )
++
++    output_directory.mkdir(parents=True, exist_ok=True)
++    token_axis = _query_token_raman_axis(attention.shape[-1])
++    frame = pd.DataFrame({"Raman_shift_cm-1": token_axis})
++    top_rows: list[dict[str, Any]] = []
++
++    for pesticide_index, pesticide in enumerate(PESTICIDES):
++        all_mean = attention[:, pesticide_index, :].mean(axis=0)
++        present_mask = y_true[:, pesticide_index] > 0
++        absent_mask = ~present_mask
++        present_mean = (
++            attention[present_mask, pesticide_index, :].mean(axis=0)
++            if present_mask.any()
++            else np.full_like(all_mean, np.nan)
++        )
++        absent_mean = (
++            attention[absent_mask, pesticide_index, :].mean(axis=0)
++            if absent_mask.any()
++            else np.full_like(all_mean, np.nan)
++        )
++        difference = present_mean - absent_mean
++
++        frame[f"{pesticide}_all_mean"] = all_mean
++        frame[f"{pesticide}_present_mean"] = present_mean
++        frame[f"{pesticide}_absent_mean"] = absent_mean
++        frame[f"{pesticide}_present_minus_absent"] = difference
++
++        ranking_signal = np.nan_to_num(difference, nan=-np.inf)
++        top_indices = np.argsort(ranking_signal)[::-1][:10]
++        for rank, token_index in enumerate(top_indices, start=1):
++            top_rows.append(
++                {
++                    "pesticide": pesticide,
++                    "rank": rank,
++                    "token_index": int(token_index),
++                    "Raman_shift_cm-1": float(token_axis[token_index]),
++                    "present_mean_attention": float(present_mean[token_index]),
++                    "absent_mean_attention": float(absent_mean[token_index]),
++                    "present_minus_absent": float(difference[token_index]),
++                }
++            )
++
++        fig, ax = plt.subplots(figsize=(7, 4.5))
++        ax.plot(token_axis, present_mean, label="Target present")
++        ax.plot(token_axis, absent_mean, label="Target absent")
++        ax.set_xlabel("Raman shift (cm$^{-1}$)")
++        ax.set_ylabel("Mean query attention")
++        ax.set_title(f"{pesticide} query attention profile")
++        ax.legend()
++        fig.tight_layout()
++        fig.savefig(
++            output_directory / f"{pesticide}_query_attention.png",
++            dpi=300,
++            bbox_inches="tight",
++        )
++        plt.close(fig)
++
++    frame.to_csv(output_directory / "query_attention_profiles.csv", index=False)
++    pd.DataFrame(top_rows).to_csv(
++        output_directory / "query_attention_top_regions.csv", index=False
++    )
++
++
+ def _collect_predictions(
+     checkpoint: dict[str, Any],
+     dataset,
+     device: torch.device,
+     batch_size: int,
+     num_workers: int,
+-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, pd.DataFrame]:
++) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, pd.DataFrame]:
+     loader = DataLoader(
+         dataset,
+         batch_size=batch_size,
+@@ -545,6 +636,7 @@ def _collect_predictions(
+     class_probabilities: list[np.ndarray] = []
+     concentration_targets: list[np.ndarray] = []
+     concentration_predictions: list[np.ndarray] = []
++    query_attentions: list[np.ndarray] = []
+     rows: list[dict[str, Any]] = []
+ 
+     with torch.no_grad():
+@@ -555,7 +647,9 @@ def _collect_predictions(
+                 "smoothed": batch["smoothed"].to(device, non_blocking=True),
+                 "valid_mask": batch["valid_mask"].to(device, non_blocking=True),
+             }
+-            class_pred, reg_pred = model(model_batch)
++            class_pred, reg_pred, attention = model(
++                model_batch, return_attention=True
++            )
+             class_true_np = batch["class_target"].numpy()
+             class_prob_np = class_pred.cpu().numpy()
+             reg_true_np = batch["concentration_target"].numpy()
+@@ -565,6 +659,7 @@ def _collect_predictions(
+             class_probabilities.append(class_prob_np)
+             concentration_targets.append(reg_true_np)
+             concentration_predictions.append(reg_pred_np)
++            query_attentions.append(attention.cpu().numpy())
+ 
+             for row_index in range(class_true_np.shape[0]):
+                 row: dict[str, Any] = {
+@@ -596,6 +691,7 @@ def _collect_predictions(
+         np.concatenate(class_probabilities, axis=0),
+         np.concatenate(concentration_targets, axis=0),
+         np.concatenate(concentration_predictions, axis=0),
++        np.concatenate(query_attentions, axis=0),
+         pd.DataFrame(rows),
+     )
+ 
+@@ -614,7 +710,7 @@ def evaluate_split(
+     split_dir = output_directory / split
+     split_dir.mkdir(parents=True, exist_ok=True)
+ 
+-    y_class, p_class, y_reg, p_reg, frame = _collect_predictions(
++    y_class, p_class, y_reg, p_reg, query_attention, frame = _collect_predictions(
+         checkpoint,
+         dataset,
+         device,
+@@ -659,6 +755,11 @@ def evaluate_split(
+         split_dir / "cooccurrence_matrices",
+     )
+     _save_roc_plot(y_class, p_class, split_dir / "roc_curves.png")
++    _save_query_attention_profiles(
++        query_attention,
++        y_class,
++        split_dir / "query_attention",
++    )
+     target_mode = str(frame["target_mode"].iloc[0]) if not frame.empty else "unknown"
+     _save_regression_plots(
+         frame,
+@@ -670,6 +771,11 @@ def evaluate_split(
+         "split": split,
+         "samples": int(len(dataset)),
+         "target_mode": target_mode,
++        "query_attention_mode": (
++            "peak_guided"
++            if checkpoint.get("model_config", {}).get("use_peak_guidance", True)
++            else "query_only"
++        ),
+         "classification": classification,
+         "regression": regression,
+     }
+diff --git a/Model_v2.py b/Model_v2.py
+index 1e67f1c..c8706b7 100644
+--- a/Model_v2.py
++++ b/Model_v2.py
+@@ -151,6 +151,7 @@ class PeakGuidedQueryAttention(nn.Module):
+         model_length: int,
+         dropout: float = 0.1,
+         guidance_strength_init: float = 1.5,
++        use_peak_guidance: bool = True,
+     ) -> None:
+         super().__init__()
+         if d_model % n_heads != 0:
+@@ -165,6 +166,7 @@ class PeakGuidedQueryAttention(nn.Module):
+         self.n_heads = int(n_heads)
+         self.head_dim = self.d_model // self.n_heads
+         self.model_length = int(model_length)
++        self.use_peak_guidance = bool(use_peak_guidance)
+ 
+         self.query_embedding = nn.Parameter(torch.empty(self.n_queries, self.d_model))
+         nn.init.normal_(self.query_embedding, mean=0.0, std=0.02)
+@@ -199,9 +201,16 @@ class PeakGuidedQueryAttention(nn.Module):
+ 
+     @property
+     def guidance_strength(self) -> Tensor:
+-        """Positive, learnable guidance strength for each pesticide query."""
++        """Positive learnable strength stored for the optional peak-guidance bias."""
+         return F.softplus(self.guidance_log_strength)
+ 
++    @property
++    def effective_guidance_strength(self) -> Tensor:
++        """Strength actually used in forward; zero in query-only ablation mode."""
++        if self.use_peak_guidance:
++            return self.guidance_strength
++        return torch.zeros_like(self.guidance_log_strength)
++
+     def set_peak_prior(self, peak_prior: Tensor) -> None:
+         peak_prior = torch.as_tensor(peak_prior, dtype=torch.float32)
+         expected = (self.n_queries, self.model_length)
+@@ -265,12 +274,16 @@ class PeakGuidedQueryAttention(nn.Module):
+                 f"{tuple(peak_prior_tokens.shape)} vs {(self.n_queries, token_length)}"
+             )
+ 
+-        # Positive additive bias only. Non-peak regions receive zero bias rather
+-        # than being deleted, so every valid Raman region can still contribute.
+-        guidance = self.guidance_strength.view(1, 1, self.n_queries, 1)
+-        logits = logits + guidance * peak_prior_tokens.view(
+-            1, 1, self.n_queries, token_length
+-        ).to(dtype=logits.dtype, device=logits.device)
++        # Optional positive additive bias only. In query-only mode this block is
++        # skipped entirely, so the three pesticide queries learn where to attend
++        # from the full valid spectrum without any hand/data-derived peak hint.
++        # In peak-guided mode non-peak regions still remain visible because the
++        # prior is an additive bias rather than a hard mask.
++        if self.use_peak_guidance:
++            guidance = self.guidance_strength.view(1, 1, self.n_queries, 1)
++            logits = logits + guidance * peak_prior_tokens.view(
++                1, 1, self.n_queries, token_length
++            ).to(dtype=logits.dtype, device=logits.device)
+ 
+         invalid = ~token_mask[:, None, None, :]
+         logits = logits.masked_fill(invalid, torch.finfo(logits.dtype).min)
+@@ -307,6 +320,7 @@ class TransformerClassifyRegress_sep(nn.Module):
+         n_labels: int = 3,
+         model_length: int = DEFAULT_MODEL_LENGTH,
+         peak_guidance_strength_init: float = 1.5,
++        use_peak_guidance: bool = True,
+     ) -> None:
+         super().__init__()
+ 
+@@ -372,6 +386,7 @@ class TransformerClassifyRegress_sep(nn.Module):
+             model_length=self.model_length,
+             dropout=drop,
+             guidance_strength_init=peak_guidance_strength_init,
++            use_peak_guidance=use_peak_guidance,
+         )
+ 
+         head_hidden = max(self.dim_model, feature_dim // 2)
+diff --git a/SERSFormer_Training.py b/SERSFormer_Training.py
+index f446a83..dc18983 100644
+--- a/SERSFormer_Training.py
++++ b/SERSFormer_Training.py
+@@ -1,8 +1,8 @@
+-"""Training entry for the peak-guided DEL/CHL/TEB SERSFormer variant.
++"""Training entry for pesticide-query DEL/CHL/TEB SERSFormer variants.
+ 
+-The data split and multi-task losses remain aligned with the adapted baseline,
+-while the model uses training-only data-driven peak priors and three pesticide
+-query vectors after the shared Transformer.
++The default next-step ablation is query-only attention: three pesticide-specific
++learnable queries attend to the full valid spectrum without a peak prior. The same
++entry can later enable training-only soft peak guidance for a controlled ablation.
+ """
+ 
+ from __future__ import annotations
+@@ -40,12 +40,12 @@ from Model_v2 import TransformerClassifyRegress_sep
+ 
+ def parse_args() -> argparse.Namespace:
+     parser = argparse.ArgumentParser(
+-        description="Train peak-guided SERSFormer on DEL/CHL/TEB SERS spectra."
++        description="Train pesticide-query SERSFormer on DEL/CHL/TEB SERS spectra."
+     )
+     parser.add_argument(
+         "--output-directory",
+         type=Path,
+-        default=Path("outputs/t1_peak_guided_sersformer_real_only"),
++        default=Path("outputs/t1_query_only_sersformer_real_only"),
+     )
+     parser.add_argument("--include-generated", action="store_true")
+     parser.add_argument("--maximum-generated-per-condition", type=int, default=None)
+@@ -67,6 +67,17 @@ def parse_args() -> argparse.Namespace:
+     parser.add_argument("--dropout", type=float, default=0.1)
+     parser.add_argument("--encoder-layers", type=int, default=4)
+ 
++    parser.add_argument(
++        "--query-attention-mode",
++        choices=("query_only", "peak_guided"),
++        default="query_only",
++        help=(
++            "query_only: three pesticide queries learn from the complete valid spectrum "
++            "without peak bias; peak_guided: add the training-only soft peak prior. "
++            "Use query_only first as the clean ablation baseline."
++        ),
++    )
++
+     # Peak prior is fitted from the fixed real training split only. These
+     # arguments control prior extraction and its initial soft-attention bias.
+     parser.add_argument("--peak-top-k", type=int, default=8)
+@@ -315,31 +326,51 @@ def main() -> None:
+         validation_dataset, args.batch_size, False, args.num_workers, device
+     )
+ 
+-    # Fit the peak guidance only from the 12 real training spectra per source
+-    # file. Generated spectra, validation spectra and test spectra are excluded.
+-    peak_prior, peak_prior_summary = build_training_peak_priors(
+-        train_dataset.repository,
+-        top_k=args.peak_top_k,
+-        min_peak_distance_cm1=args.peak_min_distance_cm1,
+-        peak_prominence=args.peak_prominence,
+-        peak_half_width_cm1=args.peak_half_width_cm1,
+-        min_support_fraction=args.peak_min_support_fraction,
+-    )
++    use_peak_guidance = args.query_attention_mode == "peak_guided"
++    if use_peak_guidance:
++        # Peak guidance is fitted only from the fixed real training split.
++        # Generated spectra, validation spectra and test spectra are excluded.
++        peak_prior, peak_prior_summary = build_training_peak_priors(
++            train_dataset.repository,
++            top_k=args.peak_top_k,
++            min_peak_distance_cm1=args.peak_min_distance_cm1,
++            peak_prominence=args.peak_prominence,
++            peak_half_width_cm1=args.peak_half_width_cm1,
++            min_support_fraction=args.peak_min_support_fraction,
++        )
+ 
+-    peak_prior_frame = pd.DataFrame({"Raman_shift_cm-1": MODEL_RAMAN_AXIS})
+-    for pesticide_index, pesticide in enumerate(PESTICIDES):
+-        peak_prior_frame[f"peak_prior_{pesticide}"] = peak_prior[pesticide_index]
+-    peak_prior_frame.to_csv(output_directory / "training_peak_priors.csv", index=False)
+-    with (output_directory / "training_peak_prior_summary.json").open(
+-        "w", encoding="utf-8"
+-    ) as handle:
+-        json.dump(peak_prior_summary, handle, ensure_ascii=False, indent=2)
+-
+-    print("===== Training-only peak priors =====")
+-    for pesticide in PESTICIDES:
+-        info = peak_prior_summary["pesticides"][pesticide]
+-        centers = ", ".join(f"{value:.1f}" for value in info["peak_centers_cm-1"])
+-        print(f"{pesticide}: {centers} cm^-1")
++        peak_prior_frame = pd.DataFrame({"Raman_shift_cm-1": MODEL_RAMAN_AXIS})
++        for pesticide_index, pesticide in enumerate(PESTICIDES):
++            peak_prior_frame[f"peak_prior_{pesticide}"] = peak_prior[pesticide_index]
++        peak_prior_frame.to_csv(
++            output_directory / "training_peak_priors.csv", index=False
++        )
++        with (output_directory / "training_peak_prior_summary.json").open(
++            "w", encoding="utf-8"
++        ) as handle:
++            json.dump(peak_prior_summary, handle, ensure_ascii=False, indent=2)
++
++        print("===== Training-only peak priors =====")
++        for pesticide in PESTICIDES:
++            info = peak_prior_summary["pesticides"][pesticide]
++            centers = ", ".join(
++                f"{value:.1f}" for value in info["peak_centers_cm-1"]
++            )
++            print(f"{pesticide}: {centers} cm^-1")
++    else:
++        peak_prior = np.zeros((len(PESTICIDES), MODEL_LENGTH), dtype=np.float32)
++        peak_prior_summary = {
++            "mode": "query_only",
++            "description": (
++                "Peak bias disabled. DEL/CHL/TEB learnable queries attend to the "
++                "entire valid 600-2000 cm^-1 spectrum."
++            ),
++        }
++        print("===== Query attention mode =====")
++        print(
++            "query_only: peak prior is disabled; pesticide-specific queries learn "
++            "attention directly from the full valid spectrum."
++        )
+ 
+     model_config = {
+         "dim_model": args.dim_model,
+@@ -351,6 +382,7 @@ def main() -> None:
+         "n_labels": len(PESTICIDES),
+         "model_length": MODEL_LENGTH,
+         "peak_guidance_strength_init": args.peak_guidance_strength,
++        "use_peak_guidance": use_peak_guidance,
+     }
+     model = TransformerClassifyRegress_sep(**model_config)
+     model.set_peak_prior(torch.from_numpy(peak_prior))
+@@ -394,7 +426,12 @@ def main() -> None:
+             "600-2000 cm^-1 model range; valid_mask remains supported"
+         ),
+         "axis_label_audit": axis_audit,
+-        "peak_prior_fit": "real training spectra only; validation/test/generated excluded",
++        "query_attention_mode": args.query_attention_mode,
++        "peak_prior_fit": (
++            "real training spectra only; validation/test/generated excluded"
++            if use_peak_guidance
++            else "disabled for query-only ablation"
++        ),
+         "peak_prior_summary": peak_prior_summary,
+         "target_mode": train_dataset.repository.target_mode,
+     }
+@@ -449,7 +486,8 @@ def main() -> None:
+         }
+         with torch.no_grad():
+             peak_strength = (
+-                model.peak_guided_attention.guidance_strength.detach().cpu().numpy()
++                model.peak_guided_attention.effective_guidance_strength
++                .detach().cpu().numpy()
+             )
+         for pesticide_index, pesticide in enumerate(PESTICIDES):
+             row[f"peak_guidance_strength_{pesticide}"] = float(
+diff --git a/tests/test_query_only_attention.py b/tests/test_query_only_attention.py
+new file mode 100644
+index 0000000..0042c08
+--- /dev/null
++++ b/tests/test_query_only_attention.py
+@@ -0,0 +1,78 @@
++from pathlib import Path
++
++import numpy as np
++import torch
++
++from Inference import _save_query_attention_profiles
++from Model_v2 import TransformerClassifyRegress_sep
++
++
++def _batch(length: int = 1401):
++    return {
++        "raw": torch.rand(2, 1, length),
++        "percentile": torch.rand(2, 4, length),
++        "smoothed": torch.rand(2, 1, length),
++        "valid_mask": torch.ones(2, length, dtype=torch.bool),
++    }
++
++
++def test_query_only_mode_is_independent_of_peak_prior():
++    torch.manual_seed(2026)
++    model = TransformerClassifyRegress_sep(
++        dim_model=8,
++        attn_head=2,
++        dim_ff=32,
++        encoder_layers=1,
++        n_labels=3,
++        model_length=1401,
++        use_peak_guidance=False,
++    )
++    model.eval()
++    batch = _batch()
++
++    with torch.no_grad():
++        class_before, reg_before, attention_before = model(
++            batch, return_attention=True
++        )
++
++    prior = torch.zeros(3, 1401)
++    prior[0, 400] = 1.0
++    prior[1, 700] = 1.0
++    prior[2, 1000] = 1.0
++    model.set_peak_prior(prior)
++
++    with torch.no_grad():
++        class_after, reg_after, attention_after = model(
++            batch, return_attention=True
++        )
++
++    torch.testing.assert_close(class_before, class_after)
++    torch.testing.assert_close(reg_before, reg_after)
++    torch.testing.assert_close(attention_before, attention_after)
++    assert torch.count_nonzero(
++        model.peak_guided_attention.effective_guidance_strength
++    ) == 0
++
++
++def test_query_attention_profile_exports(tmp_path: Path):
++    rng = np.random.default_rng(2026)
++    attention = rng.random((6, 3, 154))
++    attention /= attention.sum(axis=-1, keepdims=True)
++    y_true = np.array(
++        [
++            [1, 0, 0],
++            [1, 1, 0],
++            [0, 1, 1],
++            [1, 1, 1],
++            [0, 0, 1],
++            [1, 0, 1],
++        ],
++        dtype=np.int64,
++    )
++
++    _save_query_attention_profiles(attention, y_true, tmp_path)
++
++    assert (tmp_path / "query_attention_profiles.csv").exists()
++    assert (tmp_path / "query_attention_top_regions.csv").exists()
++    for pesticide in ("DEL", "CHL", "TEB"):
++        assert (tmp_path / f"{pesticide}_query_attention.png").exists()

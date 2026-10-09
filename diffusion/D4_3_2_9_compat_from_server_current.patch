@@ -1,0 +1,1127 @@
+diff --git a/config/ddpm_training_d4_3_formal.yaml b/config/ddpm_training_d4_3_formal.yaml
+index 7b2c281..75e282d 100644
+--- a/config/ddpm_training_d4_3_formal.yaml
++++ b/config/ddpm_training_d4_3_formal.yaml
+@@ -1,8 +1,9 @@
+ project:
+-  # D4.3.2.7针对全部126条件QQ的S形弯曲：限制全局PCA扩展，并用
+-  # training-only oracle门控的四段单调映射分别修正内段和外尾。
++  # D4.3.2.9在2.8双空间评价基础上，统一生成校准与最终评价的
++  # median pairwise-MSE口径，按1401/1901轴和组分数分层校正QQ，
++  # 并在训练端增加条件内平滑导数方差floor以恢复真实峰位变化。
+   # 扩散训练链由100增加到200；DDIM生成由50增加到100步。
+-  name: d4_3_2_7_piecewise_qq_balance_formal
++  name: d4_3_2_9_joint_qq_peakshift_diversity_formal
+   random_seed: 2026
+ diagnostic_overfit:
+   enabled: false
+@@ -195,8 +196,8 @@ diversity_constraints:
+   # diversity_constraints中，因此不需要修改model_builder公共接口。
+   quality_fidelity:
+     enabled: true
+-    total_weight: 0.07
+-    maximum_total_ratio_to_ddpm: 0.07
++    total_weight: 0.08
++    maximum_total_ratio_to_ddpm: 0.08
+     # 75%时间步以上属于真正困难的高噪声区。25%的条件组从该区
+     # 分层抽样，其余仍全区间均匀抽样，避免T=200后高噪声覆盖变稀。
+     high_noise_sampling:
+@@ -233,6 +234,18 @@ diversity_constraints:
+       maximum_timestep_fraction: 0.50
+       smooth_l1_beta: 0.05
+       weight: 0.50
++    # 峰发生小幅位移时，平滑谱的一阶导数会在峰两侧产生条件内变化。
++    # 该项只补足预测导数标准差低于真实同条件小组的部分，不制造固定
++    # 位移，也不惩罚已经达到真实水平的样本，因此比全谱随机平移稳健。
++    condition_derivative_variance_floor:
++      enabled: true
++      smoothing_kernel_sizes: [5, 15]
++      minimum_group_size: 4
++      minimum_std_ratio: 0.92
++      active_std_quantile: 30.0
++      maximum_timestep_fraction: 0.50
++      smooth_l1_beta: 0.05
++      weight: 0.50
+     # 同条件4条样本的预测均值对齐真实目标均值，针对总体MSE、
+     # Wasserstein和幅值偏差；不直接压缩样本间差异。
+     condition_mean:
+@@ -299,11 +312,11 @@ training:
+   maximum_validation_batches: 0
+   validation_random_seed: 2026001
+ output:
+-  output_directory: outputs/experiments/d4_3_2_7_piecewise_qq_balance_formal
+-  checkpoint_directory: outputs/experiments/d4_3_2_7_piecewise_qq_balance_formal/checkpoints
+-  log_directory: outputs/experiments/d4_3_2_7_piecewise_qq_balance_formal/logs
+-  generated_spectrum_directory: outputs/experiments/d4_3_2_7_piecewise_qq_balance_formal/generated
+-  preview_plot_directory: outputs/experiments/d4_3_2_7_piecewise_qq_balance_formal/plots
++  output_directory: outputs/experiments/d4_3_2_9_joint_qq_peakshift_diversity_formal
++  checkpoint_directory: outputs/experiments/d4_3_2_9_joint_qq_peakshift_diversity_formal/checkpoints
++  log_directory: outputs/experiments/d4_3_2_9_joint_qq_peakshift_diversity_formal/logs
++  generated_spectrum_directory: outputs/experiments/d4_3_2_9_joint_qq_peakshift_diversity_formal/generated
++  preview_plot_directory: outputs/experiments/d4_3_2_9_joint_qq_peakshift_diversity_formal/plots
+   latest_checkpoint_name: latest.pt
+   best_checkpoint_name: best.pt
+   training_log_name: training_log.csv
+@@ -335,13 +348,15 @@ generation:
+     maximum_components: 6
+     explained_variance_ratio: 0.95
+     minimum_component_variance_fraction: 0.01
+-    minimum_component_std_ratio: 0.85
++    minimum_component_std_ratio: 0.88
+     maximum_scale_factor: 1.35
+-    # 分量逐个补足后，再检查整批谱的平均pairwise-MSE。若仍偏窄，
+-    # 只沿上述training PCA子空间做第二级小幅扩展；正交方向保持不变。
+-    minimum_pairwise_mse_ratio: 0.85
+-    maximum_global_scale_factor: 1.08
+-    maximum_correction_range_fraction: 0.08
++    # 分量逐个补足后，按评价器完全相同的median all-pairs MSE继续
++    # 检查。目标0.88为后续QQ校准留出余量，QQ保护的最终下限为0.82。
++    minimum_pairwise_mse_ratio: 0.88
++    maximum_global_scale_factor: 1.30
++    pairwise_mse_pair_count: 10000
++    pairwise_mse_search_iterations: 24
++    maximum_correction_range_fraction: 0.12
+     minimum_generated_count: 20
+     epsilon: 1.0e-12
+   # 用12条training构造real-vs-real oracle范围，分别检查1--10%、
+@@ -356,6 +371,29 @@ generation:
+     maximum_segment_span_ratio: 1.10
+     correction_strength: 0.60
+     maximum_absolute_correction_z: 0.40
++    # 2.8分层结果显示1401点外尾约1.58/1.53，而1901点已接近1。
++    # 这里只按轴长度和农药组分数调整校准强度，仍由每个条件自己的
++    # 12条training oracle决定是否触发，绝不读取validation/test。
++    axis_profiles:
++      "1401":
++        correction_strength_multiplier: 1.25
++        maximum_absolute_correction_z_multiplier: 1.50
++      "1901":
++        correction_strength_multiplier: 0.75
++        maximum_absolute_correction_z_multiplier: 0.75
++    analyte_count_profiles:
++      "1":
++        correction_strength_multiplier: 1.00
++      "2":
++        correction_strength_multiplier: 1.15
++      "3":
++        correction_strength_multiplier: 0.90
++    # 2.7全部126条件结果中QQ改善，但最终pairwise-MSE多样性比降到
++    # 0.756。若四段映射会把条件内多样性压到training的82%以下，
++    # 自动减弱本条件的QQ修正；原本已低于82%时至少不继续降低。
++    minimum_postcalibration_pairwise_mse_ratio: 0.82
++    diversity_guard_search_iterations: 20
++    diversity_guard_pair_count: 10000
+     lower_probability: 0.01
+     upper_probability: 0.99
+     lower_anchor_probability: 0.05
+diff --git a/scripts/generate_conditional_spectra.py b/scripts/generate_conditional_spectra.py
+index 525fc37..f948fd0 100644
+--- a/scripts/generate_conditional_spectra.py
++++ b/scripts/generate_conditional_spectra.py
+@@ -30,6 +30,7 @@ from src.spectrum_generator import (
+     apply_condition_oracle_tail_calibration,
+     apply_condition_pca_spread_calibration,
+     generate_spectra,
++    resolve_condition_tail_calibration_configuration,
+ )
+ from src.spectrum_length_adapter import SpectrumLengthAdapter
+ 
+@@ -427,6 +428,7 @@ def main() -> None:
+         mean_diagnostics = None
+         spread_diagnostics = None
+         tail_diagnostics = None
++        tail_profile_diagnostics = None
+         envelope_diagnostics = None
+         if condition_calibration_enabled:
+             if training_collection is None or relative_source_files is None:
+@@ -447,7 +449,14 @@ def main() -> None:
+                 )
+             )
+         if tail_enabled:
+-            condition_tail_configuration = dict(tail_configuration)
++            (
++                condition_tail_configuration,
++                tail_profile_diagnostics,
++            ) = resolve_condition_tail_calibration_configuration(
++                tail_configuration,
++                point_count=int(output_axis.size),
++                condition_name=source_condition_name,
++            )
+             condition_tail_configuration["random_seed"] = int(
+                 tail_configuration.get("random_seed", base_seed)
+             ) + condition_index
+@@ -507,6 +516,10 @@ def main() -> None:
+             condition_record["pca_spread_calibration"] = spread_diagnostics
+         if tail_diagnostics is not None:
+             condition_record["oracle_tail_calibration"] = tail_diagnostics
++        if tail_profile_diagnostics is not None:
++            condition_record["tail_calibration_profile"] = (
++                tail_profile_diagnostics
++            )
+         if envelope_diagnostics is not None:
+             condition_record["intensity_envelope_guard"] = envelope_diagnostics
+         manifest["conditions"].append(condition_record)
+@@ -549,6 +562,15 @@ def main() -> None:
+                 f"{spread_diagnostics['correction_rmse']:.4f}"
+             )
+         if tail_diagnostics is not None:
++            if tail_profile_diagnostics is not None:
++                print(
++                    "  QQ分层配置："
++                    f"{tail_profile_diagnostics['selected_profiles']}；"
++                    "strength="
++                    f"{tail_profile_diagnostics['effective_correction_strength']:.4f}；"
++                    "max|delta-z|="
++                    f"{tail_profile_diagnostics['effective_maximum_absolute_correction_z']:.4f}"
++                )
+             print(
+                 "  QQ尾部校准：lower ratio="
+                 f"{tail_diagnostics['lower_tail_ratio_before']:.4f} -> "
+@@ -574,6 +596,19 @@ def main() -> None:
+                     "最大|delta-z|="
+                     f"{tail_diagnostics['maximum_absolute_correction_z_used']:.4f}"
+                 )
++                print(
++                    "  QQ后多样性保护：pairwise-MSE ratio="
++                    f"{tail_diagnostics['pairwise_mse_ratio_before']:.4f} -> "
++                    f"{tail_diagnostics['pairwise_mse_ratio_unguarded']:.4f}"
++                    "(未保护) -> "
++                    f"{tail_diagnostics['pairwise_mse_ratio_after']:.4f}；"
++                    "要求≥"
++                    f"{tail_diagnostics['pairwise_mse_ratio_required']:.4f}；"
++                    "QQ修正保留系数="
++                    f"{tail_diagnostics['calibration_blend_factor']:.4f}；"
++                    "触发="
++                    f"{tail_diagnostics['diversity_guard_activated']}"
++                )
+         if envelope_diagnostics is not None:
+             print(
+                 "  逐点强度包络：lower/upper修改点="
+diff --git a/src/masked_diffusion.py b/src/masked_diffusion.py
+index f7fb2f6..40b4215 100644
+--- a/src/masked_diffusion.py
++++ b/src/masked_diffusion.py
+@@ -71,6 +71,9 @@ def _normalize_quality_fidelity_configuration(
+     multiscale_variance = source.get(
+         "condition_multiscale_variance_floor", {}
+     ) or {}
++    derivative_variance = source.get(
++        "condition_derivative_variance_floor", {}
++    ) or {}
+     condition_mean = source.get("condition_mean", {}) or {}
+     envelope = source.get("condition_pointwise_envelope", {}) or {}
+     if not all(
+@@ -81,6 +84,7 @@ def _normalize_quality_fidelity_configuration(
+             derivative,
+             multiscale,
+             multiscale_variance,
++            derivative_variance,
+             condition_mean,
+             envelope,
+         )
+@@ -188,6 +192,47 @@ def _normalize_quality_fidelity_configuration(
+     ):
+         raise ValueError("condition_multiscale_variance_floor配置无效。")
+ 
++    derivative_kernel_sizes = [
++        int(value)
++        for value in derivative_variance.get("smoothing_kernel_sizes", [])
++    ]
++    normalized["condition_derivative_variance_floor"] = {
++        "enabled": bool(derivative_variance.get("enabled", False)),
++        "smoothing_kernel_sizes": derivative_kernel_sizes,
++        "minimum_group_size": int(
++            derivative_variance.get("minimum_group_size", 4)
++        ),
++        "minimum_std_ratio": float(
++            derivative_variance.get("minimum_std_ratio", 0.90)
++        ),
++        "active_std_quantile": float(
++            derivative_variance.get("active_std_quantile", 30.0)
++        ),
++        "maximum_timestep_fraction": float(
++            derivative_variance.get("maximum_timestep_fraction", 0.50)
++        ),
++        "smooth_l1_beta": float(
++            derivative_variance.get("smooth_l1_beta", 0.05)
++        ),
++        "weight": float(derivative_variance.get("weight", 1.0)),
++    }
++    derivative_floor = normalized["condition_derivative_variance_floor"]
++    if derivative_floor["enabled"] and (
++        not derivative_kernel_sizes
++        or any(
++            value < 3 or value % 2 == 0 or value > 127
++            for value in derivative_kernel_sizes
++        )
++        or len(set(derivative_kernel_sizes)) != len(derivative_kernel_sizes)
++        or derivative_floor["minimum_group_size"] < 3
++        or not 0.0 < derivative_floor["minimum_std_ratio"] <= 1.0
++        or not 0.0 <= derivative_floor["active_std_quantile"] <= 80.0
++        or not 0.0 < derivative_floor["maximum_timestep_fraction"] <= 1.0
++        or derivative_floor["smooth_l1_beta"] <= 0.0
++        or derivative_floor["weight"] <= 0.0
++    ):
++        raise ValueError("condition_derivative_variance_floor配置无效。")
++
+     normalized["condition_mean"] = {
+         "enabled": bool(condition_mean.get("enabled", False)),
+         "smooth_l1_beta": float(condition_mean.get("smooth_l1_beta", 0.05)),
+@@ -230,6 +275,7 @@ def _normalize_quality_fidelity_configuration(
+             first["enabled"],
+             multi["enabled"],
+             variance_floor["enabled"],
++            derivative_floor["enabled"],
+             mean["enabled"],
+             bounds["enabled"],
+         )
+@@ -366,6 +412,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+         derivative_loss = zero
+         multiscale_loss = zero
+         multiscale_variance_loss = zero
++        derivative_variance_loss = zero
+         condition_mean_loss = zero
+         envelope_loss = zero
+         active_groups = zero
+@@ -433,9 +480,15 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+         variance_floor = self.quality_fidelity_configuration.get(
+             "condition_multiscale_variance_floor", {}
+         )
++        derivative_floor = self.quality_fidelity_configuration.get(
++            "condition_derivative_variance_floor", {}
++        )
+         needs_condition_groups = bool(condition_mean.get("enabled", False)) or bool(
+             envelope.get("enabled", False)
+         ) or bool(variance_floor.get("enabled", False))
++        needs_condition_groups = needs_condition_groups or bool(
++            derivative_floor.get("enabled", False)
++        )
+         if needs_condition_groups:
+             _, inverse = torch.unique(
+                 condition.detach(), dim=0, sorted=True, return_inverse=True
+@@ -443,6 +496,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             mean_group_losses: list[torch.Tensor] = []
+             envelope_group_losses: list[torch.Tensor] = []
+             variance_group_losses: list[torch.Tensor] = []
++            derivative_variance_group_losses: list[torch.Tensor] = []
+             active_group_count = 0
+             for group_index in range(int(inverse.max().item()) + 1):
+                 selected = inverse == group_index
+@@ -546,6 +600,104 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+                         )
+                         group_is_active = True
+ 
++                derivative_timestep_is_active = True
++                if timesteps is not None:
++                    derivative_timestep_is_active = bool(
++                        (
++                            timesteps[selected].to(dtype=torch.float32).mean()
++                            / float(max(self.num_timesteps - 1, 1))
++                        ).item()
++                        <= float(
++                            derivative_floor.get(
++                                "maximum_timestep_fraction", 1.0
++                            )
++                        )
++                    )
++                if (
++                    bool(derivative_floor.get("enabled", False))
++                    and selected_count
++                    >= int(derivative_floor["minimum_group_size"])
++                    and derivative_timestep_is_active
++                ):
++                    kernel_losses: list[torch.Tensor] = []
++                    for kernel_size in derivative_floor[
++                        "smoothing_kernel_sizes"
++                    ]:
++                        padding = int(kernel_size) // 2
++                        pooled_mask = F.avg_pool1d(
++                            group_mask,
++                            kernel_size=int(kernel_size),
++                            stride=1,
++                            padding=padding,
++                            count_include_pad=True,
++                        )
++                        predicted_pool = F.avg_pool1d(
++                            group_prediction * group_mask,
++                            kernel_size=int(kernel_size),
++                            stride=1,
++                            padding=padding,
++                            count_include_pad=True,
++                        ) / pooled_mask.clamp_min(1.0e-12)
++                        target_pool = F.avg_pool1d(
++                            group_target * group_mask,
++                            kernel_size=int(kernel_size),
++                            stride=1,
++                            padding=padding,
++                            count_include_pad=True,
++                        ) / pooled_mask.clamp_min(1.0e-12)
++                        predicted_derivative = (
++                            predicted_pool[..., 1:] - predicted_pool[..., :-1]
++                        )
++                        target_derivative = (
++                            target_pool[..., 1:] - target_pool[..., :-1]
++                        )
++                        predicted_std = torch.sqrt(torch.mean(torch.square(
++                            predicted_derivative
++                            - predicted_derivative.mean(dim=0, keepdim=True)
++                        ), dim=0, keepdim=True).clamp_min(1.0e-12))
++                        target_std = torch.sqrt(torch.mean(torch.square(
++                            target_derivative
++                            - target_derivative.mean(dim=0, keepdim=True)
++                        ), dim=0, keepdim=True).clamp_min(1.0e-12)).detach()
++                        full_window = (pooled_mask > 1.0 - 1.0e-6).to(
++                            group_mask.dtype
++                        )
++                        derivative_valid = (
++                            full_window[..., 1:] * full_window[..., :-1]
++                        ).min(dim=0, keepdim=True).values
++                        valid_std = target_std[derivative_valid > 0.5]
++                        if valid_std.numel() == 0:
++                            continue
++                        active_threshold = torch.quantile(
++                            valid_std,
++                            float(derivative_floor["active_std_quantile"])
++                            / 100.0,
++                        )
++                        active_mask = derivative_valid * (
++                            target_std >= active_threshold
++                        ).to(derivative_valid.dtype)
++                        minimum_std = (
++                            float(derivative_floor["minimum_std_ratio"])
++                            * target_std
++                        )
++                        relative_deficit = F.relu(
++                            minimum_std - predicted_std
++                        ) / target_std.clamp_min(1.0e-6)
++                        pointwise = F.smooth_l1_loss(
++                            relative_deficit,
++                            torch.zeros_like(relative_deficit),
++                            reduction="none",
++                            beta=float(derivative_floor["smooth_l1_beta"]),
++                        )
++                        kernel_losses.append(
++                            self._masked_mean(pointwise, active_mask)
++                        )
++                    if kernel_losses:
++                        derivative_variance_group_losses.append(
++                            torch.stack(kernel_losses).mean()
++                        )
++                        group_is_active = True
++
+                 if bool(condition_mean.get("enabled", False)) and (
+                     selected_count >= int(condition_mean["minimum_group_size"])
+                 ):
+@@ -610,6 +762,10 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+                 multiscale_variance_loss = torch.stack(
+                     variance_group_losses
+                 ).mean()
++            if derivative_variance_group_losses:
++                derivative_variance_loss = torch.stack(
++                    derivative_variance_group_losses
++                ).mean()
+             active_groups = prediction.new_tensor(float(active_group_count))
+ 
+         raw = (
+@@ -617,6 +773,8 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             + float(multiscale.get("weight", 0.0)) * multiscale_loss
+             + float(variance_floor.get("weight", 0.0))
+             * multiscale_variance_loss
++            + float(derivative_floor.get("weight", 0.0))
++            * derivative_variance_loss
+             + float(condition_mean.get("weight", 0.0)) * condition_mean_loss
+             + float(envelope.get("weight", 0.0)) * envelope_loss
+         )
+@@ -625,6 +783,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             "first_derivative_fidelity_loss": derivative_loss,
+             "multiscale_shape_loss": multiscale_loss,
+             "condition_multiscale_variance_floor_loss": multiscale_variance_loss,
++            "condition_derivative_variance_floor_loss": derivative_variance_loss,
+             "condition_mean_fidelity_loss": condition_mean_loss,
+             "condition_envelope_loss": envelope_loss,
+             "quality_fidelity_active_groups": active_groups,
+@@ -971,6 +1130,9 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             "condition_multiscale_variance_floor_loss": quality.get(
+                 "condition_multiscale_variance_floor_loss", zero
+             ).detach(),
++            "condition_derivative_variance_floor_loss": quality.get(
++                "condition_derivative_variance_floor_loss", zero
++            ).detach(),
+             "condition_mean_fidelity_loss": quality.get(
+                 "condition_mean_fidelity_loss", zero
+             ).detach(),
+diff --git a/src/spectrum_generator.py b/src/spectrum_generator.py
+index 490a122..4ac2d4c 100644
+--- a/src/spectrum_generator.py
++++ b/src/spectrum_generator.py
+@@ -146,6 +146,161 @@ def _mean_pairwise_mse_from_variance(spectra: np.ndarray) -> float:
+     return float(2.0 * np.mean(pointwise_variance))
+ 
+ 
++def _pairwise_indices(
++    number: int,
++    *,
++    maximum_pair_count: int,
++    random_seed: int,
++) -> tuple[np.ndarray, np.ndarray]:
++    """Return every small-batch pair or a reproducible large-batch sample."""
++
++    total = number * (number - 1) // 2
++    requested = min(int(maximum_pair_count), total)
++    if requested <= 0:
++        raise ValueError("maximum_pair_count必须大于0。")
++    if requested == total:
++        return np.triu_indices(number, k=1)
++
++    random_generator = np.random.default_rng(int(random_seed))
++    all_left, all_right = np.triu_indices(number, k=1)
++    selected = random_generator.choice(total, size=requested, replace=False)
++    return all_left[selected], all_right[selected]
++
++
++def _pairwise_mse_values(
++    spectra: np.ndarray,
++    *,
++    maximum_pair_count: int = 10000,
++    random_seed: int = 2026,
++) -> np.ndarray:
++    """Return exact small-batch or sampled large-batch pairwise MSE values."""
++
++    array = np.asarray(spectra, dtype=np.float64)
++    if array.ndim != 2 or array.shape[0] < 2:
++        raise ValueError("pairwise-MSE至少需要二维数组中的2条光谱。")
++    left, right = _pairwise_indices(
++        array.shape[0],
++        maximum_pair_count=maximum_pair_count,
++        random_seed=random_seed,
++    )
++    values = np.empty(left.size, dtype=np.float64)
++    for start in range(0, left.size, 256):
++        stop = min(start + 256, left.size)
++        difference = array[left[start:stop]] - array[right[start:stop]]
++        values[start:stop] = np.mean(np.square(difference), axis=1)
++    return values
++
++
++def _protect_pairwise_diversity_after_calibration(
++    original: np.ndarray,
++    calibrated: np.ndarray,
++    training: np.ndarray,
++    *,
++    minimum_ratio: float,
++    search_iterations: int,
++    pair_count: int = 10000,
++    random_seed: int = 2026,
++) -> tuple[np.ndarray, dict[str, float | int | bool]]:
++    """Blend back only enough calibration to retain condition diversity.
++
++    The floor is measured with the same median all-pairs MSE used by the
++    evaluator.  When the original batch is already below the configured
++    training ratio, calibration is allowed only if it does not reduce that
++    batch's diversity further.
++    """
++
++    original = np.asarray(original, dtype=np.float64)
++    calibrated = np.asarray(calibrated, dtype=np.float64)
++    training = np.asarray(training, dtype=np.float64)
++    if original.shape != calibrated.shape or original.ndim != 2:
++        raise ValueError("多样性保护前后的生成谱形状必须一致且为二维。")
++    if training.ndim != 2 or training.shape[1] != original.shape[1]:
++        raise ValueError("多样性保护的training与生成谱Raman长度不一致。")
++    if not 0.0 <= minimum_ratio <= 1.0:
++        raise ValueError(
++            "minimum_postcalibration_pairwise_mse_ratio必须位于[0,1]。"
++        )
++    if not 4 <= int(search_iterations) <= 64:
++        raise ValueError("diversity_guard_search_iterations必须位于[4,64]。")
++    if int(pair_count) <= 0:
++        raise ValueError("diversity_guard_pair_count必须大于0。")
++
++    training_median = float(
++        np.median(
++            _pairwise_mse_values(
++                training,
++                maximum_pair_count=pair_count,
++                random_seed=random_seed,
++            )
++        )
++    )
++    left, right = _pairwise_indices(
++        original.shape[0],
++        maximum_pair_count=pair_count,
++        random_seed=random_seed,
++    )
++    constant = np.empty(left.size, dtype=np.float64)
++    linear = np.empty(left.size, dtype=np.float64)
++    quadratic = np.empty(left.size, dtype=np.float64)
++    delta = calibrated - original
++    for start in range(0, left.size, 256):
++        stop = min(start + 256, left.size)
++        base_difference = (
++            original[left[start:stop]] - original[right[start:stop]]
++        )
++        delta_difference = (
++            delta[left[start:stop]] - delta[right[start:stop]]
++        )
++        constant[start:stop] = np.mean(np.square(base_difference), axis=1)
++        linear[start:stop] = np.mean(base_difference * delta_difference, axis=1)
++        quadratic[start:stop] = np.mean(np.square(delta_difference), axis=1)
++    original_median = float(np.median(constant))
++    calibrated_median = float(np.median(constant + 2.0 * linear + quadratic))
++    denominator = max(training_median, 1.0e-12)
++    ratio_before = original_median / denominator
++    ratio_unguarded = calibrated_median / denominator
++    required_ratio = min(float(minimum_ratio), ratio_before)
++
++    blend = 1.0
++    activated = bool(
++        minimum_ratio > 0.0 and ratio_unguarded < required_ratio - 1.0e-12
++    )
++    if activated:
++        low = 0.0
++        high = 1.0
++        for _ in range(int(search_iterations)):
++            middle = 0.5 * (low + high)
++            pairwise = constant + 2.0 * middle * linear + middle * middle * quadratic
++            ratio = float(np.median(pairwise)) / denominator
++            if ratio >= required_ratio:
++                low = middle
++            else:
++                high = middle
++        blend = low
++
++    protected = original + blend * delta
++    protected_pairwise = (
++        constant + 2.0 * blend * linear + blend * blend * quadratic
++    )
++    ratio_after = float(np.median(protected_pairwise)) / denominator
++    if activated and ratio_after < required_ratio - 1.0e-9:
++        blend = 0.0
++        protected = original.copy()
++        ratio_after = ratio_before
++    diagnostics: dict[str, float | int | bool] = {
++        "diversity_guard_enabled": bool(minimum_ratio > 0.0),
++        "diversity_guard_activated": activated,
++        "pairwise_mse_ratio_before": ratio_before,
++        "pairwise_mse_ratio_unguarded": ratio_unguarded,
++        "pairwise_mse_ratio_required": required_ratio,
++        "pairwise_mse_ratio_after": ratio_after,
++        "calibration_blend_factor": float(blend),
++        "diversity_guard_search_iterations": int(search_iterations),
++        "diversity_guard_pair_count": int(left.size),
++    }
++    return protected, diagnostics
++
++
+ def apply_condition_pca_spread_calibration(
+     generated_spectra: np.ndarray,
+     training_spectra: np.ndarray,
+@@ -176,6 +331,19 @@ def apply_condition_pca_spread_calibration(
+     maximum_scale_factor = float(
+         configuration.get("maximum_scale_factor", 1.35)
+     )
++    minimum_pairwise_ratio = float(
++        configuration.get("minimum_pairwise_mse_ratio", 0.0)
++    )
++    maximum_global_scale_factor = float(
++        configuration.get("maximum_global_scale_factor", 1.15)
++    )
++    pairwise_pair_count = int(
++        configuration.get("pairwise_mse_pair_count", 10000)
++    )
++    pairwise_search_iterations = int(
++        configuration.get("pairwise_mse_search_iterations", 24)
++    )
++    pairwise_random_seed = int(configuration.get("random_seed", 2026))
+     minimum_component_variance_fraction = float(
+         configuration.get("minimum_component_variance_fraction", 0.01)
+     )
+@@ -195,6 +363,14 @@ def apply_condition_pca_spread_calibration(
+         raise ValueError("minimum_component_std_ratio必须位于(0,1]。")
+     if not 1.0 <= maximum_scale_factor <= 2.0:
+         raise ValueError("maximum_scale_factor必须位于[1,2]。")
++    if not 0.0 <= minimum_pairwise_ratio <= 1.0:
++        raise ValueError("minimum_pairwise_mse_ratio必须位于[0,1]。")
++    if not 1.0 <= maximum_global_scale_factor <= 2.0:
++        raise ValueError("maximum_global_scale_factor必须位于[1,2]。")
++    if pairwise_pair_count <= 0:
++        raise ValueError("pairwise_mse_pair_count必须大于0。")
++    if not 4 <= pairwise_search_iterations <= 64:
++        raise ValueError("pairwise_mse_search_iterations必须位于[4,64]。")
+     if not 0.0 <= minimum_component_variance_fraction <= 0.25:
+         raise ValueError("minimum_component_variance_fraction必须位于[0,0.25]。")
+     if not 0.0 < maximum_correction_fraction <= 0.25:
+@@ -253,6 +429,83 @@ def apply_condition_pca_spread_calibration(
+ 
+     score_delta = generated_scores * (scale_factors - 1.0)[np.newaxis, :]
+     correction = score_delta @ components
++    pairwise_training = float(np.median(_pairwise_mse_values(
++        training,
++        maximum_pair_count=pairwise_pair_count,
++        random_seed=pairwise_random_seed,
++    )))
++    provisional = generated + correction
++    provisional += (
++        generated_mean - np.mean(provisional, axis=0)
++    )[np.newaxis, :]
++    provisional_pairwise = float(np.median(_pairwise_mse_values(
++        provisional,
++        maximum_pair_count=pairwise_pair_count,
++        random_seed=pairwise_random_seed,
++    )))
++    provisional_ratio = provisional_pairwise / max(pairwise_training, epsilon)
++    global_scale_factor = 1.0
++    global_spread_activated = bool(
++        minimum_pairwise_ratio > 0.0
++        and np.any(eligible)
++        and provisional_ratio < minimum_pairwise_ratio
++    )
++    if global_spread_activated:
++        provisional_centered = provisional - generated_mean[np.newaxis, :]
++        provisional_scores = provisional_centered @ components.T
++        supported_direction = (
++            provisional_scores * eligible.astype(np.float64)[np.newaxis, :]
++        ) @ components
++
++        left, right = _pairwise_indices(
++            provisional.shape[0],
++            maximum_pair_count=pairwise_pair_count,
++            random_seed=pairwise_random_seed,
++        )
++        constant = np.empty(left.size, dtype=np.float64)
++        linear = np.empty(left.size, dtype=np.float64)
++        quadratic = np.empty(left.size, dtype=np.float64)
++        for start in range(0, left.size, 256):
++            stop = min(start + 256, left.size)
++            base_difference = (
++                provisional[left[start:stop]] - provisional[right[start:stop]]
++            )
++            direction_difference = (
++                supported_direction[left[start:stop]]
++                - supported_direction[right[start:stop]]
++            )
++            constant[start:stop] = np.mean(
++                np.square(base_difference), axis=1
++            )
++            linear[start:stop] = np.mean(
++                base_difference * direction_difference, axis=1
++            )
++            quadratic[start:stop] = np.mean(
++                np.square(direction_difference), axis=1
++            )
++
++        def ratio_at(scale_factor: float) -> float:
++            alpha = float(scale_factor) - 1.0
++            value = float(np.median(
++                constant + 2.0 * alpha * linear + alpha * alpha * quadratic
++            ))
++            return value / max(pairwise_training, epsilon)
++
++        if ratio_at(maximum_global_scale_factor) < minimum_pairwise_ratio:
++            global_scale_factor = maximum_global_scale_factor
++        else:
++            low = 1.0
++            high = maximum_global_scale_factor
++            for _ in range(pairwise_search_iterations):
++                middle = 0.5 * (low + high)
++                if ratio_at(middle) >= minimum_pairwise_ratio:
++                    high = middle
++                else:
++                    low = middle
++            global_scale_factor = high
++        correction += (
++            (global_scale_factor - 1.0) * supported_direction
++        )
+     training_range = max(
+         float(np.percentile(training, 95.0) - np.percentile(training, 5.0)),
+         epsilon,
+@@ -277,9 +530,16 @@ def apply_condition_pca_spread_calibration(
+     corrected_scores = (corrected - generated_mean[np.newaxis, :]) @ components.T
+     corrected_std = np.std(corrected_scores, axis=0, ddof=1)
+     component_ratio_after = corrected_std / np.maximum(training_std, epsilon)
+-    pairwise_before = _mean_pairwise_mse_from_variance(generated)
+-    pairwise_after = _mean_pairwise_mse_from_variance(corrected)
+-    pairwise_training = _mean_pairwise_mse_from_variance(training)
++    pairwise_before = float(np.median(_pairwise_mse_values(
++        generated,
++        maximum_pair_count=pairwise_pair_count,
++        random_seed=pairwise_random_seed,
++    )))
++    pairwise_after = float(np.median(_pairwise_mse_values(
++        corrected,
++        maximum_pair_count=pairwise_pair_count,
++        random_seed=pairwise_random_seed,
++    )))
+     diagnostics: dict[str, float | int | bool | list[float]] = {
+         "enabled": True,
+         "training_only": True,
+@@ -296,10 +556,21 @@ def apply_condition_pca_spread_calibration(
+         "component_std_ratio_median_after": float(
+             np.median(component_ratio_after[eligible]) if np.any(eligible) else 1.0
+         ),
++        # Keep the legacy field names for old manifest readers.  From 2.9
++        # onward their values use the evaluator's median all-pairs statistic.
+         "mean_pairwise_mse_ratio_before": pairwise_before
+         / max(pairwise_training, epsilon),
+         "mean_pairwise_mse_ratio_after": pairwise_after
+         / max(pairwise_training, epsilon),
++        "global_pairwise_spread_activated": global_spread_activated,
++        "global_pairwise_scale_factor": float(global_scale_factor),
++        "pairwise_mse_statistic": "median_all_pairs_or_reproducible_sample",
++        "median_pairwise_mse_ratio_before": pairwise_before
++        / max(pairwise_training, epsilon),
++        "median_pairwise_mse_ratio_after": pairwise_after
++        / max(pairwise_training, epsilon),
++        "pairwise_mse_pair_count": int(pairwise_pair_count),
++        "minimum_pairwise_mse_ratio": float(minimum_pairwise_ratio),
+         "correction_rmse": float(np.sqrt(np.mean(np.square(corrected - generated)))),
+         "correction_rmse_before_safety_cap": correction_rmse_before_cap,
+         "safety_scale": float(safety_scale),
+@@ -308,6 +579,90 @@ def apply_condition_pca_spread_calibration(
+     return corrected.astype(np.float32, copy=False), diagnostics
+ 
+ 
++def resolve_condition_tail_calibration_configuration(
++    configuration: dict,
++    *,
++    point_count: int,
++    condition_name: str,
++) -> tuple[dict, dict[str, float | int | str]]:
++    """Resolve axis/analyte calibration multipliers without data leakage."""
++
++    if not isinstance(configuration, dict):
++        raise ValueError("tail_calibration配置必须是字典。")
++    if int(point_count) < 2:
++        raise ValueError("point_count至少为2。")
++    axis_profiles = configuration.get("axis_profiles", {}) or {}
++    analyte_profiles = configuration.get("analyte_count_profiles", {}) or {}
++    if not isinstance(axis_profiles, dict) or not isinstance(
++        analyte_profiles, dict
++    ):
++        raise ValueError("tail calibration分层配置必须是字典。")
++
++    analytes = {"DEL", "CHL", "TEB"}
++    analyte_count = sum(
++        token.split("-", 1)[0].upper() in analytes
++        for token in str(condition_name).split("_")
++    )
++    if analyte_count not in {1, 2, 3}:
++        raise ValueError(f"无法从条件名解析1--3种农药：{condition_name}")
++
++    effective = {
++        key: value
++        for key, value in configuration.items()
++        if key not in {"axis_profiles", "analyte_count_profiles"}
++    }
++    correction_multiplier = 1.0
++    maximum_delta_multiplier = 1.0
++    selected_profiles: list[str] = []
++    for label, profile in (
++        (f"axis:{int(point_count)}", axis_profiles.get(str(int(point_count)))),
++        (f"analytes:{analyte_count}", analyte_profiles.get(str(analyte_count))),
++    ):
++        if profile is None:
++            continue
++        if not isinstance(profile, dict):
++            raise ValueError(f"tail calibration profile {label}必须是字典。")
++        selected_profiles.append(label)
++        profile_values = dict(profile)
++        correction_multiplier *= float(
++            profile_values.pop("correction_strength_multiplier", 1.0)
++        )
++        maximum_delta_multiplier *= float(
++            profile_values.pop(
++                "maximum_absolute_correction_z_multiplier", 1.0
++            )
++        )
++        effective.update(profile_values)
++
++    if not 0.25 <= correction_multiplier <= 2.0:
++        raise ValueError("累计correction_strength_multiplier必须位于[0.25,2]。")
++    if not 0.25 <= maximum_delta_multiplier <= 2.0:
++        raise ValueError(
++            "累计maximum_absolute_correction_z_multiplier必须位于[0.25,2]。"
++        )
++    effective["correction_strength"] = min(
++        1.0,
++        float(effective.get("correction_strength", 0.60))
++        * correction_multiplier,
++    )
++    effective["maximum_absolute_correction_z"] = (
++        float(effective.get("maximum_absolute_correction_z", 0.40))
++        * maximum_delta_multiplier
++    )
++    diagnostics: dict[str, float | int | str] = {
++        "point_count": int(point_count),
++        "analyte_count": int(analyte_count),
++        "selected_profiles": ",".join(selected_profiles) or "base",
++        "effective_correction_strength": float(
++            effective["correction_strength"]
++        ),
++        "effective_maximum_absolute_correction_z": float(
++            effective["maximum_absolute_correction_z"]
++        ),
++    }
++    return effective, diagnostics
++
++
+ def apply_condition_oracle_tail_calibration(
+     generated_spectra: np.ndarray,
+     training_spectra: np.ndarray,
+@@ -534,6 +889,17 @@ def _apply_condition_oracle_piecewise_quantile_calibration(
+     maximum_modified_fraction = float(
+         configuration.get("maximum_modified_fraction", 1.0)
+     )
++    minimum_pairwise_ratio = float(
++        configuration.get(
++            "minimum_postcalibration_pairwise_mse_ratio", 0.0
++        )
++    )
++    diversity_search_iterations = int(
++        configuration.get("diversity_guard_search_iterations", 20)
++    )
++    diversity_pair_count = int(
++        configuration.get("diversity_guard_pair_count", 10000)
++    )
+     random_seed = int(configuration.get("random_seed", 2026))
+     epsilon = float(configuration.get("epsilon", 1.0e-12))
+ 
+@@ -562,6 +928,16 @@ def _apply_condition_oracle_piecewise_quantile_calibration(
+         raise ValueError("maximum_absolute_correction_z必须为正数。")
+     if not 0.0 < maximum_modified_fraction <= 1.0 or epsilon <= 0.0:
+         raise ValueError("maximum_modified_fraction或epsilon无效。")
++    if not 0.0 <= minimum_pairwise_ratio <= 1.0:
++        raise ValueError(
++            "minimum_postcalibration_pairwise_mse_ratio必须位于[0,1]。"
++        )
++    if not 4 <= diversity_search_iterations <= 64:
++        raise ValueError(
++            "diversity_guard_search_iterations必须位于[4,64]。"
++        )
++    if diversity_pair_count <= 0:
++        raise ValueError("diversity_guard_pair_count必须大于0。")
+ 
+     generated_z, training_z, center, scale = _training_standardized_values(
+         generated, training
+@@ -644,6 +1020,18 @@ def _apply_condition_oracle_piecewise_quantile_calibration(
+     else:
+         delta = np.zeros_like(flat)
+     corrected_z = (flat + delta).reshape(generated_z.shape)
++    unguarded = center[np.newaxis, :] + scale[np.newaxis, :] * corrected_z
++    corrected, diversity_guard = _protect_pairwise_diversity_after_calibration(
++        generated,
++        unguarded,
++        training,
++        minimum_ratio=minimum_pairwise_ratio,
++        search_iterations=diversity_search_iterations,
++        pair_count=diversity_pair_count,
++        random_seed=random_seed,
++    )
++    corrected_z = (corrected - center[np.newaxis, :]) / scale[np.newaxis, :]
++    delta = (corrected_z - generated_z).reshape(-1)
+     modified = np.abs(delta) > 1.0e-12
+     modified_fraction = float(np.mean(modified))
+     if modified_fraction > maximum_modified_fraction + 1.0e-12:
+@@ -654,7 +1042,6 @@ def _apply_condition_oracle_piecewise_quantile_calibration(
+ 
+     corrected_q = np.quantile(corrected_z.reshape(-1), probabilities)
+     ratios_after = np.diff(corrected_q) / training_spans
+-    corrected = center[np.newaxis, :] + scale[np.newaxis, :] * corrected_z
+     lower_before = float(
+         (generated_q[2] - generated_q[0])
+         / max(float(training_q[2] - training_q[0]), epsilon)
+@@ -705,6 +1092,7 @@ def _apply_condition_oracle_piecewise_quantile_calibration(
+             np.sum(np.any(modified.reshape(generated_z.shape), axis=1))
+         ),
+         "maximum_absolute_correction_z_used": float(np.max(np.abs(delta))),
++        **diversity_guard,
+     }
+     return corrected.astype(np.float32, copy=False), diagnostics
+ 
+diff --git a/tests/test_spectrum_generation.py b/tests/test_spectrum_generation.py
+index 773f5c2..e015fd9 100644
+--- a/tests/test_spectrum_generation.py
++++ b/tests/test_spectrum_generation.py
+@@ -9,11 +9,13 @@ from src.prior_residual import (
+     PriorResidualTransformer,
+ )
+ from src.spectrum_generator import (
++    _protect_pairwise_diversity_after_calibration,
+     apply_condition_intensity_envelope_guard,
+     apply_condition_mean_fidelity_calibration,
+     apply_condition_negative_floor_guard,
+     apply_condition_oracle_tail_calibration,
+     apply_condition_pca_spread_calibration,
++    resolve_condition_tail_calibration_configuration,
+     generate_spectra,
+ )
+ from src.masked_diffusion import MaskedGaussianDiffusion1D
+@@ -293,6 +295,91 @@ def test_pca_spread_calibration_restores_supported_variation_and_keeps_mean():
+     )
+ 
+ 
++def test_pca_spread_calibration_applies_global_train_subspace_floor():
++    random_generator = np.random.default_rng(2029)
++    axis = np.linspace(-1.0, 1.0, 160)
++    modes = np.stack(
++        [
++            np.sin(np.pi * axis),
++            np.exp(-0.5 * np.square(axis / 0.20)),
++            np.cos(2.0 * np.pi * axis),
++        ],
++        axis=0,
++    )
++    training_scores = random_generator.normal(size=(12, 3))
++    generated_scores = random_generator.normal(scale=0.70, size=(80, 3))
++    training = 10.0 + training_scores @ modes
++    generated = 14.0 + generated_scores @ modes
++    mean_before = np.mean(generated, axis=0)
++
++    corrected, diagnostics = apply_condition_pca_spread_calibration(
++        generated,
++        training,
++        configuration={
++            "maximum_components": 6,
++            "explained_variance_ratio": 0.95,
++            "minimum_component_variance_fraction": 0.01,
++            # Disable the first-stage component floor in this test so the
++            # second-stage whole-batch floor is exercised independently.
++            "minimum_component_std_ratio": 0.50,
++            "maximum_scale_factor": 1.45,
++            "minimum_pairwise_mse_ratio": 0.90,
++            "maximum_global_scale_factor": 1.60,
++            "maximum_correction_range_fraction": 0.25,
++            "minimum_generated_count": 20,
++        },
++    )
++
++    np.testing.assert_allclose(
++        np.mean(corrected, axis=0), mean_before, rtol=0.0, atol=2.0e-5
++    )
++    assert diagnostics["global_pairwise_spread_activated"] is True
++    assert diagnostics["global_pairwise_scale_factor"] > 1.0
++    assert (
++        diagnostics["mean_pairwise_mse_ratio_after"]
++        > diagnostics["mean_pairwise_mse_ratio_before"]
++    )
++    assert diagnostics["pairwise_mse_statistic"].startswith("median")
++    assert diagnostics["median_pairwise_mse_ratio_after"] >= 0.89
++
++
++def test_tail_calibration_profile_separates_axis_and_analyte_count():
++    configuration = {
++        "correction_strength": 0.60,
++        "maximum_absolute_correction_z": 0.40,
++        "axis_profiles": {
++            "1401": {
++                "correction_strength_multiplier": 1.25,
++                "maximum_absolute_correction_z_multiplier": 1.50,
++            },
++            "1901": {"correction_strength_multiplier": 0.75},
++        },
++        "analyte_count_profiles": {
++            "2": {"correction_strength_multiplier": 1.15},
++            "3": {"correction_strength_multiplier": 0.90},
++        },
++    }
++    two_1401, diagnostic_1401 = (
++        resolve_condition_tail_calibration_configuration(
++            configuration,
++            point_count=1401,
++            condition_name="DEL-M_TEB-H_water",
++        )
++    )
++    three_1901, diagnostic_1901 = (
++        resolve_condition_tail_calibration_configuration(
++            configuration,
++            point_count=1901,
++            condition_name="DEL-S_TEB-M_CHL-H_soil",
++        )
++    )
++    assert abs(two_1401["correction_strength"] - 0.8625) < 1.0e-12
++    assert abs(two_1401["maximum_absolute_correction_z"] - 0.60) < 1.0e-12
++    assert abs(three_1901["correction_strength"] - 0.405) < 1.0e-12
++    assert diagnostic_1401["analyte_count"] == 2
++    assert diagnostic_1901["selected_profiles"] == "axis:1901,analytes:3"
++
++
+ def test_oracle_tail_calibration_keeps_middle_and_shrinks_only_excess_tails():
+     random_generator = np.random.default_rng(2026)
+     training = random_generator.normal(0.0, 1.0, size=(12, 160))
+@@ -410,6 +497,35 @@ def test_oracle_piecewise_quantile_calibration_reduces_s_shaped_qq_error():
+     assert abs(np.median(corrected_z) - np.median(generated_z)) < 1.0e-4
+ 
+ 
++def test_postcalibration_diversity_guard_limits_pairwise_mse_collapse():
++    random_generator = np.random.default_rng(2032)
++    training = random_generator.normal(0.0, 1.0, size=(12, 160))
++    original = random_generator.normal(0.0, 1.0, size=(20, 160))
++    collapsed = np.mean(original, axis=0, keepdims=True) + 0.20 * (
++        original - np.mean(original, axis=0, keepdims=True)
++    )
++
++    protected, diagnostics = _protect_pairwise_diversity_after_calibration(
++        original,
++        collapsed,
++        training,
++        minimum_ratio=0.82,
++        search_iterations=24,
++    )
++
++    assert diagnostics["diversity_guard_activated"] is True
++    assert 0.0 < diagnostics["calibration_blend_factor"] < 1.0
++    assert (
++        diagnostics["pairwise_mse_ratio_after"]
++        >= diagnostics["pairwise_mse_ratio_required"] - 1.0e-6
++    )
++    assert (
++        diagnostics["pairwise_mse_ratio_after"]
++        > diagnostics["pairwise_mse_ratio_unguarded"]
++    )
++    assert np.isfinite(protected).all()
++
++
+ def test_quality_fidelity_losses_detect_shape_mean_and_envelope_errors():
+     diffusion = object.__new__(MaskedGaussianDiffusion1D)
+     nn.Module.__init__(diffusion)
+@@ -500,6 +616,40 @@ def test_condition_multiscale_variance_floor_detects_collapsed_group():
+     assert losses["quality_fidelity_raw_loss"].item() > 0.0
+ 
+ 
++def test_condition_derivative_variance_floor_detects_frozen_peak_positions():
++    diffusion = object.__new__(MaskedGaussianDiffusion1D)
++    nn.Module.__init__(diffusion)
++    diffusion.num_timesteps = 200
++    diffusion.quality_fidelity_configuration = {
++        "enabled": True,
++        "condition_derivative_variance_floor": {
++            "enabled": True,
++            "smoothing_kernel_sizes": [3, 5],
++            "minimum_group_size": 4,
++            "minimum_std_ratio": 0.90,
++            "active_std_quantile": 30.0,
++            "maximum_timestep_fraction": 0.50,
++            "smooth_l1_beta": 0.05,
++            "weight": 1.0,
++        },
++    }
++    target = torch.zeros((4, 1, 31), dtype=torch.float32)
++    target[0, 0, 10:15] = 1.0
++    target[1, 0, 11:16] = 1.0
++    target[2, 0, 12:17] = 1.0
++    target[3, 0, 13:18] = 1.0
++    prediction = target.mean(dim=0, keepdim=True).repeat(4, 1, 1)
++    losses = diffusion._quality_fidelity_losses(
++        prediction=prediction,
++        target=target,
++        valid_mask=torch.ones_like(target),
++        condition=torch.tensor([[1.0, 0.0]]).repeat(4, 1),
++        timesteps=torch.tensor([20, 20, 20, 20]),
++    )
++    assert losses["condition_derivative_variance_floor_loss"].item() > 0.0
++    assert losses["quality_fidelity_raw_loss"].item() > 0.0
++
++
+ def test_high_noise_stratified_sampling_preserves_full_range_and_tail_coverage():
+     diffusion = object.__new__(MaskedGaussianDiffusion1D)
+     nn.Module.__init__(diffusion)

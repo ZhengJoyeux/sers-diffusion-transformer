@@ -1,0 +1,127 @@
+import importlib.util
+import json
+import unittest
+import numpy as np
+from scipy.special import ndtr,ndtri
+from src.joint_prior_sampling import JointPriorSampler,contract_cross_correlation
+from src.conditional_prior_residual import ConditionalPriorResidualBank
+from src.generation_stage_trace import training_components
+from test_d4_25_stage_trace import bank_fixture
+
+class JointPriorTests(unittest.TestCase):
+    def setUp(self):
+        self.bank,self.training,self.axis=bank_fixture()
+        self.parts=training_components(self.bank,'condition',self.training,self.axis)
+        self.entry=self.bank._entry('condition')
+
+    def sampler(self,strength=.5):
+        return JointPriorSampler(self.entry,self.parts['outer'],self.parts['broad'],{'cross_correlation_strength':strength})
+
+    def test_disabled_bank_keeps_original_draws(self):
+        a,b=np.random.default_rng(1),np.random.default_rng(2)
+        expected=self.entry.outer.sample_reference_priors(200,random_generator=a)+self.entry.broad_local.sample_broad_residuals(200,random_generator=b)
+        a,b=np.random.default_rng(1),np.random.default_rng(2)
+        actual=self.bank.sample_generation_conditioning(200,condition_id='condition',prior_random_generator=a,broad_random_generator=b)
+        np.testing.assert_array_equal(actual,expected)
+
+    def test_zero_strength_exact_draws_and_rng_states(self):
+        a,b=np.random.default_rng(5),np.random.default_rng(6)
+        expected_a=self.entry.outer.sample_reference_priors(200,random_generator=a)
+        expected_b=self.entry.broad_local.sample_broad_residuals(200,random_generator=b)
+        next_a,next_b=a.random(8),b.random(8)
+        a,b=np.random.default_rng(5),np.random.default_rng(6)
+        actual_a,actual_b=self.sampler(0).sample(200,a,b)
+        np.testing.assert_array_equal(expected_a,actual_a);np.testing.assert_array_equal(expected_b,actual_b)
+        np.testing.assert_array_equal(next_a,a.random(8));np.testing.assert_array_equal(next_b,b.random(8))
+
+    def test_joint_keeps_outer_exact_and_consumes_same_rng_counts(self):
+        a,b=np.random.default_rng(5),np.random.default_rng(6)
+        expected=self.entry.outer.sample_reference_priors(200,random_generator=a)
+        self.entry.broad_local.sample_broad_residuals(200,random_generator=b)
+        na,nb=a.random(8),b.random(8)
+        a,b=np.random.default_rng(5),np.random.default_rng(6)
+        actual,_=self.sampler().sample(200,a,b)
+        np.testing.assert_array_equal(actual,expected)
+        np.testing.assert_array_equal(a.random(8),na);np.testing.assert_array_equal(b.random(8),nb)
+
+    def test_copula_latent_covariance_and_truncated_marginals(self):
+        s=self.sampler();outer,broad=s.sample(40000,np.random.default_rng(91),np.random.default_rng(92))
+        latent=[]
+        for values,mean,components,score_mean,std,clip in [(outer,s.om,s.oa,s.osm,s.oss,s.oc),(broad,s.bm,s.ba,s.bsm,s.bss,s.bc)]:
+            scores=(values.astype(np.float64)-mean)@components.T
+            z=(scores-score_mean)/np.maximum(std,1e-12)
+            lo,hi=ndtr(-clip),ndtr(clip)
+            gaussian=ndtri(np.clip((ndtr(z)-lo)/(hi-lo),1e-7,1-1e-7))
+            self.assertLess(float(np.max(np.abs(z.mean(axis=0)))),.025)
+            expected_variance=1-2*clip*np.exp(-clip**2/2)/np.sqrt(2*np.pi)/(hi-lo)
+            np.testing.assert_allclose(z.var(axis=0),expected_variance,rtol=.035,atol=.025)
+            self.assertLess(float(np.max(np.abs(z))),clip+3e-4)
+            latent.append(gaussian)
+        observed=np.corrcoef(np.concatenate(latent,axis=1),rowvar=False)
+        p=len(s.oa);q=len(s.ba)
+        np.testing.assert_allclose(observed[:p,:p],np.eye(p),atol=.025)
+        np.testing.assert_allclose(observed[p:,p:],np.eye(q),atol=.025)
+        np.testing.assert_allclose(observed[:p,p:],s.cross,atol=.025)
+
+    def test_singular_cross_block_is_positive_definite(self):
+        c,r,_=contract_cross_correlation(np.ones((6,6))*10,.5)
+        covariance=np.block([[np.eye(6),c],[c.T,np.eye(6)]])
+        self.assertGreaterEqual(np.linalg.eigvalsh(covariance).min(),.5-1e-10)
+        np.testing.assert_allclose(r@r.T,np.eye(6)-c.T@c,atol=1e-12)
+
+    def test_train_count_and_axis_rejected(self):
+        with self.assertRaises(ValueError):
+            JointPriorSampler(self.entry,self.parts['outer'][:11],self.parts['broad'][:11],{})
+        with self.assertRaises(ValueError):
+            self.bank.configure_generation_joint_prior('condition',self.training,self.axis+.1,{})
+        with self.assertRaises(ValueError):self.sampler(.6)
+
+    def test_runtime_registration_not_checkpoint_state(self):
+        before=json.dumps(self.bank.state_dict(),sort_keys=True)
+        info=self.bank.configure_generation_joint_prior('condition',self.training,self.axis,{'cross_correlation_strength':.5})
+        self.assertEqual(before,json.dumps(self.bank.state_dict(),sort_keys=True))
+        self.assertEqual(info['training_count'],12)
+        restored=ConditionalPriorResidualBank.from_state_dict(self.bank.state_dict())
+        self.assertFalse(hasattr(restored,'_generation_joint_prior_samplers'))
+        a,b=np.random.default_rng(31),np.random.default_rng(32);parts=[]
+        base=self.bank.sample_generation_conditioning(200,condition_id='condition',prior_random_generator=a,broad_random_generator=b,sampled_components=parts)
+        np.testing.assert_allclose(base,parts[0]['outer']+parts[0]['broad'],atol=1e-7)
+
+    def test_short_full_axes_keep_masked_tail_zero(self):
+        axis=np.arange(600.,2501.);x=axis-600
+        rng=np.random.default_rng(41)
+        spectra=np.stack([.1+(.5+.025*i)*np.exp(-.5*((x-350-.03*i)/4)**2)
+                  +rng.normal(0,.01,len(x)) for i in range(24)]).astype(np.float32)
+        masks=np.ones_like(spectra);masks[:12,1401:]=0;spectra[:12,1401:]=0
+        bank=ConditionalPriorResidualBank(prior_configuration=self.bank.prior_configuration,
+              broad_local_configuration=self.bank.broad_local_configuration).fit(spectra,
+              valid_masks=masks,condition_ids=['short']*12+['full']*12,
+              training_indices=np.arange(24),raman_shift=axis)
+        for condition,length,start in [('short',1401,0),('full',1901,12)]:
+            bank.configure_generation_joint_prior(condition,spectra[start:start+12,:length],axis[:length],{})
+            parts=[]
+            result=bank.sample_generation_conditioning(20,condition_id=condition,
+                prior_random_generator=np.random.default_rng(8),broad_random_generator=np.random.default_rng(9),sampled_components=parts)
+            self.assertEqual(result.shape,(20,1901));self.assertEqual(parts[0]['base'].shape,(20,length))
+            self.assertTrue(np.isfinite(result).all())
+            if length==1401:np.testing.assert_array_equal(result[:,1401:],0)
+
+    def test_generator_sampling_rng_trace_does_not_change_output(self):
+        if importlib.util.find_spec('torch') is None:self.skipTest('PyTorch unavailable locally')
+        import torch
+        from src.spectrum_generator import generate_spectra
+        from src.spectrum_length_adapter import SpectrumLengthAdapter
+        class Dummy(torch.nn.Module):
+            configured_prior_conditioning_enabled=True
+            def sample(self,batch_size,**kwargs):return torch.randn(batch_size,1,64)*.01
+        kwargs=dict(diffusion=Dummy(),number_of_spectra=9,generation_batch_size=4,device=torch.device('cpu'),
+            length_adapter=SpectrumLengthAdapter(original_length=64,required_multiple=8,padded_length=64,
+                                                padding_size=0,model_raman_shift=tuple(self.axis)),
+            condition_vector=np.zeros(14,dtype=np.float32),condition_id='condition',
+            conditional_prior_residual_bank=self.bank,prior_random_seed=2026)
+        torch.manual_seed(19);plain=generate_spectra(**kwargs);state=torch.get_rng_state().clone()
+        torch.manual_seed(19);fingerprints=[];observed=generate_spectra(**kwargs,generated_sampling_rng_fingerprints=fingerprints)
+        np.testing.assert_array_equal(plain,observed);self.assertTrue(torch.equal(state,torch.get_rng_state()))
+        self.assertEqual([f['batch_size'] for f in fingerprints],[4,4,1])
+
+if __name__=='__main__':unittest.main()

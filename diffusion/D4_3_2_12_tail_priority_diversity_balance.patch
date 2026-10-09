@@ -1,0 +1,254 @@
+diff --git a/src/spectrum_generator.py b/src/spectrum_generator.py
+--- a/src/spectrum_generator.py
++++ b/src/spectrum_generator.py
+@@ -198,6 +198,7 @@ def _protect_pairwise_diversity_after_calibration(
+     *,
+     minimum_ratio: float,
+     search_iterations: int,
++    minimum_calibration_blend_factor: float = 0.0,
+     pair_count: int = 10000,
+     random_seed: int = 2026,
+ ) -> tuple[np.ndarray, dict[str, float | int | bool]]:
+@@ -220,6 +221,11 @@ def _protect_pairwise_diversity_after_calibration(
+         raise ValueError(
+             "minimum_postcalibration_pairwise_mse_ratio必须位于[0,1]。"
+         )
++    if not 0.0 <= float(minimum_calibration_blend_factor) <= 1.0:
++        raise ValueError(
++            "minimum_calibration_blend_factor必须位于[0,1]。"
++        )
++
+     if not 4 <= int(search_iterations) <= 64:
+         raise ValueError("diversity_guard_search_iterations必须位于[4,64]。")
+     if int(pair_count) <= 0:
+@@ -277,16 +283,34 @@ def _protect_pairwise_diversity_after_calibration(
+             else:
+                 high = middle
+         blend = low
++
++    unconstrained_blend = float(blend)
++    tail_priority_limited_rollback = False
++    if (
++        activated
++        and blend < float(minimum_calibration_blend_factor)
++    ):
++        # D4.3.2.12:
++        # Pairwise-MSE diversity is a soft goal.  It must not undo nearly all
++        # of a train-supported QQ tail correction merely to recover one
++        # aggregate diversity statistic.  Preserve at least the configured
++        # fraction of the QQ correction and report when the diversity target
++        # therefore cannot be reached.
++        blend = float(minimum_calibration_blend_factor)
++        tail_priority_limited_rollback = True
+ 
+     protected = original + blend * delta
+     protected_pairwise = (
+         constant + 2.0 * blend * linear + blend * blend * quadratic
+     )
+     ratio_after = float(np.median(protected_pairwise)) / denominator
+-    if activated and ratio_after < required_ratio - 1.0e-9:
++    diversity_floor_satisfied = bool(
++        ratio_after >= required_ratio - 1.0e-9
++    )
++
++    # Preserve the exact legacy behaviour when no tail-priority floor is
++    # configured.  Old configurations/checkpoints therefore remain compatible.
++    if (
++        activated
++        and not diversity_floor_satisfied
++        and float(minimum_calibration_blend_factor) <= 0.0
++    ):
+         blend = 0.0
+         protected = original.copy()
+         ratio_after = ratio_before
++        diversity_floor_satisfied = True
++
+     diagnostics: dict[str, float | int | bool] = {
+         "diversity_guard_enabled": bool(minimum_ratio > 0.0),
+         "diversity_guard_activated": activated,
+@@ -295,7 +319,15 @@ def _protect_pairwise_diversity_after_calibration(
+         "pairwise_mse_ratio_required": required_ratio,
+         "pairwise_mse_ratio_after": ratio_after,
+         "calibration_blend_factor": float(blend),
++        "unconstrained_calibration_blend_factor": float(
++            unconstrained_blend
++        ),
++        "minimum_calibration_blend_factor": float(
++            minimum_calibration_blend_factor
++        ),
++        "diversity_floor_satisfied": diversity_floor_satisfied,
++        "tail_priority_limited_rollback": bool(
++            tail_priority_limited_rollback
++        ),
+         "diversity_guard_search_iterations": int(search_iterations),
+         "diversity_guard_pair_count": int(left.size),
+     }
+@@ -337,6 +369,9 @@ def apply_condition_pca_spread_calibration(
+     maximum_global_scale_factor = float(
+         configuration.get("maximum_global_scale_factor", 1.15)
+     )
++    maximum_component_std_ratio_after_global = float(
++        configuration.get("maximum_component_std_ratio_after_global", 1.0)
++    )
+     pairwise_pair_count = int(
+         configuration.get("pairwise_mse_pair_count", 10000)
+     )
+@@ -367,6 +402,12 @@ def apply_condition_pca_spread_calibration(
+         raise ValueError("minimum_pairwise_mse_ratio必须位于[0,1]。")
+     if not 1.0 <= maximum_global_scale_factor <= 2.0:
+         raise ValueError("maximum_global_scale_factor必须位于[1,2]。")
++    if not (
++        minimum_component_ratio
++        <= maximum_component_std_ratio_after_global
++        <= 1.25
++    ):
++        raise ValueError(
++            "maximum_component_std_ratio_after_global必须位于"
++            "[minimum_component_std_ratio,1.25]。"
++        )
+     if pairwise_pair_count <= 0:
+         raise ValueError("pairwise_mse_pair_count必须大于0。")
+     if not 4 <= pairwise_search_iterations <= 64:
+@@ -443,16 +484,34 @@ def apply_condition_pca_spread_calibration(
+         random_seed=pairwise_random_seed,
+     )))
+     provisional_ratio = provisional_pairwise / max(pairwise_training, epsilon)
++
++    provisional_centered = (
++        provisional - generated_mean[np.newaxis, :]
++    )
++    provisional_scores = provisional_centered @ components.T
++    provisional_std = np.std(
++        provisional_scores,
++        axis=0,
++        ddof=1,
++    )
++    provisional_component_ratio = (
++        provisional_std / np.maximum(training_std, epsilon)
++    )
++
+     global_scale_factor = 1.0
++    effective_maximum_global_scale_factor = 1.0
+     global_spread_activated = bool(
+         minimum_pairwise_ratio > 0.0
+-        and np.any(eligible)
++        and np.any(deficient)
+         and provisional_ratio < minimum_pairwise_ratio
+     )
++
+     if global_spread_activated:
+-        provisional_centered = provisional - generated_mean[np.newaxis, :]
+-        provisional_scores = provisional_centered @ components.T
++        # D4.3.2.12:
++        # The first stage already identifies PCA components whose generated
++        # spread is genuinely deficient.  The global pairwise-MSE recovery
++        # must not subsequently expand every train-supported component,
++        # because adequately represented PCs can contain peak/tail directions
++        # that should remain unchanged.
++        global_component_mask = deficient.astype(np.float64)
+         supported_direction = (
+-            provisional_scores * eligible.astype(np.float64)[np.newaxis, :]
++            provisional_scores
++            * global_component_mask[np.newaxis, :]
+         ) @ components
++
++        deficient_ratios = provisional_component_ratio[deficient]
++        component_safe_scale = float(
++            np.min(
++                maximum_component_std_ratio_after_global
++                / np.maximum(deficient_ratios, epsilon)
++            )
++        )
++        effective_maximum_global_scale_factor = max(
++            1.0,
++            min(
++                maximum_global_scale_factor,
++                component_safe_scale,
++            ),
++        )
+ 
+         left, right = _pairwise_indices(
+             provisional.shape[0],
+@@ -491,18 +550,23 @@ def apply_condition_pca_spread_calibration(
+             ))
+             return value / max(pairwise_training, epsilon)
+ 
+-        if ratio_at(maximum_global_scale_factor) < minimum_pairwise_ratio:
+-            global_scale_factor = maximum_global_scale_factor
++        if (
++            ratio_at(effective_maximum_global_scale_factor)
++            < minimum_pairwise_ratio
++        ):
++            global_scale_factor = effective_maximum_global_scale_factor
+         else:
+             low = 1.0
+-            high = maximum_global_scale_factor
++            high = effective_maximum_global_scale_factor
+             for _ in range(pairwise_search_iterations):
+                 middle = 0.5 * (low + high)
+                 if ratio_at(middle) >= minimum_pairwise_ratio:
+                     high = middle
+                 else:
+                     low = middle
+             global_scale_factor = high
++
+         correction += (
+             (global_scale_factor - 1.0) * supported_direction
+         )
+@@ -541,6 +605,10 @@ def apply_condition_pca_spread_calibration(
+         maximum_pair_count=pairwise_pair_count,
+         random_seed=pairwise_random_seed,
+     )))
++    pairwise_ratio_after = pairwise_after / max(
++        pairwise_training,
++        epsilon,
++    )
+     diagnostics: dict[str, float | int | bool | list[float]] = {
+         "enabled": True,
+         "training_only": True,
+@@ -561,15 +629,24 @@ def apply_condition_pca_spread_calibration(
+         # onward their values use the evaluator's median all-pairs statistic.
+         "mean_pairwise_mse_ratio_before": pairwise_before
+         / max(pairwise_training, epsilon),
+-        "mean_pairwise_mse_ratio_after": pairwise_after
+-        / max(pairwise_training, epsilon),
++        "mean_pairwise_mse_ratio_after": pairwise_ratio_after,
+         "global_pairwise_spread_activated": global_spread_activated,
+         "global_pairwise_scale_factor": float(global_scale_factor),
++        "effective_maximum_global_scale_factor": float(
++            effective_maximum_global_scale_factor
++        ),
++        "maximum_component_std_ratio_after_global": float(
++            maximum_component_std_ratio_after_global
++        ),
++        "global_pairwise_target_met": bool(
++            minimum_pairwise_ratio <= 0.0
++            or pairwise_ratio_after >= minimum_pairwise_ratio - 1.0e-9
++        ),
+         "pairwise_mse_statistic": "median_all_pairs_or_reproducible_sample",
+         "median_pairwise_mse_ratio_before": pairwise_before
+         / max(pairwise_training, epsilon),
+-        "median_pairwise_mse_ratio_after": pairwise_after
+-        / max(pairwise_training, epsilon),
++        "median_pairwise_mse_ratio_after": pairwise_ratio_after,
+         "pairwise_mse_pair_count": int(pairwise_pair_count),
+         "minimum_pairwise_mse_ratio": float(minimum_pairwise_ratio),
+         "correction_rmse": float(np.sqrt(np.mean(np.square(corrected - generated)))),
+@@ -894,6 +971,9 @@ def _apply_condition_oracle_piecewise_quantile_calibration(
+             "minimum_postcalibration_pairwise_mse_ratio", 0.0
+         )
+     )
++    minimum_calibration_blend_factor = float(
++        configuration.get("minimum_calibration_blend_factor", 0.0)
++    )
+     diversity_search_iterations = int(
+         configuration.get("diversity_guard_search_iterations", 20)
+     )
+@@ -1027,6 +1107,7 @@ def _apply_condition_oracle_piecewise_quantile_calibration(
+         training,
+         minimum_ratio=minimum_pairwise_ratio,
+         search_iterations=diversity_search_iterations,
++        minimum_calibration_blend_factor=minimum_calibration_blend_factor,
+         pair_count=diversity_pair_count,
+         random_seed=random_seed,
+     )

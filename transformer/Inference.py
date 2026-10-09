@@ -41,7 +41,7 @@ from sklearn.metrics import (
 from torch.utils.data import DataLoader
 
 from Dataset import MODEL_RAMAN_AXIS, PESTICIDES, build_datasets
-from Model_v2 import TransformerClassifyRegress_sep
+from Model_v2 import TransformerClassifyRegress_sep, decode_ordinal_numpy, ordinal_class_probabilities_numpy
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,6 +58,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-directory", type=Path, default=Path("outputs/inference"))
     parser.add_argument("--classification-threshold", type=float, default=0.5)
     parser.add_argument("--training-history", type=Path, default=None)
+    parser.add_argument("--ordinal-decoding", choices=("auto", "median", "map"), default="auto",
+                        help="Auto uses checkpoint policy, or median for legacy checkpoints")
     return parser.parse_args()
 
 
@@ -274,6 +276,7 @@ def _ordinal_level_metrics(
     y_pred_class: np.ndarray,
     frame: pd.DataFrame,
     threshold: float = 0.5,
+    decoding: str = "median",
 ) -> tuple[dict[str, Any], pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame]]:
     """Evaluate present-only pesticide-specific ordered S/M/H predictions.
 
@@ -294,9 +297,7 @@ def _ordinal_level_metrics(
 
     true_level = np.rint(y_reg).astype(np.int64)
     present = y_class > 0
-    predicted_present_level = 1 + (
-        ordinal_probability >= float(threshold)
-    ).sum(axis=-1).astype(np.int64)
+    predicted_present_level = decode_ordinal_numpy(ordinal_probability, mode=decoding, threshold=threshold)
     final_predicted_level = np.where(
         y_pred_class > 0, predicted_present_level, 0
     )
@@ -373,12 +374,16 @@ def _ordinal_level_metrics(
         )
 
     overall = {
-        "ordinal_threshold": float(threshold),
+        "ordinal_threshold": float(threshold) if decoding == "median" else None,
+        "ordinal_decoding": decoding,
         "present_target_accuracy": present_accuracy,
         "present_target_n": int(present.sum()),
         "full_0_S_M_H_profile_exact_accuracy": float(profile_exact.mean()),
         "full_profile_correct": int(profile_exact.sum()),
         "samples": int(len(profile_exact)),
+        "present_target_mae": float(np.abs(predicted_present_level[present] - true_level[present]).mean()) if present.any() else float("nan"),
+        "present_target_adjacent_errors": int(np.sum(np.abs(predicted_present_level[present] - true_level[present]) == 1)),
+        "present_target_severe_errors": int(np.sum(np.abs(predicted_present_level[present] - true_level[present]) >= 2)),
     }
     return (
         overall,
@@ -387,6 +392,45 @@ def _ordinal_level_metrics(
         pd.DataFrame(matrix_rows),
         confusion_tables,
     )
+
+
+def _ordinal_strata_diagnostics(
+    y_reg: np.ndarray, probabilities: np.ndarray, y_class: np.ndarray,
+    frame: pd.DataFrame, decoding: str,
+) -> pd.DataFrame:
+    """Per-pesticide errors for each matrix and mixture complexity."""
+    predicted = decode_ordinal_numpy(probabilities, mode=decoding)
+    truth = np.rint(y_reg).astype(np.int64)
+    present = np.asarray(y_class) > 0.5
+    mixtures = present.sum(axis=1)
+    matrices = frame["matrix"].astype(str).to_numpy()
+    rows = []
+    for count, group in ((1, "single"), (2, "binary"), (3, "ternary")):
+        for matrix in sorted(pd.unique(matrices)):
+            for pesticide_index, pesticide in enumerate(PESTICIDES):
+                mask = (mixtures == count) & (matrices == matrix) & present[:, pesticide_index]
+                if not mask.any():
+                    continue
+                target = truth[mask, pesticide_index]
+                prediction = predicted[mask, pesticide_index]
+                error = prediction - target
+                row = {
+                    "group": group, "matrix": matrix, "pesticide": pesticide,
+                    "n_present": int(mask.sum()), "accuracy": float(np.mean(error == 0)),
+                    "mae_levels": float(np.abs(error).mean()),
+                    "adjacent_errors": int(np.sum(np.abs(error) == 1)),
+                    "severe_errors": int(np.sum(np.abs(error) >= 2)),
+                    "S_to_M": int(np.sum((target == 1) & (prediction == 2))),
+                    "H_to_M": int(np.sum((target == 3) & (prediction == 2))),
+                    "predicted_M_fraction": float(np.mean(prediction == 2)),
+                    "ordinal_decoding": decoding,
+                }
+                for code, name in enumerate(("S", "M", "H"), start=1):
+                    selected = target == code
+                    row[f"{name}_n"] = int(selected.sum())
+                    row[f"{name}_recall"] = float(np.mean(prediction[selected] == code)) if selected.any() else float("nan")
+                rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def _plot_matrix(
@@ -943,6 +987,8 @@ def _collect_predictions(
                 "smoothed": batch["smoothed"].to(device, non_blocking=True),
                 "valid_mask": batch["valid_mask"].to(device, non_blocking=True),
             }
+            if "raw_intensity" in batch:
+                model_batch["raw_intensity"] = batch["raw_intensity"].to(device, non_blocking=True)
             if concentration_head_mode == "ordinal":
                 class_pred, reg_pred, attention, ordinal_probability = model(
                     model_batch, return_attention=True, return_ordinal=True
@@ -1023,9 +1069,15 @@ def evaluate_split(
     batch_size: int,
     num_workers: int,
     classification_threshold: float,
+    ordinal_decoding: str = "auto",
 ) -> dict[str, Any]:
     split_dir = output_directory / split
     split_dir.mkdir(parents=True, exist_ok=True)
+    decoding = ordinal_decoding
+    if decoding == "auto":
+        decoding = str(checkpoint.get("training_config", {}).get("ordinal_decoding", "median"))
+    if decoding not in {"median", "map"}:
+        raise ValueError("Resolved ordinal decoder must be median or map")
 
     (
         y_class,
@@ -1073,14 +1125,16 @@ def evaluate_split(
             y_pred,
             frame,
             threshold=0.5,
+            decoding=decoding,
         )
 
     for index, pesticide in enumerate(PESTICIDES):
         frame[f"pred_class_{pesticide}"] = y_pred[:, index]
         if ordinal_probability is not None:
-            present_level = 1 + (
-                ordinal_probability[:, index, :] >= 0.5
-            ).sum(axis=-1).astype(np.int64)
+            present_level = decode_ordinal_numpy(ordinal_probability[:, index, :], mode=decoding)
+            probabilities = ordinal_class_probabilities_numpy(ordinal_probability[:, index, :])
+            for level_index, level_name in enumerate(("S", "M", "H")):
+                frame[f"prob_level_{level_name}_{pesticide}"] = probabilities[:, level_index]
             frame[f"pred_level_{pesticide}"] = np.where(
                 y_pred[:, index] > 0, present_level, 0
             )
@@ -1090,6 +1144,9 @@ def evaluate_split(
         split_dir / "regression_per_pesticide.csv", index=False
     )
     if ordinal_result is not None:
+        _ordinal_strata_diagnostics(y_reg, ordinal_probability, y_class, frame, decoding).to_csv(
+            split_dir / "ordinal_by_mixture_matrix_pesticide.csv", index=False
+        )
         ordinal_per_pesticide.to_csv(
             split_dir / "ordinal_per_pesticide.csv", index=False
         )
@@ -1226,13 +1283,15 @@ def evaluate_checkpoint(
     classification_threshold: float = 0.5,
     splits: Iterable[str] = ("test",),
     training_history_path: str | Path | None = None,
+    ordinal_decoding: str = "auto",
 ) -> dict[str, Any]:
     checkpoint_path = Path(checkpoint_path)
     output_directory = Path(output_directory)
     output_directory.mkdir(parents=True, exist_ok=True)
     device = _resolve_device(device_name)
 
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    # These are explicitly selected, trusted local project checkpoints.
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     concentration_map = checkpoint.get("concentration_map")
     train_dataset, validation_dataset, test_dataset = build_datasets(
         include_generated_train=False,
@@ -1257,6 +1316,7 @@ def evaluate_checkpoint(
             batch_size=batch_size,
             num_workers=num_workers,
             classification_threshold=classification_threshold,
+            ordinal_decoding=ordinal_decoding,
         )
 
     if training_history_path is not None:
@@ -1275,6 +1335,7 @@ def evaluate_checkpoint(
     summary = {
         "checkpoint": str(checkpoint_path.resolve()),
         "classification_threshold": float(classification_threshold),
+        "ordinal_decoding": str(checkpoint.get("training_config", {}).get("ordinal_decoding", "median")) if ordinal_decoding == "auto" else ordinal_decoding,
         "splits": split_results,
         "evaluation_notes": {
             "threshold_policy": (
@@ -1315,6 +1376,7 @@ def main() -> None:
         classification_threshold=args.classification_threshold,
         splits=splits,
         training_history_path=args.training_history,
+        ordinal_decoding=args.ordinal_decoding,
     )
 
 

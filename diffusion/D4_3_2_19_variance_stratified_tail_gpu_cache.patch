@@ -1,0 +1,782 @@
+--- src/conditional_diversity_constraints.py
++++ src/conditional_diversity_constraints.py
+@@ -424,123 +424,125 @@
+ 
+ 
+     # --------------------------------------------------------
+-    # D4.3.2.18
++    # D4.3.2.19
+     #
+-    # Condition-specific train-reference standardized tail.
++    # Condition-specific train-reference standardized tail
++    # with variance stratification.
+     #
+-    # 只使用training full spectra建立固定参考，
+-    # 替代原来的当前batch临时QQ reference。
++    # 1. 使用与正式QQ evaluator完全一致的train-only标准化：
++    #       z(r) = [x(r) - train_mean(r)] / train_scale(r)
++    #    其中train_scale(r)=max(pointwise_std, condition Q10 std floor)。
++    # 2. 再按真实pointwise training std的秩将Raman点等数量分成5层。
++    # 3. 每一层独立保存q01/q10/q50/q90/q99。
+     #
+-    # z(r) = [x(r) - train_mean(r)] / train_scale(r)
++    # 这样低方差Raman区的过分散不能再被高方差峰区的欠分散抵消。
++    # 所有condition共用完全相同规则，只使用各自training数据。
+     # --------------------------------------------------------
+     full_spectrum_mean = None
+     full_spectrum_tail_probabilities = None
+     full_spectrum_tail_quantiles = None
++    full_spectrum_variance_stratum_index = None
++    full_spectrum_stratified_tail_quantiles = None
++    number_of_variance_strata = 5
+ 
+     if full_spectrum_profile_enabled:
+         full_spectrum_mean = np.zeros(
+-            (
+-                number_of_conditions,
+-                length,
+-            ),
++            (number_of_conditions, length),
+             dtype=np.float32,
+         )
+-
+         full_spectrum_tail_probabilities = np.asarray(
+-            [
+-                0.01,
+-                0.10,
+-                0.50,
+-                0.90,
+-                0.99,
+-            ],
++            [0.01, 0.10, 0.50, 0.90, 0.99],
+             dtype=np.float64,
+         )
+-
+         full_spectrum_tail_quantiles = np.zeros(
+-            (
+-                number_of_conditions,
+-                5,
+-            ),
++            (number_of_conditions, 5),
++            dtype=np.float32,
++        )
++        full_spectrum_variance_stratum_index = np.full(
++            (number_of_conditions, length),
++            -1,
++            dtype=np.int16,
++        )
++        full_spectrum_stratified_tail_quantiles = np.zeros(
++            (number_of_conditions, number_of_variance_strata, 5),
+             dtype=np.float32,
+         )
+ 
+-        for condition_index in range(
+-            number_of_conditions
+-        ):
+-            selected_condition = (
+-                inverse == condition_index
+-            )
+-
+-            condition_count = int(
+-                np.sum(selected_condition)
+-            )
+-
++        for condition_index in range(number_of_conditions):
++            selected_condition = inverse == condition_index
++            condition_count = int(np.sum(selected_condition))
+             if condition_count < 2:
+                 raise ValueError(
+-                    "D4.3.2.18每个condition至少需要"
+-                    "2条training光谱。"
++                    "D4.3.2.19每个condition至少需要2条training光谱。"
+                 )
+ 
+             valid_indices = np.flatnonzero(
+-                valid_masks[
+-                    condition_index
+-                ] > 0.5
++                valid_masks[condition_index] > 0.5
+             )
+-
+-            if valid_indices.size < 2:
++            if valid_indices.size < number_of_variance_strata:
+                 raise ValueError(
+-                    "D4.3.2.18 condition有效"
+-                    "Raman点数量不足。"
++                    "D4.3.2.19 condition有效Raman点数量不足。"
+                 )
+ 
+-            condition_full_spectra = (
+-                full_spectra[
+-                    selected_condition
+-                ][:, valid_indices]
+-            )
+-
++            condition_full_spectra = full_spectra[
++                selected_condition
++            ][:, valid_indices]
+             condition_mean = np.mean(
+                 condition_full_spectra,
+                 axis=0,
+             )
+-
+             condition_scale = np.maximum(
+-                full_spectrum_scale[
+-                    condition_index,
+-                    valid_indices,
+-                ],
++                full_spectrum_scale[condition_index, valid_indices],
+                 1.0e-6,
+             )
+-
+             standardized = (
+-                condition_full_spectra
+-                - condition_mean[None, :]
++                condition_full_spectra - condition_mean[None, :]
+             ) / condition_scale[None, :]
+-
+-            if not np.isfinite(
+-                standardized
+-            ).all():
++            if not np.isfinite(standardized).all():
+                 raise ValueError(
+-                    "D4.3.2.18标准化training "
+-                    "full spectra出现NaN或Inf。"
++                    "D4.3.2.19标准化training full spectra出现NaN或Inf。"
+                 )
+ 
+             full_spectrum_mean[
+-                condition_index,
+-                valid_indices,
+-            ] = condition_mean.astype(
+-                np.float32
+-            )
++                condition_index, valid_indices
++            ] = condition_mean.astype(np.float32)
+ 
+-            full_spectrum_tail_quantiles[
+-                condition_index
+-            ] = np.quantile(
++            # 保留D4.18 pooled reference用于旧配置兼容。
++            full_spectrum_tail_quantiles[condition_index] = np.quantile(
+                 standardized.reshape(-1),
+                 full_spectrum_tail_probabilities,
+-            ).astype(
+-                np.float32
+-            )
++            ).astype(np.float32)
++
++            # 用真实pointwise std排序，而不是用加floor后的scale排序。
++            # rank-based等数量分层对std并列值也稳定，不会产生空层。
++            condition_pointwise_std = full_spectrum_std[
++                condition_index, valid_indices
++            ].astype(np.float64)
++            order = np.argsort(condition_pointwise_std, kind="stable")
++            local_strata = np.empty(valid_indices.size, dtype=np.int16)
++            ranks = np.arange(valid_indices.size, dtype=np.int64)
++            ordered_strata = np.minimum(
++                ranks * number_of_variance_strata // valid_indices.size,
++                number_of_variance_strata - 1,
++            ).astype(np.int16)
++            local_strata[order] = ordered_strata
++
++            full_spectrum_variance_stratum_index[
++                condition_index, valid_indices
++            ] = local_strata
++
++            for stratum_index in range(number_of_variance_strata):
++                stratum_mask = local_strata == stratum_index
++                if not np.any(stratum_mask):
++                    raise RuntimeError(
++                        "D4.3.2.19出现空variance stratum。"
++                    )
++                full_spectrum_stratified_tail_quantiles[
++                    condition_index, stratum_index
++                ] = np.quantile(
++                    standardized[:, stratum_mask].reshape(-1),
++                    full_spectrum_tail_probabilities,
++                ).astype(np.float32)
+ 
+     state = {
+         "schema_version": D4_3_STATE_SCHEMA_VERSION,
+@@ -606,6 +608,16 @@
+             full_spectrum_tail_quantiles.tolist()
+         )
+ 
++        state["full_spectrum_variance_stratum_count"] = int(
++            number_of_variance_strata
++        )
++        state["full_spectrum_variance_stratum_index"] = (
++            full_spectrum_variance_stratum_index.tolist()
++        )
++        state["full_spectrum_stratified_tail_quantiles"] = (
++            full_spectrum_stratified_tail_quantiles.tolist()
++        )
++
+     return state
+ 
+ 
+--- src/masked_diffusion.py
++++ src/masked_diffusion.py
+@@ -342,6 +342,25 @@
+                 False,
+             )
+         ),
++        "variance_stratified_enabled": bool(
++            full_tail.get(
++                "variance_stratified_enabled",
++                False,
++            )
++        ),
++        "number_of_variance_strata": int(
++            full_tail.get(
++                "number_of_variance_strata",
++                5,
++            )
++        ),
++        "variance_strata_weights": [
++            float(value)
++            for value in full_tail.get(
++                "variance_strata_weights",
++                [1.0, 1.0, 1.0, 1.0, 1.0],
++            )
++        ],
+         "piecewise_probabilities": probabilities,
+         "segment_weights": segment_weights,
+         "minimum_segment_span_ratio": float(
+@@ -396,6 +415,19 @@
+         and tail["span_weight"] > 0.0
+         and tail["short_axis_maximum_points"] >= 2
+         and tail["short_axis_weight_multiplier"] >= 1.0
++        and (
++            not tail["variance_stratified_enabled"]
++            or (
++                tail["use_train_reference"]
++                and tail["number_of_variance_strata"] >= 2
++                and len(tail["variance_strata_weights"])
++                == tail["number_of_variance_strata"]
++                and all(
++                    value > 0.0
++                    for value in tail["variance_strata_weights"]
++                )
++            )
++        )
+         and tail["epsilon"] > 0.0
+     ):
+         raise ValueError("full_spectrum_tail_distribution配置无效。")
+@@ -661,6 +693,15 @@
+             torch.Tensor | None
+         ) = None
+ 
++        # D4.3.2.19 variance-stratified tail reference。
++        self.full_spectrum_tail_reference_variance_strata: (
++            torch.Tensor | None
++        ) = None
++
++        self.full_spectrum_tail_reference_stratified_quantiles: (
++            torch.Tensor | None
++        ) = None
++
+         self.quality_fidelity_configuration = (
+             _normalize_quality_fidelity_configuration(
+                 diversity_configuration or {"enabled": False}
+@@ -839,183 +880,198 @@
+                     self.full_spectrum_tail_reference_probabilities,
+                     self.full_spectrum_tail_reference_quantiles,
+                 )
+-
+-                if any(
+-                    item is None
+-                    for item in reference_items
+-                ):
++                if any(item is None for item in reference_items):
+                     raise RuntimeError(
+-                        "D4.3.2.18已启用"
+-                        "use_train_reference，"
++                        "D4.3.2.19启用了use_train_reference，"
+                         "但固定tail reference未加载。"
+                     )
+ 
+-                group_condition = (
+-                    condition[
+-                        selected
+-                    ][0]
+-                    .detach()
+-                    .to(
+-                        device="cpu",
+-                        dtype=torch.float32,
++                # 工程加速：首次调用时一次性将全部126条件reference
++                # 搬到当前GPU。之后不再逐batch CPU<->GPU往返。
++                float_reference_names = (
++                    "full_spectrum_tail_reference_condition_vectors",
++                    "full_spectrum_tail_reference_mean",
++                    "full_spectrum_tail_reference_scale",
++                    "full_spectrum_tail_reference_probabilities",
++                    "full_spectrum_tail_reference_quantiles",
++                    "full_spectrum_tail_reference_stratified_quantiles",
++                )
++                for reference_name in float_reference_names:
++                    reference_value = getattr(self, reference_name)
++                    if reference_value is not None and (
++                        reference_value.device != prediction.device
++                        or reference_value.dtype != prediction.dtype
++                    ):
++                        setattr(
++                            self,
++                            reference_name,
++                            reference_value.to(
++                                device=prediction.device,
++                                dtype=prediction.dtype,
++                            ),
++                        )
++                if (
++                    self.full_spectrum_tail_reference_variance_strata
++                    is not None
++                    and self.full_spectrum_tail_reference_variance_strata.device
++                    != prediction.device
++                ):
++                    self.full_spectrum_tail_reference_variance_strata = (
++                        self.full_spectrum_tail_reference_variance_strata.to(
++                            device=prediction.device
++                        )
+                     )
+-                )
+ 
+                 reference_conditions = (
+-                    self
+-                    .full_spectrum_tail_reference_condition_vectors
+-                )
+-
+-                matches = torch.isclose(
+-                    reference_conditions,
+-                    group_condition.unsqueeze(0),
+-                    rtol=0.0,
+-                    atol=1.0e-6,
+-                ).all(
+-                    dim=1
++                    self.full_spectrum_tail_reference_condition_vectors
+                 )
+-
+-                match_count = int(
+-                    matches.sum().item()
++                group_condition = condition[selected][0].detach().to(
++                    device=prediction.device,
++                    dtype=prediction.dtype,
+                 )
+ 
+-                if match_count != 1:
+-                    raise RuntimeError(
+-                        "D4.3.2.18无法唯一匹配"
+-                        "condition tail reference："
+-                        f"{match_count}"
+-                    )
+-
+-                reference_index = int(
+-                    torch.nonzero(
+-                        matches,
+-                        as_tuple=False,
+-                    )[0, 0].item()
+-                )
+-
+-                reference_mean_cpu = (
+-                    self
+-                    .full_spectrum_tail_reference_mean[
+-                        reference_index
+-                    ]
++                # 全GPU匹配，不使用.cpu()/.item()/nonzero().item()。
++                condition_distance = torch.sum(
++                    torch.square(
++                        reference_conditions
++                        - group_condition.unsqueeze(0)
++                    ),
++                    dim=1,
+                 )
++                reference_index = torch.argmin(condition_distance)
+ 
+-                reference_scale_cpu = (
+-                    self
+-                    .full_spectrum_tail_reference_scale[
+-                        reference_index
+-                    ]
++                reference_mean = (
++                    self.full_spectrum_tail_reference_mean[reference_index]
++                    .reshape(1, 1, -1)
+                 )
+-
+-                reference_length = int(
+-                    reference_mean_cpu.numel()
++                reference_scale = (
++                    self.full_spectrum_tail_reference_scale[reference_index]
++                    .reshape(1, 1, -1)
++                    .clamp_min(epsilon)
+                 )
+-
+-                if (
+-                    group_prediction.shape[-1]
+-                    < reference_length
+-                ):
++                reference_length = reference_mean.shape[-1]
++                if group_prediction.shape[-1] < reference_length:
+                     raise RuntimeError(
+-                        "D4.3.2.18 prediction长度"
+-                        "小于reference长度。"
++                        "D4.3.2.19 prediction长度小于reference长度。"
+                     )
+ 
+-                reference_mean = (
+-                    reference_mean_cpu
+-                    .to(
+-                        device=prediction.device,
+-                        dtype=prediction.dtype,
+-                    )
+-                    .reshape(
+-                        1,
+-                        1,
+-                        -1,
+-                    )
+-                )
++                group_prediction_for_tail = group_prediction[
++                    ..., :reference_length
++                ]
++                common_mask_for_tail = common_mask[
++                    ..., :reference_length
++                ]
++                prediction_z = (
++                    group_prediction_for_tail - reference_mean
++                ) / reference_scale
+ 
+-                reference_scale = (
+-                    reference_scale_cpu
+-                    .to(
+-                        device=prediction.device,
+-                        dtype=prediction.dtype,
+-                    )
+-                    .reshape(
+-                        1,
+-                        1,
+-                        -1,
++                if bool(
++                    configuration.get(
++                        "variance_stratified_enabled",
++                        False,
+                     )
+-                    .clamp_min(
+-                        epsilon
+-                    )
+-                )
++                ):
++                    if (
++                        self.full_spectrum_tail_reference_variance_strata
++                        is None
++                        or self.full_spectrum_tail_reference_stratified_quantiles
++                        is None
++                    ):
++                        raise RuntimeError(
++                            "D4.3.2.19 variance-stratified reference未加载。"
++                        )
+ 
+-                stored_probabilities = (
+-                    self
+-                    .full_spectrum_tail_reference_probabilities
+-                    .to(
+-                        device=prediction.device,
+-                        dtype=prediction.dtype,
+-                    )
+-                )
++                    stratum_index_vector = (
++                        self.full_spectrum_tail_reference_variance_strata[
++                            reference_index, :reference_length
++                        ]
++                    )
++                    target_quantiles_by_stratum = (
++                        self.full_spectrum_tail_reference_stratified_quantiles[
++                            reference_index
++                        ]
++                    )
++                    stratum_weights = prediction.new_tensor(
++                        configuration["variance_strata_weights"]
++                    )
++                    number_of_strata = int(
++                        configuration["number_of_variance_strata"]
++                    )
++                    per_stratum_losses: list[torch.Tensor] = []
++                    per_stratum_weights: list[torch.Tensor] = []
++                    common_bool = common_mask_for_tail > 0.5
++
++                    for stratum_index in range(number_of_strata):
++                        point_mask = (
++                            stratum_index_vector == stratum_index
++                        ).reshape(1, 1, -1) & common_bool
++                        expanded_mask = point_mask.expand_as(prediction_z)
++                        prediction_values = prediction_z[expanded_mask]
++                        if prediction_values.numel() < 5:
++                            continue
+ 
+-                if (
+-                    stored_probabilities.shape
+-                    != probabilities.shape
+-                    or not torch.allclose(
+-                        stored_probabilities,
+-                        probabilities,
+-                        rtol=0.0,
+-                        atol=1.0e-6,
+-                    )
+-                ):
+-                    raise RuntimeError(
+-                        "D4.3.2.18配置中的"
+-                        "piecewise_probabilities与"
+-                        "train reference不一致。"
++                        prediction_quantiles_stratum = torch.quantile(
++                            prediction_values,
++                            probabilities,
++                        )
++                        target_quantiles_stratum = (
++                            target_quantiles_by_stratum[stratum_index]
++                        ).detach()
++                        target_spans_stratum = torch.diff(
++                            target_quantiles_stratum
++                        ).clamp_min(epsilon)
++                        prediction_spans_stratum = torch.diff(
++                            prediction_quantiles_stratum
++                        ).clamp_min(epsilon)
++                        ratios_stratum = (
++                            prediction_spans_stratum
++                            / target_spans_stratum
++                        )
++                        violation_stratum = (
++                            F.relu(minimum_ratio - ratios_stratum)
++                            + F.relu(ratios_stratum - maximum_ratio)
++                        )
++                        segment_loss_stratum = F.smooth_l1_loss(
++                            violation_stratum,
++                            torch.zeros_like(violation_stratum),
++                            reduction="none",
++                            beta=float(
++                                configuration["span_smooth_l1_beta"]
++                            ),
++                        )
++                        per_stratum_losses.append(
++                            (segment_loss_stratum * segment_weights).sum()
++                            / segment_weights.sum()
++                        )
++                        per_stratum_weights.append(
++                            stratum_weights[stratum_index]
++                        )
++
++                    if not per_stratum_losses:
++                        continue
++                    stacked_losses = torch.stack(per_stratum_losses)
++                    stacked_weights = torch.stack(per_stratum_weights)
++                    span_losses.append(
++                        axis_weight
++                        * (stacked_losses * stacked_weights).sum()
++                        / stacked_weights.sum()
+                     )
++                    active_group_count += 1
++                    continue
+ 
+                 target_quantiles = (
+-                    self
+-                    .full_spectrum_tail_reference_quantiles[
++                    self.full_spectrum_tail_reference_quantiles[
+                         reference_index
+                     ]
+-                    .to(
+-                        device=prediction.device,
+-                        dtype=prediction.dtype,
+-                    )
+-                    .detach()
+-                )
+-
+-                group_prediction_for_tail = (
+-                    group_prediction[
+-                        ...,
+-                        :reference_length,
+-                    ]
+-                )
+-
+-                common_mask_for_tail = (
+-                    common_mask[
+-                        ...,
+-                        :reference_length,
+-                    ]
+-                )
+-
+-                prediction_z = (
+-                    group_prediction_for_tail
+-                    - reference_mean
+-                ) / reference_scale
+-
++                ).detach()
+                 expanded_common = (
+                     common_mask_for_tail.expand_as(
+                         group_prediction_for_tail
+                     )
+                     > 0.5
+                 )
+-
+                 prediction_quantiles = torch.quantile(
+-                    prediction_z[
+-                        expanded_common
+-                    ],
++                    prediction_z[expanded_common],
+                     probabilities,
+                 )
+ 
+@@ -1755,55 +1811,52 @@
+                 )
+             )
+         ):
+-            required_tail_reference_keys = (
++            required_tail_reference_keys = [
+                 "condition_vectors",
+                 "full_spectrum_mean",
+                 "full_spectrum_scale",
+                 "full_spectrum_tail_probabilities",
+                 "full_spectrum_tail_quantiles",
+-            )
++            ]
++            if bool(
++                tail_configuration.get(
++                    "variance_stratified_enabled",
++                    False,
++                )
++            ):
++                required_tail_reference_keys.extend(
++                    [
++                        "full_spectrum_variance_stratum_index",
++                        "full_spectrum_stratified_tail_quantiles",
++                    ]
++                )
+ 
+             missing_keys = [
+                 name
+                 for name in required_tail_reference_keys
+-                if name
+-                not in diversity_constraint_state
++                if name not in diversity_constraint_state
+             ]
+-
+             if missing_keys:
+                 raise ValueError(
+-                    "D4.3.2.18 train-reference "
+-                    "tail state缺少字段："
++                    "D4.3.2.19 train-reference tail state缺少字段："
+                     + ", ".join(missing_keys)
+                 )
+ 
++            # 先保存在CPU；首次训练loss调用时一次性搬到当前GPU并缓存。
+             self.full_spectrum_tail_reference_condition_vectors = (
+                 torch.as_tensor(
+-                    diversity_constraint_state[
+-                        "condition_vectors"
+-                    ],
++                    diversity_constraint_state["condition_vectors"],
+                     dtype=torch.float32,
+                 )
+             )
+-
+-            self.full_spectrum_tail_reference_mean = (
+-                torch.as_tensor(
+-                    diversity_constraint_state[
+-                        "full_spectrum_mean"
+-                    ],
+-                    dtype=torch.float32,
+-                )
++            self.full_spectrum_tail_reference_mean = torch.as_tensor(
++                diversity_constraint_state["full_spectrum_mean"],
++                dtype=torch.float32,
++            )
++            self.full_spectrum_tail_reference_scale = torch.as_tensor(
++                diversity_constraint_state["full_spectrum_scale"],
++                dtype=torch.float32,
+             )
+-
+-            self.full_spectrum_tail_reference_scale = (
+-                torch.as_tensor(
+-                    diversity_constraint_state[
+-                        "full_spectrum_scale"
+-                    ],
+-                    dtype=torch.float32,
+-                )
+-            )
+-
+             self.full_spectrum_tail_reference_probabilities = (
+                 torch.as_tensor(
+                     diversity_constraint_state[
+@@ -1812,15 +1865,68 @@
+                     dtype=torch.float32,
+                 )
+             )
++            self.full_spectrum_tail_reference_quantiles = torch.as_tensor(
++                diversity_constraint_state["full_spectrum_tail_quantiles"],
++                dtype=torch.float32,
++            )
+ 
+-            self.full_spectrum_tail_reference_quantiles = (
+-                torch.as_tensor(
+-                    diversity_constraint_state[
+-                        "full_spectrum_tail_quantiles"
+-                    ],
+-                    dtype=torch.float32,
+-                )
++            stored_probabilities = (
++                self.full_spectrum_tail_reference_probabilities
+             )
++            configured_probabilities = torch.as_tensor(
++                tail_configuration["piecewise_probabilities"],
++                dtype=torch.float32,
++            )
++            if (
++                stored_probabilities.shape != configured_probabilities.shape
++                or not torch.allclose(
++                    stored_probabilities,
++                    configured_probabilities,
++                    rtol=0.0,
++                    atol=1.0e-6,
++                )
++            ):
++                raise ValueError(
++                    "D4.3.2.19配置piecewise_probabilities与"
++                    "train-reference state不一致。"
++                )
++
++            if bool(
++                tail_configuration.get(
++                    "variance_stratified_enabled",
++                    False,
++                )
++            ):
++                expected_strata = int(
++                    tail_configuration["number_of_variance_strata"]
++                )
++                stored_strata = int(
++                    diversity_constraint_state.get(
++                        "full_spectrum_variance_stratum_count",
++                        -1,
++                    )
++                )
++                if stored_strata != expected_strata:
++                    raise ValueError(
++                        "D4.3.2.19 variance strata数量与"
++                        "train-reference state不一致。"
++                    )
++                self.full_spectrum_tail_reference_variance_strata = (
++                    torch.as_tensor(
++                        diversity_constraint_state[
++                            "full_spectrum_variance_stratum_index"
++                        ],
++                        dtype=torch.long,
++                    )
++                )
++                self.full_spectrum_tail_reference_stratified_quantiles = (
++                    torch.as_tensor(
++                        diversity_constraint_state[
++                            "full_spectrum_stratified_tail_quantiles"
++                        ],
++                        dtype=torch.float32,
++                    )
++                )
+ 
+         variance_profile = (
+             self.quality_fidelity_configuration.get(

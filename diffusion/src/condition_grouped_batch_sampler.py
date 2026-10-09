@@ -10,7 +10,7 @@ from torch.utils.data import Sampler
 
 
 class ConditionGroupedBatchSampler(Sampler[list[int]]):
-    """Build fixed-size batches from equal-size within-condition groups.
+    """Build batches from complete, equal-size within-condition groups.
 
     The sampler receives condition vectors aligned with the *local* dataset
     indices.  Every emitted batch contains complete condition groups, so a
@@ -74,11 +74,6 @@ class ConditionGroupedBatchSampler(Sampler[list[int]]):
             for indices in self._groups
         )
         groups_per_batch = self.batch_size // self.samples_per_condition
-        if not self.drop_last and total_groups % groups_per_batch != 0:
-            raise ValueError(
-                "条件组总数不能组成完整batch；请调整batch_size或"
-                "samples_per_condition。"
-            )
         self._length = (
             total_groups // groups_per_batch
             if self.drop_last
@@ -111,5 +106,5 @@ class ConditionGroupedBatchSampler(Sampler[list[int]]):
             if len(selected) < groups_per_batch:
                 if self.drop_last:
                     break
-                raise RuntimeError("内部错误：出现残缺条件batch。")
+                # Keep the last smaller batch without splitting any group.
             yield [index for chunk in selected for index in chunk]

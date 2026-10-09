@@ -1204,6 +1204,7 @@ class DifferentiableConditionFullSpectrumGroupVarianceLoss(
         condition: torch.Tensor,
         timesteps: torch.Tensor | None,
         number_of_timesteps: int,
+        reconstructed_prediction: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """计算condition内逐Raman点variance matching loss。"""
 
@@ -1277,14 +1278,13 @@ class DifferentiableConditionFullSpectrumGroupVarianceLoss(
         # full_pred =
         # full_target
         # + inverse_local_slope * (pred_local - target_local)
-        reconstructed_prediction = (
-            full_spectrum_target
-            + local_inverse_slope
-            * (
-                prediction
-                - target
+        if reconstructed_prediction is None:
+            reconstructed_prediction = (
+                full_spectrum_target
+                + local_inverse_slope * (prediction - target)
             )
-        )
+        elif reconstructed_prediction.shape != prediction.shape:
+            raise ValueError("reconstructed_prediction形状必须与prediction一致。")
 
         reconstructed_prediction = (
             reconstructed_prediction
@@ -1865,6 +1865,7 @@ class DifferentiableConditionFullSpectrumVarianceProfileLoss(
         condition: torch.Tensor,
         timesteps: torch.Tensor | None,
         number_of_timesteps: int,
+        reconstructed_prediction: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
 
         for name, value in (
@@ -1947,14 +1948,14 @@ class DifferentiableConditionFullSpectrumVarianceProfileLoss(
             )
         )
 
-        reconstructed_prediction = (
-            full_spectrum_target
-            + local_inverse_slope
-            * (
-                prediction
-                - target
+        if reconstructed_prediction is None:
+            reconstructed_prediction = (
+                full_spectrum_target
+                + local_inverse_slope * (prediction - target)
             )
-        ) * valid_mask
+        elif reconstructed_prediction.shape != prediction.shape:
+            raise ValueError("reconstructed_prediction形状必须与prediction一致。")
+        reconstructed_prediction = reconstructed_prediction * valid_mask
 
         standardized_error = (
             (

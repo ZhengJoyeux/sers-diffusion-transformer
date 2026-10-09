@@ -1,5 +1,5 @@
 project:
-  name: d4_24_soft_variance_power05_25ep
+  name: d4_25_exact_spectrum_support
   random_seed: 2026
 diagnostic_overfit:
   enabled: false
@@ -48,7 +48,7 @@ prior_residual:
   pca_explained_variance_ratio: 0.95
   pca_max_components: 6
   pca_sampling_strategy: independent_truncated_gaussian_scores
-  pca_score_clip_standard_deviations: 1.5
+  pca_score_clip_standard_deviations: 2.5
   residual_normalization: robust_asinh
   residual_quantile: 99.5
   target_abs_max: 1.0
@@ -76,7 +76,7 @@ broad_local_residual:
     pca_explained_variance_ratio: 0.95
     pca_max_components: 6
     sampling_strategy: independent_truncated_gaussian_scores
-    score_clip_standard_deviations: 1.5
+    score_clip_standard_deviations: 2.5
   local_normalization:
     method: robust_asinh
     residual_quantile: 99.5
@@ -330,6 +330,19 @@ diversity_constraints:
       maximum_total_ratio_to_ddpm: 0.05
       use_group_overdispersion_gate: false
       severe_deadband_fraction_of_envelope_width: 0.25
+    full_spectrum_support:
+      enabled: true
+      sampling_soft_guard: true
+      lower_quantile: 0.05
+      upper_quantile: 0.95
+      iqr_margin: 0.5
+      soft_extension_scale: 0.5
+      minimum_alpha_cumprod: 0.5
+      envelope_weight: 1.0
+      peak_derivative_weight: 0.25
+      total_weight: 0.1
+      maximum_total_ratio_to_ddpm: 0.05
+      numerical_argument_limit: 20.0
 feature_peak_residual_limiter:
   enabled: false
 local_peak_distribution_constraints:
@@ -388,11 +401,11 @@ training:
     minimum_learning_rate: 1.0e-06
     update_unit: optimizer_step
 output:
-  output_directory: outputs/experiments/d4_24_soft_variance_power05_25ep
-  checkpoint_directory: outputs/experiments/d4_24_soft_variance_power05_25ep/checkpoints
-  log_directory: outputs/experiments/d4_24_soft_variance_power05_25ep/logs
-  generated_spectrum_directory: outputs/experiments/d4_24_soft_variance_power05_25ep/generated
-  preview_plot_directory: outputs/experiments/d4_24_soft_variance_power05_25ep/plots
+  output_directory: outputs/experiments/d4_25_exact_spectrum_support
+  checkpoint_directory: outputs/experiments/d4_25_exact_spectrum_support/checkpoints
+  log_directory: outputs/experiments/d4_25_exact_spectrum_support/logs
+  generated_spectrum_directory: outputs/experiments/d4_25_exact_spectrum_support/generated
+  preview_plot_directory: outputs/experiments/d4_25_exact_spectrum_support/plots
   latest_checkpoint_name: latest.pt
   best_checkpoint_name: best.pt
   training_log_name: training_log.csv
@@ -404,7 +417,7 @@ generation:
   crop_to_original_length: true
   inverse_normalize: true
   variation_scale: 1.0
-  pca_score_clip_override_standard_deviations: 1.5
+  pca_score_clip_override_standard_deviations: 2.5
   mean_fidelity_calibration:
     enabled: true
     standard_error_multiplier: 1.96

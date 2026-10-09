@@ -1,0 +1,74 @@
+{
+  "status": "PASS",
+  "validation_date_utc": "2026-10-09",
+  "scope": "local artificial data; no server real-data training or evaluation",
+  "runtime": {
+    "python": "3.12.14",
+    "torch": "2.11.0+cpu",
+    "device": "cpu"
+  },
+  "artificial_model_tests": {
+    "passed": 17,
+    "failed": 0,
+    "seconds": 45.311
+  },
+  "command_entry_tests": {
+    "passed": 17,
+    "failed": 0,
+    "seconds": 44.367
+  },
+  "invariants": [
+    "real-train-only 18x12 references",
+    "real-train-only feature normalization",
+    "measured-tail exclusion",
+    "frozen anchor parameters and buffers",
+    "classification probabilities unchanged",
+    "zero correction exact predictions",
+    "checkpoint online/cached roundtrip",
+    "matched reference/no_reference smoke training",
+    "bounded correction and CORN monotonicity",
+    "no test-spectrum evaluation",
+    "validation adoption guard and zero fallback"
+  ],
+  "launcher_validation": {
+    "status": "PASS",
+    "artificial_data_only": true,
+    "check_entry_passed": true,
+    "restore_passed": true,
+    "original_files_unchanged": true,
+    "rejections": [
+      {
+        "target": "project/Dataset.py",
+        "returncode": 1
+      },
+      {
+        "target": "baseline/checkpoints/best_ordinal.pt",
+        "returncode": 1
+      },
+      {
+        "target": "weighted.pt",
+        "returncode": 1
+      },
+      {
+        "target": "project/data/real/artificial_0.csv",
+        "returncode": 1
+      }
+    ],
+    "server_training": false
+  },
+  "python311_syntax": "PASS",
+  "shell_syntax": "PASS",
+  "base_model_source_byte_identity": true,
+  "parameters": {
+    "frozen": 1267823,
+    "trainable": 40742,
+    "total": 1308565
+  },
+  "real_dataset_or_checkpoint_training_executed": false,
+  "unresolved_validation": "Actual GPU reproduction of diagnosed anchor and real validation improvement must pass on user server",
+  "final_changed_report_pipeline_recheck": {
+    "passed": 2,
+    "failed": 0,
+    "seconds": 62.723
+  }
+}

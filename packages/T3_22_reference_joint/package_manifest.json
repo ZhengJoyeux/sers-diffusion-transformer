@@ -1,0 +1,21 @@
+{
+  "Inference_T3_22.py": "cad2fb1258ad9df7286a8ddfb1efc01216965a0ad5c5a4f6ed0f3459624f7d0a",
+  "Model_T3_17.py": "08ce21dc572492b150767129bda70f8efccdfbe5949d09c430e07878518da3c2",
+  "Model_T3_22.py": "dca7e81028fcf256b0ff173784a4dc338fcf52b0e3586dfe83191c3c65577626",
+  "PATCH_NOTES.md": "f4ace1d264d4c6f1a9f1d3bf61c42455c76e00efe4f8ae0e7874ab1f8fea0db6",
+  "Paths_T3_22.py": "9e8f9fea4c2741945e45a5071aab1e21b486ce6de3f7161408df9dd54d7cfd32",
+  "README.md": "ed9bbf19e8ad02dd22c78b0f052e42d6546188f9f57b1a7b7e13a3b40ee70b07",
+  "T3_17_LR.py": "4d623cff5c1d4106fdfb827e28a5bae8c82c1de383a6f764beca23ef05ed185a",
+  "T3_22_Training.py": "109acb4f842111bba174b5dee09bcc4b99cf3d53f2fb7f50f43cbc80484fa4ab",
+  "VALIDATION.json": "744f6a43b9c7790c90198a2a328aecfd7481cc4682ad56ac7367b98809eb3919",
+  "data_t322.py": "4aba8f720e7edd0680a38a70be90d3abf0f24877074411e59824399f1a58cdce",
+  "engine_t322.py": "48791ed491f132d748a0c2739866fb750d576ffaf338d0c7a40f095766ff8952",
+  "expected_encoder_sources.json": "431a6573fbff5407ca0a944c99616ec12bb9772a779aa66f1a289d68393b30ce",
+  "expected_project_sources.json": "4b2cd3b6a3ce0e6ed162aeef7b25395626fc5c021b052dd8bc99433fc792874a",
+  "expected_reference_state.json": "49db7e5f37b9abd11e35adeab4401dc064f061fe42e6c1b68de69f299f2b46b4",
+  "experiment_t322.py": "8a97af81bac2240db33d6b88e19d8d3fcb4cb9758ae560f337e72f794379c435",
+  "prepare_t322.py": "9d6c8f43627d749af34dc660efb6ca5a267b70fcdf8309a6c67a0eb66b01c878",
+  "reference_random48.json": "89f1535b5fa593419e37bf0ce4b14a4a78f24e244c80169268079ba67c33cd44",
+  "run_t322.sh": "bf48e5835b3668e9e5bde203a7ef6418841aa7c59f976fa32a6f905ec5457a6f",
+  "test_t322.py": "2fbfd4eb3ffecbd98397f7f7636220a671d445dc06270b54de44e98f6516351e"
+}

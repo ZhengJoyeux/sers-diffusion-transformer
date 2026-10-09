@@ -1,0 +1,542 @@
+--- a/src/masked_unet.py
++++ b/src/masked_unet.py
+@@ -6,6 +6,8 @@
+ from torch import nn
+ 
+ from src.one_dimensional_ddpm import Unet1D
++from src.hybrid_unet_configuration import normalize_hybrid_configuration
++from src.prior_bottleneck_transformer import PriorBottleneckTransformer
+ 
+ 
+ def _condition_film_hook(
+@@ -38,6 +40,7 @@
+         condition_embedding_dimension: int = 8,
+         condition_injection: str = "input_only",
+         prior_conditioning_enabled: bool = False,
++        bottleneck_transformer_configuration: dict | None = None,
+     ) -> None:
+         super().__init__()
+         if channels <= 0:
+@@ -97,6 +100,21 @@
+             dropout=dropout,
+             self_condition=False,
+         )
++        self.bottleneck_transformer_configuration = normalize_hybrid_configuration(
++            bottleneck_transformer_configuration
++        )
++        self.bottleneck_transformer = None
++        if self.bottleneck_transformer_configuration["enabled"]:
++            if self.condition_encoder is None:
++                raise ValueError("瓶颈Transformer必须启用化学条件。")
++            if self.bottleneck_transformer_configuration["cross_attention"] and not self.prior_conditioning_enabled:
++                raise ValueError("瓶颈交叉注意力必须启用实际底谱输入。")
++            self.bottleneck_transformer = PriorBottleneckTransformer(
++                dim=dim * dim_mults[-1], spectrum_channels=self.channels,
++                condition_dim=self.condition_embedding_dimension, time_dim=dim * 4,
++                downsample_factor=2 ** (len(dim_mults) - 1),
++                configuration=self.bottleneck_transformer_configuration,
++            )
+         self.conditioned_resnet_blocks: list[nn.Module] = []
+         if (
+             self.condition_encoder is not None
+@@ -205,6 +223,18 @@
+             raise ValueError("无条件模型不能接收condition。")
+ 
+         conditioned_input = torch.cat(input_channels, dim=1)
++        if self.bottleneck_transformer is not None:
++            # Pass context as ordinary call arguments, not module attributes or
++            # hooks: safe for EMA deepcopy and no stale context between batches.
++            for block in self.conditioned_resnet_blocks:
++                block._d4_condition_embedding = embedding
++            try:
++                return self._forward_hybrid(
++                    conditioned_input, timestep, mask, embedding, prior_conditioning
++                ) * mask
++            finally:
++                for block in self.conditioned_resnet_blocks:
++                    block._d4_condition_embedding = None
+         if not self.conditioned_resnet_blocks:
+             return self.network(conditioned_input, timestep) * mask
+ 
+@@ -216,3 +246,32 @@
+             for block in self.conditioned_resnet_blocks:
+                 block._d4_condition_embedding = None
+         return result * mask
++
++    def _forward_hybrid(self, x, timestep, mask, embedding, prior_conditioning):
++        """Pinned 2.2.6 forward with one zero-initialized bottleneck adapter.
++
++        Existing convolutions, attentions, FiLM hooks and parameter names stay
++        intact. Disabled configurations call the original backend forward.
++        """
++        net = self.network
++        x = net.init_conv(x)
++        r = x.clone()
++        time = net.time_mlp(timestep)
++        skips = []
++        for block1, block2, attention, downsample in net.downs:
++            x = block1(x, time)
++            skips.append(x)
++            x = attention(block2(x, time))
++            skips.append(x)
++            x = downsample(x)
++        x = net.mid_attn(net.mid_block1(x, time))
++        x = self.bottleneck_transformer(
++            x, valid_mask=mask, condition_embedding=embedding,
++            time_embedding=time, prior_conditioning=prior_conditioning,
++        )
++        x = net.mid_block2(x, time)
++        for block1, block2, attention, upsample in net.ups:
++            x = block1(torch.cat((x, skips.pop()), dim=1), time)
++            x = attention(block2(torch.cat((x, skips.pop()), dim=1), time))
++            x = upsample(x)
++        return net.final_conv(net.final_res_block(torch.cat((x, r), dim=1), time))
+--- a/src/model_builder.py
++++ b/src/model_builder.py
+@@ -5,6 +5,7 @@
+ from typing import Any
+ 
+ from torch import nn
++from src.hybrid_unet_configuration import validate_hybrid_context
+ 
+ from src.one_dimensional_ddpm import (
+     GaussianDiffusion1D,
+@@ -239,6 +240,7 @@
+     self_condition = bool(
+         architecture.get("self_condition", False)
+     )
++    hybrid_configuration = validate_hybrid_context(model_configuration)
+     if mask_enabled:
+         if self_condition:
+             raise ValueError(
+@@ -255,6 +257,7 @@
+             ),
+             condition_injection=condition_injection,
+             prior_conditioning_enabled=prior_conditioning_enabled,
++            bottleneck_transformer_configuration=hybrid_configuration,
+         )
+     else:
+         unet = Unet1D(
+@@ -264,6 +267,17 @@
+             dropout=dropout,
+             self_condition=self_condition,
+         )
++
++    if hybrid_configuration["enabled"]:
++        adapter_parameters = sum(p.numel() for p in unet.bottleneck_transformer.parameters())
++        print("D4.26 hybrid: bottleneck adapter; existing U-Net attention retained")
++        print(f"Transformer depth={hybrid_configuration['depth']}; heads={hybrid_configuration['num_heads']}; "
++              f"dim={base_dimension * dimension_multipliers[-1]}; "
++              f"tokens={sequence_length // downsample_factor}; "
++              f"actual-base cross attention={hybrid_configuration['cross_attention']}")
++        print(f"Transformer parameters={adapter_parameters}; "
++              f"total denoiser parameters={sum(p.numel() for p in unet.parameters())}; "
++              "masked keys/queries; physical-axis position; zero-init output")
+ 
+     diffusion_timesteps = int(
+         _get_required_value(
+--- a/src/configuration_loader.py
++++ b/src/configuration_loader.py
+@@ -1501,6 +1501,8 @@
+     model = configuration[
+         "model"
+     ]
++    from src.hybrid_unet_configuration import validate_hybrid_context
++    validate_hybrid_context(configuration)
+ 
+     normalization = configuration[
+         "normalization"
+--- a/scripts/start_ddpm_training.py
++++ b/scripts/start_ddpm_training.py
+@@ -587,6 +587,10 @@
+         raise RuntimeError(
+             "resume检查点缺少有效configuration。"
+         )
++
++    from src.hybrid_unet_configuration import validate_hybrid_context
++    if validate_hybrid_context(configuration) != validate_hybrid_context(checkpoint_configuration):
++        raise ValueError("瓶颈Transformer架构与resume检查点不一致；请为新架构从头训练。")
+ 
+     configuration_pairs = (
+         (
+--- a/src/hybrid_unet_configuration.py
++++ b/src/hybrid_unet_configuration.py
+@@ -0,0 +1,61 @@
++"""Pure-Python validation for the optional D4.26 bottleneck adapter."""
++from __future__ import annotations
++
++import math
++
++
++def normalize_hybrid_configuration(raw=None):
++    if raw is None:
++        return {"enabled": False}
++    if not isinstance(raw, dict):
++        raise TypeError("model.bottleneck_transformer必须是字典。")
++    allowed = {"enabled", "cross_attention", "depth", "num_heads", "ff_multiplier",
++               "dropout", "position_frequencies", "raman_start_cm1", "raman_step_cm1",
++               "raman_span_cm1", "schema_version"}
++    if set(raw) - allowed:
++        raise ValueError(f"未知bottleneck_transformer配置: {sorted(set(raw)-allowed)}")
++    for key in ("enabled", "cross_attention"):
++        if key in raw and not isinstance(raw[key], bool):
++            raise TypeError(f"bottleneck_transformer.{key}必须是YAML布尔值。")
++    if not raw.get("enabled", False):
++        return {"enabled": False}
++    result = {"enabled": True, "cross_attention": True, "depth": 1, "num_heads": 4,
++              "ff_multiplier": 2.0, "dropout": 0.05, "position_frequencies": 8,
++              "raman_start_cm1": 600.0, "raman_step_cm1": 1.0,
++              "raman_span_cm1": 1900.0, "schema_version": 1}
++    result.update(raw)
++    for key, low, high in (("depth", 1, 4), ("num_heads", 1, 16),
++                           ("position_frequencies", 1, 12), ("schema_version", 1, 1)):
++        value = result[key]
++        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
++            raise ValueError(f"bottleneck_transformer.{key}必须为[{low},{high}]内整数。")
++    for key in ("ff_multiplier", "dropout", "raman_start_cm1", "raman_step_cm1", "raman_span_cm1"):
++        value = result[key]
++        if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value):
++            raise ValueError(f"bottleneck_transformer.{key}必须为有限数值。")
++        result[key] = float(value)
++    if not 1 <= result["ff_multiplier"] <= 4:
++        raise ValueError("ff_multiplier必须在[1,4]。")
++    if not 0 <= result["dropout"] < 1:
++        raise ValueError("dropout必须在[0,1)。")
++    if result["raman_step_cm1"] <= 0 or result["raman_span_cm1"] <= 0:
++        raise ValueError("Raman步长和编码范围必须为正数。")
++    return result
++
++
++def validate_hybrid_context(configuration):
++    architecture = configuration.get("model", configuration)
++    hybrid = normalize_hybrid_configuration(architecture.get("bottleneck_transformer"))
++    if not hybrid["enabled"]:
++        return hybrid
++    condition = configuration.get("conditioning", {}) or {}
++    data = configuration.get("data", {}) or {}
++    if data.get("raman_axis_mode") != "union_with_valid_mask" or not condition.get("enabled", False):
++        raise ValueError("瓶颈Transformer要求化学条件和union_with_valid_mask。")
++    if hybrid["cross_attention"] and not (condition.get("prior_spectrum", {}) or {}).get("enabled", False):
++        raise ValueError("底谱交叉注意力要求conditioning.prior_spectrum.enabled=true。")
++    dim = int(architecture.get("base_dimension", architecture.get("model_dimension", 0)))
++    mults = architecture.get("dimension_multipliers", ())
++    if not mults or dim <= 0 or dim * int(mults[-1]) % hybrid["num_heads"]:
++        raise ValueError("瓶颈通道数必须能被num_heads整除。")
++    return hybrid
+--- a/src/prior_bottleneck_transformer.py
++++ b/src/prior_bottleneck_transformer.py
+@@ -0,0 +1,118 @@
++"""Masked 1D Transformer adapter conditioned on the ACTUAL reconstruction base.
++
++No PCA fitting or sampling here. The existing paired train/generation tensor is
++the sole context. An output projection initialized to zero preserves the old
++backbone at initialization; internal attention gradients start after it opens.
++"""
++from __future__ import annotations
++
++import math
++import torch
++from torch import nn
++from torch.nn import functional as F
++
++from src.hybrid_unet_configuration import normalize_hybrid_configuration
++
++
++class ConditionalTransformerBlock(nn.Module):
++    def __init__(self, dim, heads, ff_multiplier, dropout, context_dim, cross_attention):
++        super().__init__()
++        self.norm1 = nn.LayerNorm(dim)
++        self.norm2 = nn.LayerNorm(dim)
++        self.norm3 = nn.LayerNorm(dim)
++        self.self_attention = nn.MultiheadAttention(dim, heads, dropout=dropout, batch_first=True)
++        self.cross_attention = (nn.MultiheadAttention(dim, heads, dropout=dropout, batch_first=True)
++                                if cross_attention else None)
++        self.modulation = nn.Sequential(nn.SiLU(), nn.Linear(context_dim, 6 * dim))
++        nn.init.zeros_(self.modulation[-1].weight)
++        nn.init.zeros_(self.modulation[-1].bias)
++        self.ff = nn.Sequential(nn.Linear(dim, int(dim * ff_multiplier)), nn.GELU(),
++                                nn.Dropout(dropout), nn.Linear(int(dim * ff_multiplier), dim))
++        self.dropout = nn.Dropout(dropout)
++
++    def forward(self, x, context, conditioning, valid):
++        # There must be at least one valid key for each item (checked upstream).
++        shifts = self.modulation(conditioning).unsqueeze(1).chunk(6, dim=-1)
++        gate = valid.unsqueeze(-1).to(x.dtype)
++        def modulate(y, shift, scale):
++            return y * (1 + 0.1 * torch.tanh(scale)) + 0.1 * shift
++        q = modulate(self.norm1(x), shifts[0], shifts[1])
++        update, _ = self.self_attention(q, q, q, key_padding_mask=~valid, need_weights=False)
++        x = (x + self.dropout(update)) * gate
++        if self.cross_attention is not None:
++            q = modulate(self.norm2(x), shifts[2], shifts[3])
++            update, _ = self.cross_attention(q, context, context, key_padding_mask=~valid, need_weights=False)
++            x = (x + self.dropout(update)) * gate
++        x = (x + self.dropout(self.ff(modulate(self.norm3(x), shifts[4], shifts[5])))) * gate
++        return x
++
++
++class PriorBottleneckTransformer(nn.Module):
++    def __init__(self, *, dim, spectrum_channels, condition_dim, time_dim, downsample_factor, configuration):
++        super().__init__()
++        self.configuration = normalize_hybrid_configuration(configuration)
++        cfg = self.configuration
++        if not cfg["enabled"] or dim % cfg["num_heads"]:
++            raise ValueError("Transformer必须启用且dim能被num_heads整除。")
++        self.downsample_factor = int(downsample_factor)
++        self.position_projection = nn.Linear(2 * cfg["position_frequencies"], dim, bias=False)
++        self.context_projection = (nn.Sequential(nn.Linear(spectrum_channels, dim), nn.SiLU(), nn.LayerNorm(dim))
++                                   if cfg["cross_attention"] else None)
++        self.blocks = nn.ModuleList([
++            ConditionalTransformerBlock(dim, cfg["num_heads"], cfg["ff_multiplier"],
++                                        cfg["dropout"], condition_dim + time_dim, cfg["cross_attention"])
++            for _ in range(cfg["depth"])
++        ])
++        self.output_projection = nn.Linear(dim, dim)
++        nn.init.zeros_(self.output_projection.weight)
++        nn.init.zeros_(self.output_projection.bias)
++
++    def token_geometry(self, valid_mask):
++        if valid_mask.ndim != 3 or not torch.isfinite(valid_mask).all():
++            raise ValueError("valid_mask必须为有限[B,C,L]张量。")
++        if not ((valid_mask == 0) | (valid_mask == 1)).all():
++            raise ValueError("valid_mask只能取0或1。")
++        if not torch.equal(valid_mask, valid_mask[:, :1].expand_as(valid_mask)):
++            raise ValueError("所有光谱通道必须具有相同有效区。")
++        mask = valid_mask[:, :1].float()
++        factor = self.downsample_factor
++        if mask.shape[-1] % factor:
++            raise ValueError("输入长度未按U-Net下采样倍数补齐。")
++        coverage = F.avg_pool1d(mask, factor, factor)
++        valid = coverage[:, 0] > 0
++        if not valid.any(dim=1).all():
++            raise ValueError("每条光谱至少需要一个有效Raman点。")
++        cfg = self.configuration
++        axis = (torch.arange(mask.shape[-1], device=mask.device, dtype=torch.float32)
++                * cfg["raman_step_cm1"] + cfg["raman_start_cm1"])
++        centers = F.avg_pool1d(mask * axis, factor, factor) / coverage.clamp_min(1.0 / factor)
++        return coverage, valid, centers[:, 0]
++
++    def forward(self, features, *, valid_mask, condition_embedding, time_embedding, prior_conditioning):
++        coverage, valid, centers = self.token_geometry(valid_mask)
++        if features.shape[-1] != valid.shape[-1]:
++            raise RuntimeError("U-Net瓶颈长度与掩码池化长度不一致。")
++        cfg = self.configuration
++        frequencies = torch.pow(2.0, torch.arange(cfg["position_frequencies"], device=features.device))
++        phase = ((centers - cfg["raman_start_cm1"]) / cfg["raman_span_cm1"])[..., None]
++        phase = phase * frequencies * (2 * math.pi)
++        position = self.position_projection(torch.cat((phase.sin(), phase.cos()), -1).to(features.dtype))
++        gate = valid.unsqueeze(-1).to(features.dtype)
++        x = (features.transpose(1, 2) + position) * gate
++        context = None
++        if self.context_projection is not None:
++            if prior_conditioning is None or prior_conditioning.shape != valid_mask.shape:
++                raise ValueError("交叉注意力必须接收与valid_mask同形状的实际底谱。")
++            # torch.where also prevents a masked NaN from leaking into pooling.
++            base = torch.where(valid_mask.bool(), prior_conditioning, 0).float()
++            if not torch.isfinite(base).all():
++                raise ValueError("有效区底谱包含非有限值。")
++            pooled = F.avg_pool1d(base, self.downsample_factor, self.downsample_factor)
++            pooled = pooled / coverage.clamp_min(1.0 / self.downsample_factor)
++            context = (self.context_projection(pooled.transpose(1, 2).to(features.dtype)) + position) * gate
++        conditioning = torch.cat((time_embedding, condition_embedding), -1).to(features.dtype)
++        for block in self.blocks:
++            x = block(x, context, conditioning, valid)
++        # Coverage attenuates partially observed boundary bins, not whole spectra.
++        delta = self.output_projection(x) * gate * coverage.transpose(1, 2).to(x.dtype)
++        return features + delta.transpose(1, 2)
+--- a/tests/test_d4_26_hybrid_unet.py
++++ b/tests/test_d4_26_hybrid_unet.py
+@@ -0,0 +1,193 @@
++"""Behavioral checks: backward compatibility, physical masks and learned context."""
++import copy
++import io
++import unittest
++from unittest import mock
++from pathlib import Path
++import torch
++
++from src.hybrid_unet_configuration import normalize_hybrid_configuration, validate_hybrid_context
++from src.masked_unet import MaskConditionedUnet1D
++from src.prior_bottleneck_transformer import PriorBottleneckTransformer
++from src.model_builder import build_diffusion_model
++
++
++def configuration(enabled=True, cross=True):
++    return {"data": {"raman_axis_mode": "union_with_valid_mask"},
++            "conditioning": {"enabled": True, "vector_size": 14, "embedding_dimension": 8,
++                             "injection": "input_and_all_resnet_blocks_film", "prior_spectrum": {"enabled": True}},
++            "prior_residual": {"enabled": True}, "broad_local_residual": {"enabled": True},
++            "model": {"channels": 1, "model_dimension": 8, "dimension_multipliers": [1, 2],
++                      "dropout": 0.0, "bottleneck_transformer": {"enabled": enabled, "cross_attention": cross,
++                      "dropout": 0.0}},
++            "diffusion": {"diffusion_steps": 4, "sampling_steps": 2, "objective": "pred_x0",
++                          "auto_normalize": False, "beta_schedule": "cosine", "loss_weighting": "uniform"}}
++
++
++def direct_adapter(cross=True):
++    return PriorBottleneckTransformer(dim=16, spectrum_channels=1, condition_dim=8,
++        time_dim=32, downsample_factor=4,
++        configuration={"enabled": True, "cross_attention": cross, "dropout": 0.0})
++
++
++def activate(adapter):
++    with torch.no_grad():
++        adapter.output_projection.weight.copy_(0.1 * torch.eye(adapter.output_projection.out_features))
++
++
++class HybridTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cls.threads = torch.get_num_threads()
++        torch.set_num_threads(1)
++
++    @classmethod
++    def tearDownClass(cls):
++        torch.set_num_threads(cls.threads)
++
++    def test_disabled_keys_weights_rng_and_strict_old_state(self):
++        cfg = configuration(False)
++        cfg["model"].pop("bottleneck_transformer")
++        torch.manual_seed(12); a, _ = build_diffusion_model(cfg, 64); state = torch.get_rng_state()
++        torch.manual_seed(12); b, _ = build_diffusion_model(configuration(False), 64)
++        self.assertTrue(torch.equal(state, torch.get_rng_state()))
++        self.assertEqual(set(a.state_dict()), set(b.state_dict()))
++        b.load_state_dict(a.state_dict(), strict=True)
++        for k, v in a.state_dict().items():
++            self.assertTrue(torch.equal(v, b.state_dict()[k]), k)
++
++    def test_zero_initialized_adapter_matches_old_forward_in_eval(self):
++        torch.manual_seed(14); old, _ = build_diffusion_model(configuration(False), 64)
++        torch.manual_seed(14); new, _ = build_diffusion_model(configuration(), 64)
++        missing, unexpected = new.load_state_dict(old.state_dict(), strict=False)
++        self.assertFalse(unexpected)
++        self.assertTrue(all(k.startswith("bottleneck_transformer.") for k in missing))
++        old.eval(); new.eval()
++        x = torch.randn(2, 1, 64); mask = torch.ones_like(x); mask[0, :, 41:] = 0
++        kwargs = dict(valid_mask=mask, condition=torch.randn(2, 14), prior_conditioning=torch.randn_like(x))
++        with torch.no_grad():
++            self.assertTrue(torch.equal(old(x, torch.tensor([0, 3]), **kwargs), new(x, torch.tensor([0, 3]), **kwargs)))
++
++    def test_1401_and_1901_geometry_and_partial_boundary(self):
++        adapter = direct_adapter()
++        mask = torch.zeros(2, 1, 1904); mask[0, :, :1401] = 1; mask[1, :, :1901] = 1
++        coverage, valid, center = adapter.token_geometry(mask)
++        self.assertEqual(valid.sum(1).tolist(), [351, 476])
++        self.assertEqual(coverage[0, 0, 350].item(), 0.25)
++        self.assertEqual(coverage[1, 0, 475].item(), 0.25)
++        self.assertEqual(center[0, 350].item(), 2000.0)
++        self.assertEqual(center[1, 475].item(), 2500.0)
++        self.assertTrue(torch.equal(center[0, :350], center[1, :350]))
++
++    def test_invalid_tokens_and_prior_cannot_affect_valid_adapter_output(self):
++        torch.manual_seed(1); adapter = direct_adapter().eval(); activate(adapter)
++        f = torch.randn(2, 16, 16); mask = torch.ones(2, 1, 64); mask[0, :, 40:] = 0
++        base = torch.randn(2, 1, 64); c = torch.randn(2, 8); t = torch.randn(2, 32)
++        kwargs = dict(valid_mask=mask, condition_embedding=c, time_embedding=t)
++        y = adapter(f, prior_conditioning=base, **kwargs)
++        changed = f.clone(); changed[0, :, 10:] = 1e4
++        base2 = base.clone(); base2[0, :, 40:] = -1e5
++        y2 = adapter(changed, prior_conditioning=base2, **kwargs)
++        torch.testing.assert_close(y[0, :, :10], y2[0, :, :10], rtol=0, atol=0)
++
++    def test_actual_prior_changes_cross_attention_output(self):
++        torch.manual_seed(2); adapter = direct_adapter().eval(); activate(adapter)
++        f = torch.randn(2, 16, 16); mask = torch.ones(2, 1, 64)
++        kwargs = dict(valid_mask=mask, condition_embedding=torch.randn(2, 8), time_embedding=torch.randn(2, 32))
++        y1 = adapter(f, prior_conditioning=torch.zeros_like(mask), **kwargs)
++        y2 = adapter(f, prior_conditioning=torch.linspace(-1, 1, 64).reshape(1, 1, 64).expand_as(mask), **kwargs)
++        self.assertGreater(float((y1-y2).detach().abs().max()), 1e-5)
++
++    def test_self_ablation_does_not_consume_adapter_prior(self):
++        adapter = direct_adapter(False).eval(); activate(adapter)
++        f = torch.randn(2, 16, 16); mask = torch.ones(2, 1, 64)
++        kwargs = dict(valid_mask=mask, condition_embedding=torch.randn(2, 8), time_embedding=torch.randn(2, 32))
++        self.assertTrue(torch.equal(adapter(f, prior_conditioning=None, **kwargs),
++                                    adapter(f, prior_conditioning=torch.randn_like(mask), **kwargs)))
++
++    def test_zero_projection_opens_then_attention_and_film_receive_gradients(self):
++        torch.manual_seed(3); model, _ = build_diffusion_model(configuration(), 64)
++        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
++        x = torch.randn(2, 1, 64); mask = torch.ones_like(x); mask[0, :, 41:] = 0
++        c = torch.randn(2, 14); base = torch.randn_like(x)
++        for _ in range(3):
++            optimizer.zero_grad()
++            prediction = model(x, torch.tensor([0, 3]), valid_mask=mask, condition=c, prior_conditioning=base)
++            loss = (((prediction-x)*mask)**2).sum() / mask.sum()
++            self.assertTrue(torch.isfinite(loss))
++            loss.backward()
++            for name, parameter in model.named_parameters():
++                if any(s in name for s in ("self_attention.in_proj_weight", "cross_attention.in_proj_weight", "condition_film.weight")):
++                    self.assertIsNotNone(parameter.grad, name)
++                    self.assertTrue(torch.isfinite(parameter.grad).all(), name)
++            optimizer.step()
++        for block in model.bottleneck_transformer.blocks:
++            for p in (block.self_attention.in_proj_weight, block.cross_attention.in_proj_weight):
++                self.assertGreater(float(p.grad.abs().sum()), 0)
++        film = [p.grad for n,p in model.named_parameters() if "condition_film.weight" in n]
++        self.assertTrue(all(float(g.abs().sum()) > 0 for g in film))
++        self.assertEqual(torch.count_nonzero(prediction[0, :, 41:]).item(), 0)
++
++    def test_masked_values_full_network_and_output_tail(self):
++        model, _ = build_diffusion_model(configuration(), 64); model.eval(); activate(model.bottleneck_transformer)
++        x = torch.randn(2, 1, 64); mask = torch.ones_like(x); mask[0, :, 41:] = 0
++        base = torch.randn_like(x); x2=x.clone(); x2[0,:,41:]=10000; b2=base.clone(); b2[0,:,41:]=-10000
++        kwargs = dict(valid_mask=mask, condition=torch.randn(2, 14))
++        with torch.no_grad():
++            y1=model(x,torch.tensor([1,2]),prior_conditioning=base,**kwargs)
++            y2=model(x2,torch.tensor([1,2]),prior_conditioning=b2,**kwargs)
++        self.assertTrue(torch.equal(y1,y2))
++        self.assertEqual(torch.count_nonzero(y1[0,:,41:]).item(),0)
++
++    def test_diffusion_loss_ddim_and_checkpoint_roundtrip(self):
++        cfg=configuration(); _, d=build_diffusion_model(cfg,64)
++        x=torch.randn(2,1,64)*0.1; m=torch.ones_like(x);m[0,:,41:]=0;c=torch.randn(2,14);b=torch.randn_like(x)
++        loss=d.p_losses(x,torch.tensor([0,3]),noise=torch.randn_like(x),valid_mask=m,condition=c,prior_conditioning=b)
++        self.assertTrue(torch.isfinite(loss));loss.backward()
++        activate(d.model.bottleneck_transformer); d.eval()
++        buffer=io.BytesIO();torch.save({'configuration':cfg,'state':d.state_dict()},buffer);buffer.seek(0)
++        ckpt=torch.load(buffer,weights_only=False);_,restored=build_diffusion_model(ckpt['configuration'],64)
++        restored.load_state_dict(ckpt['state'],strict=True);restored.eval()
++        torch.manual_seed(55);y=d.sample(batch_size=2,valid_mask=m,condition=c,prior_conditioning=b)
++        torch.manual_seed(55);z=restored.sample(batch_size=2,valid_mask=m,condition=c,prior_conditioning=b)
++        self.assertTrue(torch.equal(y,z));self.assertTrue(torch.isfinite(y).all())
++        self.assertEqual(torch.count_nonzero(y[0,:,41:]).item(),0)
++
++    def test_ema_deepcopy_state_has_no_stale_context(self):
++        from ema_pytorch import EMA
++        model,_=build_diffusion_model(configuration(),64)
++        ema=EMA(model,beta=0.995,update_every=1,update_after_step=0)
++        ema.update()
++        x=torch.randn(2,1,64);kw=dict(valid_mask=torch.ones_like(x),condition=torch.randn(2,14),prior_conditioning=torch.randn_like(x))
++        model.eval();ema.ema_model.eval()
++        self.assertTrue(torch.equal(model(x,torch.tensor([0,2]),**kw),ema.ema_model(x,torch.tensor([0,2]),**kw)))
++        self.assertTrue(all(getattr(b,'_d4_condition_embedding',None) is None for b in model.conditioned_resnet_blocks))
++
++    def test_real_length_full_network_forward(self):
++        cfg=configuration();cfg['model'].update(model_dimension=32,dimension_multipliers=[1,2,4]);cfg['conditioning']['embedding_dimension']=32
++        model,_=build_diffusion_model(cfg,1904);model.eval()
++        x=torch.randn(2,1,1904)*0.1;m=torch.ones_like(x);m[0,:,1401:]=0;m[1,:,1901:]=0
++        with torch.no_grad():y=model(x,torch.tensor([0,3]),valid_mask=m,condition=torch.randn(2,14),prior_conditioning=torch.randn_like(x))
++        self.assertEqual(y.shape,x.shape);self.assertTrue(torch.isfinite(y).all());self.assertEqual(torch.count_nonzero(y*(1-m)).item(),0)
++
++    def test_invalid_config_and_all_masked_sample_rejected(self):
++        for raw in [{'enabled':'true'}, {'enabled':True,'depth':0}, {'enabled':True,'num_heads':2.5}, {'enabled':True,'dropout':float('nan')}, {'enabled':True,'unknown':1}]:
++            with self.assertRaises((ValueError,TypeError)):normalize_hybrid_configuration(raw)
++        cfg=configuration();cfg['conditioning']['prior_spectrum']['enabled']=False
++        with self.assertRaises(ValueError):validate_hybrid_context(cfg)
++        with self.assertRaises(ValueError):direct_adapter().token_geometry(torch.zeros(2,1,64))
++
++    def test_resume_rejects_old_or_different_transformer_architecture(self):
++        from scripts.start_ddpm_training import validate_resume_stage
++        old=configuration(False)
++        with mock.patch('scripts.start_ddpm_training.load_checkpoint_file',return_value={'configuration':old}):
++            with self.assertRaisesRegex(ValueError,'Transformer'):
++                validate_resume_stage(checkpoint_path=Path('synthetic.pt'),configuration=configuration())
++        self_variant=configuration(True,False)
++        with mock.patch('scripts.start_ddpm_training.load_checkpoint_file',return_value={'configuration':self_variant}):
++            with self.assertRaisesRegex(ValueError,'Transformer'):
++                validate_resume_stage(checkpoint_path=Path('synthetic.pt'),configuration=configuration())
++
++
++if __name__ == '__main__':
++    unittest.main()

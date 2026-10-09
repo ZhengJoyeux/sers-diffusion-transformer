@@ -712,6 +712,17 @@ class ConditionalPriorResidualBank:
             condition_id=condition_id,
         )
 
+    def configure_generation_joint_prior(self, condition_id, normalized_training, axis, configuration):
+        """Runtime-only copula; never saved as a learned checkpoint/prior state."""
+        from src.generation_stage_trace import training_components
+        from src.joint_prior_sampling import JointPriorSampler
+        parts = training_components(self, condition_id, normalized_training, axis)
+        sampler = JointPriorSampler(self._entry(condition_id), parts['outer'], parts['broad'], configuration)
+        if not hasattr(self, '_generation_joint_prior_samplers'):
+            self._generation_joint_prior_samplers = {}
+        self._generation_joint_prior_samplers[str(condition_id)] = sampler
+        return dict(sampler.diagnostics)
+
     def sample_generation_conditioning(
         self,
         number: int,
@@ -719,6 +730,7 @@ class ConditionalPriorResidualBank:
         condition_id: str,
         prior_random_generator: np.random.Generator,
         broad_random_generator: np.random.Generator,
+        sampled_components: list[dict[str, np.ndarray]] | None = None,
     ) -> np.ndarray:
         """Sample the exact outer-plus-broad base used by one generation batch."""
 
@@ -728,18 +740,29 @@ class ConditionalPriorResidualBank:
         if number <= 0:
             raise ValueError("number必须大于0。")
         entry = self._entry(condition_id)
-        prior = entry.outer.sample_reference_priors(
-            number, random_generator=prior_random_generator
-        )
-        broad = entry.broad_local.sample_broad_residuals(
-            number, random_generator=broad_random_generator
-        )
+        joint = getattr(self, '_generation_joint_prior_samplers', {}).get(str(condition_id))
+        if joint is None:
+            prior = entry.outer.sample_reference_priors(
+                number, random_generator=prior_random_generator
+            )
+            broad = entry.broad_local.sample_broad_residuals(
+                number, random_generator=broad_random_generator
+            )
+        else:
+            prior, broad = joint.sample(number, prior_random_generator, broad_random_generator)
         conditioning = np.zeros(
             (number, self.model_axis.size), dtype=np.float32
         )
         conditioning[:, : entry.valid_length] = prior + broad
         if not np.isfinite(conditioning).all():
             raise RuntimeError("条件生成先验产生NaN或无穷值。")
+        if sampled_components is not None:
+            # Observe the SAME draws supplied to the denoiser; no extra RNG.
+            sampled_components.append({
+                "outer": np.asarray(prior, dtype=np.float32).copy(),
+                "broad": np.asarray(broad, dtype=np.float32).copy(),
+                "base": conditioning[:, :entry.valid_length].copy(),
+            })
         return conditioning
 
     def reconstruct_generated_with_conditioning(

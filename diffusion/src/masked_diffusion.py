@@ -10,6 +10,9 @@ import torch
 from torch.nn import functional as F
 
 from src.one_dimensional_ddpm import GaussianDiffusion1D
+from src.conditional_spectrum_constraints import (
+    ConditionalSpectrumSupport, normalize_spectrum_configuration,
+)
 from src.conditional_diversity_constraints import (
     DifferentiableConditionAwareDiversityLoss,
     DifferentiableConditionFullSpectrumGroupVarianceLoss,
@@ -59,6 +62,7 @@ def _normalize_quality_fidelity_configuration(
     }
     if not enabled:
         return normalized
+    normalized["full_spectrum_support"] = normalize_spectrum_configuration(source)
     if normalized["total_weight"] <= 0.0:
         raise ValueError("quality_fidelity.total_weight必须大于0。")
     if not 0.0 < normalized["maximum_total_ratio_to_ddpm"] <= 0.25:
@@ -651,7 +655,8 @@ def _normalize_quality_fidelity_configuration(
             bounds["enabled"],
             tail["enabled"],
             profile["enabled"],
-            group_profile["enabled"],
+                group_profile["enabled"],
+                normalized["full_spectrum_support"]["enabled"],
         )
     ):
         raise ValueError("quality_fidelity至少需要启用一个保真损失。")
@@ -872,6 +877,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
         self._sampling_condition: torch.Tensor | None = None
         self._sampling_prior_conditioning: torch.Tensor | None = None
         self._latest_loss_components: dict[str, torch.Tensor] = {}
+        self.spectrum_support_module: ConditionalSpectrumSupport | None = None
         self.diversity_configuration = (
             normalize_condition_aware_diversity_configuration(
                 diversity_configuration or {"enabled": False}
@@ -967,6 +973,13 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
         )
         if self.quality_fidelity_enabled and self.objective != "pred_x0":
             raise ValueError("D4.3.2 quality_fidelity当前只支持objective=pred_x0。")
+
+    def _exact_full_prediction(self, prediction, target, full_target, condition, mask):
+        if self.spectrum_support_module is None:
+            return None
+        return self.spectrum_support_module.reconstruct(
+            prediction, target, full_target, condition, mask
+        )
 
     def _high_noise_weights(self, timesteps: torch.Tensor) -> torch.Tensor:
         configuration = self.quality_fidelity_configuration.get(
@@ -1587,6 +1600,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
         condition: torch.Tensor,
         timesteps: torch.Tensor | None,
         configuration: dict[str, Any],
+        reconstructed_prediction: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Constrain the actual reconstructed spectrum, not only its residual.
 
@@ -1610,10 +1624,11 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
         if torch.any(local_inverse_slope < 0.0):
             raise ValueError("local_inverse_slope不能为负。")
 
-        reconstructed_prediction = (
-            full_spectrum_target
-            + local_inverse_slope * (prediction - target)
-        ) * valid_mask
+        if reconstructed_prediction is None:
+            reconstructed_prediction = (
+                full_spectrum_target
+                + local_inverse_slope * (prediction - target)
+            ) * valid_mask
         probabilities = prediction.new_tensor(
             configuration["piecewise_probabilities"]
         )
@@ -1951,6 +1966,13 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
         full_spectrum_target: torch.Tensor | None = None,
         local_inverse_slope: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
+        exact_prediction = None
+        if getattr(self, "spectrum_support_module", None) is not None:
+            if full_spectrum_target is None:
+                raise ValueError("D4.25完整谱约束缺少full_spectrum_target。")
+            exact_prediction = self._exact_full_prediction(
+                prediction, target, full_spectrum_target, condition, valid_mask
+            )
         zero = prediction.sum() * 0.0
         derivative_loss = zero
         multiscale_loss = zero
@@ -2109,6 +2131,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
                     number_of_timesteps=(
                         self.num_timesteps
                     ),
+                    reconstructed_prediction=exact_prediction,
                 )
             )
 
@@ -2176,6 +2199,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
                     number_of_timesteps=(
                         self.num_timesteps
                     ),
+                    reconstructed_prediction=exact_prediction,
                 )
             )
 
@@ -2240,6 +2264,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
                 condition=condition,
                 timesteps=timesteps,
                 configuration=full_tail,
+                reconstructed_prediction=exact_prediction,
             )
         needs_condition_groups = bool(condition_mean.get("enabled", False)) or bool(
             envelope.get("enabled", False)
@@ -2612,6 +2637,14 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
     ) -> None:
         if not self.diversity_enabled:
             return
+        support = self.quality_fidelity_configuration.get("full_spectrum_support", {})
+        if bool(support.get("enabled", False)):
+            if "full_spectrum_support_state" not in diversity_constraint_state:
+                raise ValueError("D4.25配置需要新的train-only support状态；旧checkpoint请使用旧配置。")
+            self.spectrum_support_module = ConditionalSpectrumSupport(
+                diversity_constraint_state["full_spectrum_support_state"], self.seq_length
+            )
+            self.spectrum_support_module.configuration = dict(support)
         self.diversity_loss_module = DifferentiableConditionAwareDiversityLoss(
             diversity_constraint_state=diversity_constraint_state,
             padded_length=self.seq_length,
@@ -3596,12 +3629,30 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
             uncapped_quality = zero
             weighted_quality = zero
 
+        support_result = {"raw_loss": zero, "envelope_loss": zero,
+                          "peak_derivative_loss": zero, "active_fraction": zero}
+        weighted_support = zero
+        if self.spectrum_support_module is not None:
+            exact_prediction = self._exact_full_prediction(
+                model_out, x_start, full_spectrum_target, prepared_condition, mask
+            )
+            support_result = self.spectrum_support_module.losses(
+                exact_prediction, full_spectrum_target, prepared_condition, mask,
+                self.alphas_cumprod.gather(0, t),
+            )
+            support_cfg = self.spectrum_support_module.configuration
+            candidate = support_cfg["total_weight"] * support_result["raw_loss"]
+            cap = ddpm_loss.detach() * support_cfg["maximum_total_ratio_to_ddpm"]
+            factor = (cap / candidate.detach().abs().clamp_min(1e-12)).clamp(max=1)
+            weighted_support = candidate * factor
+
         reduced = (
             ddpm_loss
             + weighted_high_noise_recovery
             + weighted_equalized_residual_tail
             + weighted_diversity
             + weighted_quality
+            + weighted_support
         )
         timestep_fraction = t.to(dtype=torch.float32) / float(
             max(self.num_timesteps - 1, 1)
@@ -3614,6 +3665,11 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
         )
         self._latest_loss_components = {
             "total_loss": reduced.detach(),
+            "spectrum_support_loss": weighted_support.detach(),
+            "spectrum_support_raw_loss": support_result["raw_loss"].detach(),
+            "spectrum_support_envelope_loss": support_result["envelope_loss"].detach(),
+            "spectrum_support_peak_derivative_loss": support_result["peak_derivative_loss"].detach(),
+            "spectrum_support_active_fraction": support_result["active_fraction"].detach(),
             "ddpm_loss": ddpm_loss.detach(),
             "ddpm_uniform_loss": ddpm_uniform_loss.detach(),
             "mean_high_noise_weight": timestep_fidelity_weight.mean().detach(),
@@ -3799,6 +3855,31 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
         }
         return reduced
 
+    def _clip_prediction(self, prediction, base, condition, mask):
+        if self.spectrum_support_module is None:
+            return prediction.clamp(-1.0, 1.0)
+        cfg = self.spectrum_support_module.configuration
+        if not cfg["sampling_soft_guard"]:
+            return prediction.clamp(-1.0, 1.0) * mask
+        if base is None or condition is None:
+            raise ValueError("D4.25采样软约束要求condition和实际prior_conditioning。")
+        return self.spectrum_support_module.soft_guard(prediction, base, condition, mask)
+
+    def p_mean_variance(self, x, t, x_self_cond=None, clip_denoised=True,
+                        model_forward_kwargs=None):
+        # The backend has a second unconditional clamp in the ancestral sampler.
+        # Override it only for D4.25; preserve legacy DDPM behavior otherwise.
+        if self.spectrum_support_module is None:
+            return super().p_mean_variance(
+                x, t, x_self_cond, clip_denoised, model_forward_kwargs or {}
+            )
+        preds = self.model_predictions(
+            x, t, x_self_cond, clip_x_start=clip_denoised,
+            model_forward_kwargs=model_forward_kwargs,
+        )
+        return (*self.q_posterior(x_start=preds.pred_x_start, x_t=x, t=t),
+                preds.pred_x_start)
+
     def model_predictions(
         self,
         x: torch.Tensor,
@@ -3864,6 +3945,8 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
         forward_kwargs = dict(model_forward_kwargs or {})
         forward_kwargs.update(kwargs)
         forward_kwargs.pop("self_cond", None)
+        if x_self_cond is not None:
+            forward_kwargs["self_cond"] = x_self_cond
         model_output = self.model(
             x * prepared,
             t,
@@ -3881,7 +3964,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
                 pred_noise,
             )
             if clip_x_start:
-                pred_x_start = pred_x_start.clamp(-1.0, 1.0)
+                pred_x_start = self._clip_prediction(pred_x_start, prepared_prior, prepared_condition, prepared)
             if clip_x_start and rederive_pred_noise:
                 pred_noise = self.predict_noise_from_start(
                     x * prepared,
@@ -3891,7 +3974,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
         elif self.objective == "pred_x0":
             pred_x_start = model_output
             if clip_x_start:
-                pred_x_start = pred_x_start.clamp(-1.0, 1.0)
+                pred_x_start = self._clip_prediction(pred_x_start, prepared_prior, prepared_condition, prepared)
             pred_noise = self.predict_noise_from_start(
                 x * prepared,
                 t,
@@ -3904,7 +3987,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
                 model_output,
             )
             if clip_x_start:
-                pred_x_start = pred_x_start.clamp(-1.0, 1.0)
+                pred_x_start = self._clip_prediction(pred_x_start, prepared_prior, prepared_condition, prepared)
             pred_noise = self.predict_noise_from_start(
                 x * prepared,
                 t,

@@ -21,6 +21,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from Dataset import (
+    CHEMISTRY_CORE_PEAKS,
     MODEL_LENGTH,
     MODEL_RAMAN_AXIS,
     PESTICIDES,
@@ -29,6 +30,7 @@ from Dataset import (
     build_datasets,
     build_matched_condition_peak_priors,
     build_training_peak_priors,
+    collect_real_training_intensities,
     load_concentration_map,
 )
 from Metric import (
@@ -39,6 +41,7 @@ from Metric import (
 )
 from Model_v2 import (
     TransformerClassifyRegress_sep,
+    decode_ordinal_numpy,
     present_only_corn_ordinal_loss,
     present_only_ordinal_bce,
 )
@@ -72,6 +75,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dim-ff", type=int, default=64)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--encoder-layers", type=int, default=4)
+    parser.add_argument("--local-quantitative-branch", action="store_true",
+                        help="T3.13: add native-resolution peak-window evidence to ordinal concentration heads")
+    parser.add_argument("--local-half-width-cm1", type=int, default=24)
+    parser.add_argument("--local-hidden", type=int, default=16)
+    parser.add_argument("--local-strength", type=float, default=0.25)
+    parser.add_argument("--ordinal-decoding", choices=("median", "map"), default="median",
+                        help="Median preserves legacy decoding; MAP selects the most probable S/M/H level")
+    parser.add_argument("--checkpoint-selection", choices=("loss", "ordinal"), default="loss",
+                        help="Ordinal uses validation present-level accuracy, then profile exact accuracy, for selection and early stopping")
     parser.add_argument(
         "--concentration-head-mode",
         choices=("continuous", "ordinal"),
@@ -287,6 +299,8 @@ def _to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
         "concentration_target",
     ):
         output[key] = batch[key].to(device, non_blocking=True)
+    if "raw_intensity" in batch:
+        output["raw_intensity"] = batch["raw_intensity"].to(device, non_blocking=True)
     return output
 
 
@@ -439,6 +453,7 @@ def _ordinal_metrics_from_probabilities(
     class_probability: np.ndarray,
     ordinal_probability: np.ndarray,
     threshold: float = 0.5,
+    decoding: str = "median",
 ) -> dict[str, float]:
     """Training-time level metrics; final detailed tables are produced by Inference.py."""
     concentration_target = np.asarray(concentration_target)
@@ -447,7 +462,7 @@ def _ordinal_metrics_from_probabilities(
     ordinal_probability = np.asarray(ordinal_probability)
 
     present = class_target > 0.5
-    predicted_present_level = 1 + (ordinal_probability >= float(threshold)).sum(axis=-1)
+    predicted_present_level = decode_ordinal_numpy(ordinal_probability, mode=decoding, threshold=threshold)
     true_level = np.rint(concentration_target).astype(np.int64)
     present_accuracy = float(
         np.mean(predicted_present_level[present] == true_level[present])
@@ -467,6 +482,15 @@ def _ordinal_metrics_from_probabilities(
             np.mean(predicted_present_level[mask, index] == true_level[mask, index])
         ) if mask.any() else float("nan")
         metrics[f"ordinal_accuracy_{pesticide}"] = value
+        ternary_pesticide = mask & (present.sum(axis=1) == 3)
+        metrics[f"ordinal_accuracy_{pesticide}_ternary"] = float(
+            np.mean(predicted_present_level[ternary_pesticide, index] == true_level[ternary_pesticide, index])
+        ) if ternary_pesticide.any() else float("nan")
+    error = np.abs(predicted_present_level - true_level)[present]
+    metrics["ordinal_mae_present"] = float(error.mean()) if error.size else float("nan")
+    metrics["ordinal_severe_error_rate"] = float(np.mean(error >= 2)) if error.size else float("nan")
+    ternary = present.sum(axis=1) == 3
+    metrics["ordinal_exact_ternary"] = float(np.mean(np.all(final_level[ternary] == true_level[ternary], axis=1))) if ternary.any() else float("nan")
     return metrics
 
 
@@ -486,6 +510,7 @@ def run_epoch(
     regression_weight: float,
     optimizer: torch.optim.Optimizer | None,
     max_batches: int | None,
+    ordinal_decoding: str = "median",
 ) -> tuple[dict[str, float], dict[str, np.ndarray]]:
     training = optimizer is not None
     model.train(training)
@@ -669,6 +694,7 @@ def run_epoch(
                 y_class,
                 p_class,
                 p_ordinal,
+                decoding=ordinal_decoding,
             )
         )
         arrays["ordinal_probability"] = p_ordinal
@@ -691,7 +717,7 @@ def save_checkpoint(
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
-            "checkpoint_version": 3,
+            "checkpoint_version": 4 if model_config.get("use_local_quantitative_branch", False) else 3,
             "epoch": int(epoch),
             "best_validation_loss": float(best_validation_loss),
             "model_state_dict": model.state_dict(),
@@ -709,6 +735,12 @@ def save_checkpoint(
 
 def main() -> None:
     args = parse_args()
+    if args.concentration_head_mode != "ordinal" and (
+        args.local_quantitative_branch or args.checkpoint_selection == "ordinal" or args.ordinal_decoding != "median"
+    ):
+        raise ValueError("Local quantitative branch / ordinal selection / MAP decoding require --concentration-head-mode ordinal")
+    if args.local_quantitative_branch and args.boundary_specific_mixture_gate:
+        raise ValueError("T3.13 first ablation requires --boundary-specific-mixture-gate to remain disabled")
 
     if (
         args.concentration_head_mode != "ordinal"
@@ -723,6 +755,8 @@ def main() -> None:
     device = resolve_device(args.device)
     output_directory = args.output_directory.resolve()
     checkpoint_directory = output_directory / "checkpoints"
+    if checkpoint_directory.exists() and any(checkpoint_directory.glob("*.pt")):
+        raise FileExistsError(f"Output already contains checkpoints; choose a new --output-directory: {output_directory}")
     output_directory.mkdir(parents=True, exist_ok=True)
     checkpoint_directory.mkdir(parents=True, exist_ok=True)
 
@@ -761,7 +795,7 @@ def main() -> None:
     print(
         f"Model input uses the full Raman range "
         f"{MODEL_RAMAN_AXIS[0]:.0f}-{MODEL_RAMAN_AXIS[-1]:.0f} cm^-1 "
-        f"({MODEL_LENGTH} points); every real source must genuinely cover this range."
+        f"({MODEL_LENGTH} points); existing short-axis sources follow the repository's in-memory noise-tail policy."
     )
 
     print("===== Dataset =====")
@@ -923,9 +957,33 @@ def main() -> None:
         "use_boundary_specific_mixture_gate": bool(
             args.boundary_specific_mixture_gate
         ),
+        "use_local_quantitative_branch": bool(args.local_quantitative_branch),
+        "local_window_centers": [
+            [float(peak["center_cm-1"]) for peak in CHEMISTRY_CORE_PEAKS[pesticide]]
+            for pesticide in PESTICIDES
+        ] if args.local_quantitative_branch else None,
+        "local_half_width": args.local_half_width_cm1,
+        "local_hidden": args.local_hidden,
+        "local_strength": args.local_strength,
     }
+    if not args.local_quantitative_branch:
+        for key in ("use_local_quantitative_branch", "local_window_centers", "local_half_width", "local_hidden", "local_strength"):
+            model_config.pop(key)
     model = TransformerClassifyRegress_sep(**model_config)
     model.set_peak_prior(torch.from_numpy(peak_prior))
+    local_normalization_summary = None
+    if model.local_quantitative_branch is not None:
+        train_intensity, train_masks, fit_audit = collect_real_training_intensities(train_dataset)
+        local_normalization_summary = model.local_quantitative_branch.fit_normalization(
+            torch.from_numpy(train_intensity), torch.from_numpy(train_masks)
+        )
+        local_normalization_summary["audit"] = fit_audit
+        with (output_directory / "local_quantitative_state.json").open("w", encoding="utf-8") as handle:
+            json.dump(local_normalization_summary, handle, ensure_ascii=False, indent=2)
+        print("===== T3.13 local quantitative normalization =====")
+        print(json.dumps(fit_audit, ensure_ascii=False))
+        print(f"native windows +/-{args.local_half_width_cm1} cm^-1; hidden={args.local_hidden}; strength={args.local_strength}")
+        del train_intensity, train_masks
     model = model.to(device)
 
     if args.concentration_head_mode == "ordinal":
@@ -968,6 +1026,7 @@ def main() -> None:
     best_validation_loss = math.inf
     best_ordinal_accuracy = -math.inf
     best_ordinal_exact = -math.inf
+    ordinal_epochs_without_improvement = 0
     epochs_without_improvement = 0
 
     training_config = vars(args).copy()
@@ -981,10 +1040,10 @@ def main() -> None:
         "include_generated": bool(args.include_generated),
         "maximum_generated_per_condition": args.maximum_generated_per_condition,
         "split": "12/4/4 within each source file",
-        "model_axis": "600-2500 cm^-1 full range, 1901 points",
+        "model_axis": "600-2500 cm^-1 model axis, 1901 points",
         "source_axis_handling": (
-            "every real source must genuinely cover 600-2500 cm^-1; missing tails "
-            "are rejected instead of zero-padded or extrapolated"
+            "genuine full-range sources retained; short-axis tails completed in memory "
+            "using deterministic background-matched noise (existing Dataset policy)"
         ),
         "axis_label_audit": axis_audit,
         "query_attention_mode": args.query_attention_mode,
@@ -1012,11 +1071,14 @@ def main() -> None:
         ),
         "peak_prior_summary": peak_prior_summary,
         "target_mode": train_dataset.repository.target_mode,
+        "local_quantitative_normalization": local_normalization_summary,
     }
 
     training_config["ordinal_loss_mode"] = (
         args.ordinal_loss_mode
     )
+    training_config["ordinal_decoding"] = args.ordinal_decoding
+    training_config["checkpoint_selection"] = args.checkpoint_selection
 
     for epoch in range(1, args.epochs + 1):
         if args.loss_weighting == "dwa":
@@ -1045,6 +1107,7 @@ def main() -> None:
             regression_weight=reg_weight,
             optimizer=optimizer,
             max_batches=args.max_train_batches,
+            ordinal_decoding=args.ordinal_decoding,
         )
         class_history.append(train_metrics["loss_class"])
         reg_history.append(train_metrics["loss_reg"])
@@ -1064,6 +1127,7 @@ def main() -> None:
             regression_weight=reg_weight,
             optimizer=None,
             max_batches=args.max_validation_batches,
+            ordinal_decoding=args.ordinal_decoding,
         )
 
         validation_loss = validation_metrics["loss_total"]
@@ -1125,7 +1189,8 @@ def main() -> None:
             concentration_map=concentration_map,
         )
 
-        if validation_loss < best_validation_loss:
+        loss_improved = validation_loss < best_validation_loss
+        if loss_improved:
             best_validation_loss = validation_loss
             epochs_without_improvement = 0
             save_checkpoint(
@@ -1143,6 +1208,7 @@ def main() -> None:
         else:
             epochs_without_improvement += 1
 
+        ordinal_selected_improved = False
         if args.concentration_head_mode == "ordinal":
             current_ordinal_accuracy = float(
                 validation_metrics[
@@ -1177,6 +1243,7 @@ def main() -> None:
                 ordinal_improved
                 or ordinal_tied_but_exact_improved
             ):
+                ordinal_selected_improved = True
                 best_ordinal_accuracy = (
                     current_ordinal_accuracy
                 )
@@ -1201,6 +1268,15 @@ def main() -> None:
                     concentration_map=concentration_map,
                 )
 
+        if args.checkpoint_selection == "ordinal":
+            # The loss policy above remains legacy-compatible; ordinal selection
+            # has its own counter and must not inherit a loss-based reset.
+            if ordinal_selected_improved:
+                ordinal_epochs_without_improvement = 0
+            else:
+                ordinal_epochs_without_improvement += 1
+            epochs_without_improvement = ordinal_epochs_without_improvement
+
         if epochs_without_improvement >= args.early_stopping_patience:
             print(
                 f"Early stopping at epoch {epoch}: no validation improvement for "
@@ -1215,13 +1291,17 @@ def main() -> None:
                 "model_config": model_config,
                 "training_config": training_config,
                 "data_config": data_config,
+                "checkpoint_selection": args.checkpoint_selection,
+                "ordinal_decoding": args.ordinal_decoding,
+                "best_ordinal_accuracy": best_ordinal_accuracy if args.concentration_head_mode == "ordinal" else None,
+                "best_ordinal_exact": best_ordinal_exact if args.concentration_head_mode == "ordinal" else None,
             },
             handle,
             ensure_ascii=False,
             indent=2,
         )
 
-    best_checkpoint = checkpoint_directory / "best.pt"
+    best_checkpoint = checkpoint_directory / ("best_ordinal.pt" if args.checkpoint_selection == "ordinal" else "best.pt")
     print(f"Training complete. Best checkpoint: {best_checkpoint}")
 
     if not args.skip_final_evaluation:

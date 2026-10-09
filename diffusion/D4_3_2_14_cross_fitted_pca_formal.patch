@@ -1,0 +1,951 @@
+--- a/src/conditional_prior_residual.py
++++ b/src/conditional_prior_residual.py
+@@ -111,8 +111,22 @@
+             raise ValueError("D4.2要求启用broad_local_residual。")
+         self.prior_configuration = dict(prior_configuration)
+         self.broad_local_configuration = dict(broad_local_configuration)
++
++        cross_fit = self.prior_configuration.get("training_cross_fit", {}) or {}
++        if not isinstance(cross_fit, dict):
++            raise TypeError("prior_residual.training_cross_fit必须是字典。")
++        self.training_cross_fit_enabled = bool(cross_fit.get("enabled", False))
++        self.training_cross_fit_method = str(
++            cross_fit.get("method", "leave_one_out")
++        ).strip().lower()
++        if self.training_cross_fit_enabled and self.training_cross_fit_method != "leave_one_out":
++            raise ValueError("D4.3.2.14目前只支持training_cross_fit.method=leave_one_out。")
++
+         self.model_axis: np.ndarray | None = None
+         self.entries: dict[str, ConditionalPriorEntry] = {}
++        # 仅训练数据准备阶段使用；绝不保存进checkpoint。
++        self._cross_fitted_reference_priors: np.ndarray | None = None
++        self._cross_fitted_training_indices: np.ndarray | None = None
+ 
+     @staticmethod
+     def _condition_array(
+@@ -154,6 +168,14 @@
+ 
+         self.model_axis = axis.copy()
+         self.entries = {}
++        cross_fitted_references = (
++            np.zeros_like(values, dtype=np.float32)
++            if self.training_cross_fit_enabled else None
++        )
++        cross_fitted_members = (
++            np.zeros(values.shape[0], dtype=bool)
++            if self.training_cross_fit_enabled else None
++        )
+         all_conditions = sorted(set(str(value) for value in conditions))
+         for condition_id in all_conditions:
+             group_train = train[conditions[train] == condition_id]
+@@ -169,10 +191,36 @@
+             training_values = values[group_train, :valid_length]
+             condition_axis = axis[:valid_length]
+ 
++            # Final PCA：全部training拟合，保存checkpoint并用于val/test/generation。
+             outer = _build_outer(self.prior_configuration)
+             outer.fit(training_values, raman_shift=condition_axis)
+-            reference = outer.reference_priors_for_spectra(training_values)
+-            raw_residuals = (training_values - reference).astype(np.float32)
++
++            if self.training_cross_fit_enabled:
++                if group_train.size < 5:
++                    raise ValueError(
++                        f"条件{condition_id}只有{group_train.size}条训练光谱；"
++                        "leave-one-out cross-fit至少要求5条。"
++                    )
++                reference_for_training = np.zeros_like(training_values, dtype=np.float32)
++                for held_position in range(group_train.size):
++                    keep = np.ones(group_train.size, dtype=bool)
++                    keep[held_position] = False
++                    temporary_outer = _build_outer(self.prior_configuration)
++                    temporary_outer.fit(training_values[keep], raman_shift=condition_axis)
++                    reference_for_training[held_position:held_position + 1] = (
++                        temporary_outer.reference_priors_for_spectra(
++                            training_values[held_position:held_position + 1]
++                        )
++                    )
++                assert cross_fitted_references is not None
++                assert cross_fitted_members is not None
++                cross_fitted_references[group_train, :valid_length] = reference_for_training
++                cross_fitted_members[group_train] = True
++            else:
++                reference_for_training = outer.reference_priors_for_spectra(training_values)
++
++            # broad/local也必须在OOF raw residual上拟合。
++            raw_residuals = (training_values - reference_for_training).astype(np.float32)
+             broad_local = BroadLocalResidualDecomposer.from_configuration(
+                 self.broad_local_configuration
+             )
+@@ -183,6 +231,17 @@
+                 outer=outer,
+                 broad_local=broad_local,
+             )
++
++        if self.training_cross_fit_enabled:
++            assert cross_fitted_references is not None
++            assert cross_fitted_members is not None
++            if not np.array_equal(np.flatnonzero(cross_fitted_members), np.sort(train)):
++                raise RuntimeError("cross-fit训练索引缓存与training_indices不一致。")
++            self._cross_fitted_reference_priors = cross_fitted_references
++            self._cross_fitted_training_indices = np.sort(train)
++        else:
++            self._cross_fitted_reference_priors = None
++            self._cross_fitted_training_indices = None
+         return self
+ 
+     def _entry(self, condition_id: str) -> ConditionalPriorEntry:
+@@ -190,6 +249,57 @@
+         if key not in self.entries:
+             raise KeyError(f"条件先验库中不存在{key!r}。")
+         return self.entries[key]
++
++    def training_cross_fit_metadata(self) -> dict[str, Any]:
++        return {
++            "enabled": bool(getattr(self, "training_cross_fit_enabled", False)),
++            "method": str(getattr(self, "training_cross_fit_method", "leave_one_out")),
++        }
++
++    def transform_training_aware_with_conditioning(
++        self, spectra: np.ndarray, *, valid_masks: np.ndarray,
++        condition_ids: Sequence[str], training_indices: Sequence[int],
++    ) -> tuple[np.ndarray, np.ndarray]:
++        """Training rows use LOO PCA; val/test rows use final PCA."""
++        result, conditioning = self.transform_with_conditioning(
++            spectra, valid_masks=valid_masks, condition_ids=condition_ids
++        )
++        if not bool(getattr(self, "training_cross_fit_enabled", False)):
++            return result, conditioning
++        if self._cross_fitted_reference_priors is None or self._cross_fitted_training_indices is None:
++            raise RuntimeError("cross-fit已启用，但LOO reference缓存不存在。")
++        values = _as_2d_finite(spectra, "spectra")
++        masks = _as_2d_finite(valid_masks, "valid_masks")
++        conditions = self._condition_array(condition_ids, values.shape[0])
++        train = np.asarray(training_indices, dtype=np.int64).reshape(-1)
++        if not np.array_equal(np.sort(train), self._cross_fitted_training_indices):
++            raise ValueError("training_indices与fit()时不一致。")
++        references = self._cross_fitted_reference_priors
++        for condition_id in sorted(set(str(v) for v in conditions[train])):
++            entry = self._entry(condition_id)
++            indices = train[conditions[train] == condition_id]
++            active = values[indices, :entry.valid_length]
++            reference = references[indices, :entry.valid_length]
++            for index in indices:
++                if _valid_prefix_length(masks[index]) != entry.valid_length:
++                    raise ValueError(f"条件{condition_id}的training光谱掩码不一致。")
++            raw = (active - reference).astype(np.float32)
++            broad, _ = entry.broad_local.split_raw_residuals(raw)
++            result[indices, :entry.valid_length] = entry.broad_local.transform_raw_residuals(raw)
++            conditioning[indices, :entry.valid_length] = reference + broad
++        if not np.isfinite(result).all() or not np.isfinite(conditioning).all():
++            raise RuntimeError("cross-fit训练变换产生NaN或无穷值。")
++        return result, conditioning
++
++    def transform_training_aware(
++        self, spectra: np.ndarray, *, valid_masks: np.ndarray,
++        condition_ids: Sequence[str], training_indices: Sequence[int],
++    ) -> np.ndarray:
++        transformed, _ = self.transform_training_aware_with_conditioning(
++            spectra, valid_masks=valid_masks, condition_ids=condition_ids,
++            training_indices=training_indices,
++        )
++        return transformed
+ 
+     def transform(
+         self,
+@@ -507,6 +617,7 @@
+             "version": STATE_VERSION,
+             "enabled": True,
+             "model_axis": self.model_axis.tolist(),
++            "training_cross_fit": self.training_cross_fit_metadata(),
+             "number_of_conditions": len(self.entries),
+             "conditions": {
+                 key: {
+@@ -529,6 +640,17 @@
+         instance = cls.__new__(cls)
+         instance.prior_configuration = {}
+         instance.broad_local_configuration = {}
++        cross_fit_state = state.get("training_cross_fit", {}) or {}
++        if not isinstance(cross_fit_state, dict):
++            raise ValueError("checkpoint中的training_cross_fit无效。")
++        instance.training_cross_fit_enabled = bool(cross_fit_state.get("enabled", False))
++        instance.training_cross_fit_method = str(
++            cross_fit_state.get("method", "leave_one_out")
++        ).strip().lower()
++        if instance.training_cross_fit_enabled and instance.training_cross_fit_method != "leave_one_out":
++            raise ValueError("checkpoint包含不支持的training cross-fit方法。")
++        instance._cross_fitted_reference_priors = None
++        instance._cross_fitted_training_indices = None
+         instance.model_axis = np.asarray(state.get("model_axis"), dtype=np.float64)
+         if (
+             instance.model_axis.ndim != 1
+@@ -567,6 +689,7 @@
+         counts = [entry.number_of_training_spectra for entry in self.entries.values()]
+         return {
+             "number_of_conditions": len(self.entries),
++            "training_cross_fit": self.training_cross_fit_metadata(),
+             "valid_lengths": {
+                 str(length): lengths.count(length) for length in sorted(set(lengths))
+             },
+--- a/src/configuration_loader.py
++++ b/src/configuration_loader.py
+@@ -1077,6 +1077,66 @@
+         "pointwise_scale_floor_quantile"
+     ] = pointwise_floor_quantile
+ 
++    # ------------------------------------------------------------------
++    # D4.3.2.14 training-only PCA cross-fit
++    # ------------------------------------------------------------------
++
++    training_cross_fit = (
++        prior_residual.get(
++            "training_cross_fit",
++            {},
++        )
++        or {}
++    )
++
++    if not isinstance(
++        training_cross_fit,
++        dict,
++    ):
++        raise TypeError(
++            "prior_residual.training_cross_fit必须是字典。"
++        )
++
++    cross_fit_enabled = bool(
++        training_cross_fit.get(
++            "enabled",
++            False,
++        )
++    )
++
++    cross_fit_method = str(
++        training_cross_fit.get(
++            "method",
++            "leave_one_out",
++        )
++    ).strip().lower()
++
++    if (
++        cross_fit_enabled
++        and cross_fit_method != "leave_one_out"
++    ):
++        raise ValueError(
++            "D4.3.2.14目前只支持"
++            "prior_residual.training_cross_fit."
++            "method=leave_one_out。"
++        )
++
++    if (
++        cross_fit_enabled
++        and prior_method != "pca_reconstruction"
++    ):
++        raise ValueError(
++            "prior_residual.training_cross_fit"
++            "要求prior_method=pca_reconstruction。"
++        )
++
++    prior_residual[
++        "training_cross_fit"
++    ] = {
++        "enabled": cross_fit_enabled,
++        "method": cross_fit_method,
++    }
++
+     configuration[
+         "prior_residual"
+     ] = prior_residual
+--- a/scripts/start_ddpm_training.py
++++ b/scripts/start_ddpm_training.py
+@@ -1790,10 +1790,11 @@
+             (
+                 spectra_for_model,
+                 prior_conditionings_full,
+-            ) = conditional_prior_residual_bank.transform_with_conditioning(
++            ) = conditional_prior_residual_bank.transform_training_aware_with_conditioning(
+                 normalized_full_spectra,
+                 valid_masks=valid_masks_on_model_axis,
+                 condition_ids=condition_ids_on_spectra,
++                training_indices=training_indices,
+             )
+             local_inverse_slopes_full = (
+                 conditional_prior_residual_bank
+@@ -1804,10 +1805,11 @@
+                 )
+             )
+         else:
+-            spectra_for_model = conditional_prior_residual_bank.transform(
++            spectra_for_model = conditional_prior_residual_bank.transform_training_aware(
+                 normalized_full_spectra,
+                 valid_masks=valid_masks_on_model_axis,
+                 condition_ids=condition_ids_on_spectra,
++                training_indices=training_indices,
+             )
+         training_scaled_residuals = spectra_for_model[training_indices]
+         conditional_prior_residual_state = (
+@@ -1815,6 +1817,11 @@
+         )
+         summary = conditional_prior_residual_bank.summary()
+         print("\n===== D4.2 条件PCA+broad/local先验残差 =====")
++        print(
++            "training PCA cross-fit："
++            f"{summary['training_cross_fit']['enabled']}；"
++            f"method={summary['training_cross_fit']['method']}"
++        )
+         print(
+             f"条件先验数量：{summary['number_of_conditions']}；"
+             f"共享DDPM训练光谱：{summary['total_training_spectra']}"
+--- a/src/ddpm_trainer.py
++++ b/src/ddpm_trainer.py
+@@ -722,6 +722,7 @@
+             should_log = (
+                 step % self.log_every_steps == 0
+                 or step == self.total_training_steps
++                or should_validate
+             )
+ 
+             if should_log:
+--- a/scripts/generate_conditional_spectra.py
++++ b/scripts/generate_conditional_spectra.py
+@@ -348,7 +348,22 @@
+             or {}
+         ).get("enabled", False)
+     )
+-    if prior_conditioning_enabled:
++    cross_fit_metadata = (
++        conditional_prior_bank.training_cross_fit_metadata()
++        if conditional_prior_bank is not None
++        else {"enabled": False, "method": "leave_one_out"}
++    )
++    require_cross_fit_checkpoint = bool(
++        generation.get("require_training_cross_fit_checkpoint", False)
++    )
++    if require_cross_fit_checkpoint and not bool(cross_fit_metadata["enabled"]):
++        raise RuntimeError(
++            "当前生成配置要求D4.3.2.14 cross-fit checkpoint，"
++            "但所加载checkpoint未启用training cross-fit。"
++        )
++    if bool(cross_fit_metadata["enabled"]):
++        stage_name = "D4.3.2.14交叉拟合PCA先验残差"
++    elif prior_conditioning_enabled:
+         stage_name = "D4.3.2.10先验条件化残差"
+     elif diversity_enabled:
+         stage_name = "D4.3条件感知多样性先验残差"
+@@ -365,6 +380,11 @@
+         "本次实际抽取的先验谱输入U-Net："
+         f"{prior_conditioning_enabled}"
+     )
++    print(
++        "training PCA cross-fit checkpoint："
++        f"{cross_fit_metadata['enabled']}；"
++        f"method={cross_fit_metadata['method']}"
++    )
+ 
+     manifest = {
+         "schema_version": "d4.2_source_named_generation_v1",
+@@ -374,6 +394,8 @@
+         "number_of_spectra_per_condition": number,
+         "requested_condition": requested,
+         "prior_spectrum_conditioning_enabled": prior_conditioning_enabled,
++        "training_cross_fit": cross_fit_metadata,
++        "require_training_cross_fit_checkpoint": require_cross_fit_checkpoint,
+         "pca_score_clip_runtime_override": score_clip_information,
+         "tail_calibration_configuration": (
+             tail_configuration if tail_enabled else None
+--- a/tests/test_conditional_prior_residual.py
++++ b/tests/test_conditional_prior_residual.py
+@@ -273,3 +273,72 @@
+     )
+     assert generated.shape == (3, 12)
+     assert np.isfinite(generated).all()
++
++def test_d4_3_2_14_cross_fit_disabled_preserves_legacy_transform() -> None:
++    spectra, masks, conditions, train, axis = _data()
++    prior, broad = _configuration()
++    prior = dict(prior)
++    prior["training_cross_fit"] = {"enabled": False, "method": "leave_one_out"}
++    bank = ConditionalPriorResidualBank(
++        prior_configuration=prior, broad_local_configuration=broad,
++    ).fit(spectra, valid_masks=masks, condition_ids=conditions,
++          training_indices=train, raman_shift=axis)
++    legacy_r, legacy_b = bank.transform_with_conditioning(
++        spectra, valid_masks=masks, condition_ids=conditions)
++    aware_r, aware_b = bank.transform_training_aware_with_conditioning(
++        spectra, valid_masks=masks, condition_ids=conditions, training_indices=train)
++    np.testing.assert_allclose(aware_r, legacy_r, rtol=0.0, atol=0.0)
++    np.testing.assert_allclose(aware_b, legacy_b, rtol=0.0, atol=0.0)
++
++
++def test_d4_3_2_14_leave_one_out_training_transform_is_out_of_fold() -> None:
++    spectra, masks, conditions, train, axis = _data()
++    prior, broad = _configuration()
++    prior = dict(prior)
++    prior["training_cross_fit"] = {"enabled": True, "method": "leave_one_out"}
++    bank = ConditionalPriorResidualBank(
++        prior_configuration=prior, broad_local_configuration=broad,
++    ).fit(spectra, valid_masks=masks, condition_ids=conditions,
++          training_indices=train, raman_shift=axis)
++    final_r, final_b = bank.transform_with_conditioning(
++        spectra, valid_masks=masks, condition_ids=conditions)
++    aware_r, aware_b = bank.transform_training_aware_with_conditioning(
++        spectra, valid_masks=masks, condition_ids=conditions, training_indices=train)
++    train = np.asarray(train, dtype=np.int64)
++    non_train = np.asarray(sorted(set(range(spectra.shape[0])) - set(train.tolist())), dtype=np.int64)
++    if non_train.size:
++        np.testing.assert_allclose(aware_r[non_train], final_r[non_train], rtol=0.0, atol=0.0)
++        np.testing.assert_allclose(aware_b[non_train], final_b[non_train], rtol=0.0, atol=0.0)
++    assert float(np.max(np.abs(aware_b[train] - final_b[train]))) > 1.0e-7
++    for index in train:
++        entry = bank._entry(str(conditions[index]))
++        n = entry.valid_length
++        local = entry.broad_local.inverse_local_transform(aware_r[index:index+1, :n])
++        restored = aware_b[index:index+1, :n] + local
++        np.testing.assert_allclose(restored, spectra[index:index+1, :n], rtol=2e-5, atol=2e-6)
++
++
++def test_d4_3_2_14_checkpoint_final_prior_and_legacy_compatibility() -> None:
++    spectra, masks, conditions, train, axis = _data()
++    prior, broad = _configuration()
++    prior = dict(prior)
++    prior["training_cross_fit"] = {"enabled": True, "method": "leave_one_out"}
++    bank = ConditionalPriorResidualBank(
++        prior_configuration=prior, broad_local_configuration=broad,
++    ).fit(spectra, valid_masks=masks, condition_ids=conditions,
++          training_indices=train, raman_shift=axis)
++    state = bank.state_dict()
++    assert state["training_cross_fit"] == {"enabled": True, "method": "leave_one_out"}
++    assert "_cross_fitted_reference_priors" not in state
++    restored = ConditionalPriorResidualBank.from_state_dict(state)
++    assert restored.training_cross_fit_metadata()["enabled"] is True
++    sampled = restored.sample_generation_conditioning(
++        3, condition_id=str(conditions[int(train[0])]),
++        prior_random_generator=np.random.default_rng(2026),
++        broad_random_generator=np.random.default_rng(2027))
++    assert sampled.shape[0] == 3 and np.isfinite(sampled).all()
++    legacy_state = dict(state)
++    legacy_state.pop("training_cross_fit")
++    legacy = ConditionalPriorResidualBank.from_state_dict(legacy_state)
++    assert legacy.training_cross_fit_metadata() == {"enabled": False, "method": "leave_one_out"}
++
+--- /dev/null
++++ b/config/ddpm_training_d4_3_2_14_cross_fitted_pca_medium.yaml
+@@ -0,0 +1,518 @@
++# D4.3.2.14 Cross-Fitted PCA Training Residual
++# 从头8-epoch medium对照；不要resume D4.3.2.13。
++project:
++  name: d4_3_2_14_cross_fitted_pca_medium
++  random_seed: 2026
++diagnostic_overfit:
++  enabled: false
++  spectrum_index: 0
++  repeat_count: 50
++data:
++  input_directory: data/input
++  recursive: true
++  allowed_extensions:
++  - .xlsx
++  - .xls
++  sheet_name: 0
++  header_row: 0
++  raman_shift_column: 0
++  intensity_start_column: 1
++  require_same_raman_shift_axis: false
++  raman_shift_tolerance: 1.0e-06
++  raman_range_tolerance: 1.0
++  original_spectrum_length: auto
++  model_spectrum_length: auto
++  length_adaptation: raman_axis_interpolation
++  padding_mode: right_zero_padding
++  padding_value: 0.0
++  split_unit: fixed_spectra_within_source_file
++  fixed_spectrum_split:
++    train_count: 12
++    validation_count: 4
++    test_count: 4
++  train_ratio: 0.6
++  validation_ratio: 0.2
++  test_ratio: 0.2
++  shuffle: false
++  raman_axis_mode: union_with_valid_mask
++normalization:
++  enabled: true
++  method: global_minmax
++  fit_on: train_only
++  target_min: -1.0
++  target_max: 1.0
++  clip: false
++  epsilon: 1.0e-12
++  save_in_checkpoint: true
++prior_residual:
++  enabled: true
++  prior_method: pca_reconstruction
++  pca_explained_variance_ratio: 0.95
++  pca_max_components: 6
++  pca_sampling_strategy: independent_truncated_gaussian_scores
++  pca_score_clip_standard_deviations: 1.5
++  residual_normalization: robust_asinh
++  residual_quantile: 99.5
++  target_abs_max: 1.0
++  epsilon: 1.0e-08
++  mad_scale_factor: 1.4826
++  pointwise_scale_floor_quantile: 10.0
++  training_cross_fit:
++    enabled: true
++    method: leave_one_out
++broad_local_residual:
++  enabled: true
++  broad_filter:
++    method: gaussian
++    sigma_cm1: 7.0
++    truncate: 4.0
++  broad_prior:
++    method: pca
++    pca_explained_variance_ratio: 0.95
++    pca_max_components: 6
++    sampling_strategy: independent_truncated_gaussian_scores
++    score_clip_standard_deviations: 1.5
++  local_normalization:
++    method: robust_asinh
++    residual_quantile: 99.5
++    target_abs_max: 1.0
++  epsilon: 1.0e-08
++physics_constraints:
++  enabled: false
++peak_derivative_constraints:
++  enabled: false
++  reference_baseline_sigma_cm1: 30.0
++  reference_peak_smoothing_sigma_cm1: 2.0
++  minimum_relative_prominence: 0.06
++  minimum_peak_distance_cm1: 12.0
++  maximum_peak_count: 10
++  edge_exclusion_cm1: 24.0
++  peak_core_half_width_cm1: 18.0
++  transition_width_cm1: 6.0
++  derivative_scale_quantile: 95.0
++  minimum_derivative_scale: 0.0001
++  smooth_l1_beta: 0.25
++  timestep_weight_power: 1.0
++  minimum_timestep_weight: 0.0
++  total_weight: 1.0
++  maximum_total_ratio_to_ddpm: 0.05
++  numerical_safety_limit: 12.0
++  epsilon: 1.0e-08
++relative_peak_intensity_constraints:
++  enabled: false
++  reference_baseline_sigma_cm1: 30.0
++  reference_peak_smoothing_sigma_cm1: 2.0
++  minimum_relative_prominence: 0.06
++  minimum_peak_distance_cm1: 12.0
++  maximum_peak_count: 10
++  minimum_peak_count: 2
++  edge_exclusion_cm1: 24.0
++  peak_half_width_cm1: 12.0
++  baseline_inner_half_width_cm1: 18.0
++  baseline_outer_half_width_cm1: 30.0
++  minimum_relative_height_fraction: 0.03
++  log_ratio_margin_iqr: 1.5
++  minimum_log_ratio_width: 0.08
++  smooth_l1_beta: 0.25
++  timestep_weight_power: 1.0
++  minimum_timestep_weight: 0.0
++  total_weight: 1.0
++  maximum_total_ratio_to_ddpm: 0.05
++  numerical_safety_limit: 12.0
++  epsilon: 1.0e-08
++peak_parameter_constraints:
++  enabled: false
++  reference_baseline_sigma_cm1: 30.0
++  reference_peak_smoothing_sigma_cm1: 2.0
++  minimum_relative_prominence: 0.06
++  minimum_peak_distance_cm1: 12.0
++  maximum_peak_count: 10
++  minimum_peak_count: 3
++  edge_exclusion_cm1: 30.0
++  maximum_measurement_half_window_cm1: 18.0
++  minimum_measurement_half_window_cm1: 4.0
++  neighbor_window_fraction: 0.45
++  minimum_median_peak_height_fraction: 0.05
++  softplus_temperature_fraction: 0.05
++  minimum_softplus_temperature: 0.0001
++  lower_quantile: 10.0
++  upper_quantile: 90.0
++  position_margin_mad: 0.5
++  width_margin_mad: 0.5
++  minimum_position_half_range_cm1: 1.0
++  minimum_width_half_range_cm1: 1.0
++  position_scale_cm1: 1.0
++  width_scale_cm1: 2.0
++  position_loss_weight: 1.0
++  width_loss_weight: 0.5
++  smooth_l1_beta: 0.5
++  maximum_active_timestep_fraction: 0.5
++  timestep_weight_power: 1.0
++  minimum_timestep_weight: 0.0
++  total_weight: 0.1
++  maximum_total_ratio_to_ddpm: 0.02
++  numerical_safety_limit: 12.0
++  epsilon: 1.0e-08
++diversity_constraints:
++  enabled: true
++  strategy: low_noise_pairwise_residual_geometry
++  total_weight: 0.05
++  maximum_total_ratio_to_ddpm: 0.05
++  epsilon: 1.0e-08
++  condition_grouping:
++    samples_per_condition: 4
++    shared_timestep: true
++  low_noise_gate:
++    minimum_alpha_cumprod: 0.5
++    minimum_samples: 4
++  high_frequency_filter:
++    smoothing_sigma_points: 1.0
++    kernel_truncate: 3.0
++    distance_reference_quantile: 50.0
++    correlation_reference_quantile: 90.0
++  pairwise_distance:
++    enabled: true
++    metric: whitened_l2
++    penalty_mode: floor_only
++    minimum_distance_ratio: 0.95
++    maximum_distance_ratio: 1.25
++    transition_fraction: 0.2
++    weight: 1.0
++  pairwise_correlation:
++    enabled: true
++    maximum_excess_correlation: 0.02
++    transition_fraction: 0.2
++    weight: 0.5
++  pointwise_variance_floor:
++    enabled: true
++    penalty_mode: floor_only
++    active_std_quantile: 20.0
++    minimum_std_ratio: 0.9
++    maximum_std_ratio: 1.25
++    reference_std_floor_fraction: 0.25
++    weight: 0.5
++  peak_morphology:
++    enabled: false
++  quality_fidelity:
++    enabled: true
++    total_weight: 0.1
++    maximum_total_ratio_to_ddpm: 0.1
++    independent_full_spectrum_budget:
++      enabled: true
++      total_weight: 0.1
++      maximum_total_ratio_to_ddpm: 0.05
++    high_noise_sampling:
++      enabled: true
++      sampling_probability: 0.25
++      minimum_timestep_fraction: 0.75
++    high_noise_weighting:
++      enabled: true
++      maximum_weight: 2.25
++      power: 1.5
++    first_derivative:
++      enabled: true
++      smooth_l1_beta: 0.05
++      weight: 0.4
++    multiscale_shape:
++      enabled: true
++      kernel_sizes:
++      - 5
++      - 15
++      - 31
++      smooth_l1_beta: 0.05
++      weight: 0.4
++    condition_multiscale_variance_floor:
++      enabled: true
++      kernel_sizes:
++      - 5
++      - 15
++      - 31
++      minimum_group_size: 4
++      minimum_std_ratio: 0.9
++      active_std_quantile: 20.0
++      maximum_timestep_fraction: 0.5
++      smooth_l1_beta: 0.05
++      weight: 0.5
++    condition_derivative_variance_floor:
++      enabled: true
++      smoothing_kernel_sizes:
++      - 5
++      - 15
++      minimum_group_size: 4
++      minimum_std_ratio: 0.92
++      active_std_quantile: 30.0
++      maximum_timestep_fraction: 0.5
++      smooth_l1_beta: 0.05
++      weight: 0.5
++    condition_mean:
++      enabled: true
++      smooth_l1_beta: 0.05
++      minimum_group_size: 4
++      weight: 1.0
++    condition_pointwise_envelope:
++      enabled: true
++      lower_quantile: 0.05
++      upper_quantile: 0.95
++      iqr_margin: 0.75
++      smooth_l1_beta: 0.05
++      minimum_group_size: 4
++      weight: 1.0
++    full_spectrum_tail_distribution:
++      enabled: true
++      piecewise_probabilities:
++      - 0.01
++      - 0.1
++      - 0.5
++      - 0.9
++      - 0.99
++      segment_weights:
++      - 1.5
++      - 0.5
++      - 0.5
++      - 1.5
++      minimum_segment_span_ratio: 0.9
++      maximum_segment_span_ratio: 1.1
++      maximum_timestep_fraction: 0.5
++      minimum_group_size: 4
++      pointwise_scale_floor_quantile: 10.0
++      reconstruction_smooth_l1_beta: 0.01
++      span_smooth_l1_beta: 0.02
++      reconstruction_weight: 0.75
++      span_weight: 1.0
++      short_axis_maximum_points: 1500
++      short_axis_weight_multiplier: 1.4
++      epsilon: 1.0e-06
++feature_peak_residual_limiter:
++  enabled: false
++local_peak_distribution_constraints:
++  enabled: false
++model:
++  channels: 1
++  model_dimension: 32
++  dimension_multipliers:
++  - 1
++  - 2
++  - 4
++  dropout: 0.05
++  self_condition: false
++  diffusion_timesteps: 200
++  sampling_timesteps: 100
++  objective: pred_x0
++  beta_schedule: cosine
++  ddim_sampling_eta: 0.0
++  auto_normalize: false
++diffusion:
++  diffusion_steps: 200
++  sampling_steps: 100
++  objective: pred_x0
++  beta_schedule: cosine
++  ddim_sampling_eta: 0.0
++  auto_normalize: false
++  loss_weighting: uniform
++  residual_aware_loss:
++    enabled: false
++training:
++  device: cuda
++  batch_size: 8
++  number_of_epochs: 8
++  learning_rate: 0.0001
++  weight_decay: 0.0
++  number_of_workers: 0
++  pin_memory: true
++  drop_last: false
++  validate_every_epochs: 1
++  save_every_epochs: 5
++  log_every_batches: 10
++  gradient_accumulation_steps: 1
++  maximum_gradient_norm: 1.0
++  use_mixed_precision: false
++  ema_decay: 0.995
++  ema_update_every: 1
++  maximum_validation_batches: 0
++  validation_random_seed: 2026001
++output:
++  output_directory: outputs/experiments/d4_3_2_14_cross_fitted_pca_medium
++  checkpoint_directory: outputs/experiments/d4_3_2_14_cross_fitted_pca_medium/checkpoints
++  log_directory: outputs/experiments/d4_3_2_14_cross_fitted_pca_medium/logs
++  generated_spectrum_directory: outputs/experiments/d4_3_2_14_cross_fitted_pca_medium/generated
++  preview_plot_directory: outputs/experiments/d4_3_2_14_cross_fitted_pca_medium/plots
++  latest_checkpoint_name: latest.pt
++  best_checkpoint_name: best.pt
++  training_log_name: training_log.csv
++  split_assignment_name: split_assignment.csv
++generation:
++  number_of_spectra: 2000
++  batch_size: 10
++  model_source: ema
++  crop_to_original_length: true
++  inverse_normalize: true
++  variation_scale: 1.0
++  pca_score_clip_override_standard_deviations: 2.5
++  mean_fidelity_calibration:
++    enabled: true
++    standard_error_multiplier: 1.96
++    correction_strength: 0.35
++    maximum_correction_iqr_fraction: 0.25
++    minimum_maximum_correction_intensity: 1.0
++    maximum_modified_raman_fraction: 1.0
++  pca_spread_calibration:
++    enabled: true
++    maximum_components: 6
++    explained_variance_ratio: 0.95
++    minimum_component_variance_fraction: 0.01
++    minimum_component_std_ratio: 0.88
++    maximum_scale_factor: 1.35
++    minimum_pairwise_mse_ratio: 0.88
++    maximum_global_scale_factor: 1.3
++    maximum_component_std_ratio_after_global: 1.0
++    pairwise_mse_pair_count: 10000
++    pairwise_mse_search_iterations: 24
++    maximum_correction_range_fraction: 0.12
++    minimum_generated_count: 20
++    epsilon: 1.0e-12
++  tail_calibration:
++    enabled: true
++    strategy: oracle_piecewise_quantile
++    piecewise_probabilities:
++    - 0.01
++    - 0.1
++    - 0.5
++    - 0.9
++    - 0.99
++    minimum_segment_span_ratio: 0.92
++    maximum_segment_span_ratio: 1.08
++    correction_strength: 0.75
++    maximum_absolute_correction_z: 0.4
++    axis_profiles:
++      '1401':
++        correction_strength_multiplier: 1.1
++        maximum_absolute_correction_z_multiplier: 1.5
++      '1901':
++        correction_strength_multiplier: 0.75
++        maximum_absolute_correction_z_multiplier: 0.75
++    analyte_count_profiles:
++      '1':
++        correction_strength_multiplier: 1.0
++      '2':
++        correction_strength_multiplier: 1.15
++      '3':
++        correction_strength_multiplier: 0.9
++    minimum_postcalibration_pairwise_mse_ratio: 0.86
++    minimum_calibration_blend_factor: 0.6
++    diversity_guard_search_iterations: 20
++    diversity_guard_pair_count: 10000
++    lower_probability: 0.01
++    upper_probability: 0.99
++    lower_anchor_probability: 0.05
++    upper_anchor_probability: 0.95
++    oracle_reference_count: 4
++    oracle_bootstrap_repeats: 256
++    oracle_confidence: 0.975
++    minimum_allowed_tail_ratio: 1.15
++    minimum_trigger_tail_ratio: 1.5
++    minimum_compression_factor: 0.25
++    maximum_modified_fraction: 1.0
++    epsilon: 1.0e-12
++    random_seed: 2026
++  intensity_envelope_guard:
++    enabled: true
++    training_lower_quantile: 0.05
++    training_upper_quantile: 0.95
++    training_iqr_margin: 0.5
++    training_extrema_margin_iqr_fraction: 0.1
++    minimum_extrema_margin_intensity: 2.0
++    generated_lower_quantile: 0.025
++    generated_upper_quantile: 0.975
++    minimum_generated_count: 20
++    activation_maximum_intensity: -18.0
++    minimum_deficit_intensity: 5.0
++    minimum_excess_intensity: 5.0
++    softness_iqr_fraction: 0.05
++    minimum_softness_intensity: 0.25
++    maximum_softness_intensity: 2.0
++    enforce_training_global_extrema: true
++    maximum_modified_fraction: 0.05
++    condition_negative_background_quantile: 0.01
++    condition_negative_background_iqr_margin: 0.5
++    minimum_condition_negative_count: 64
++    local_negative_support_quantile: 0.1
++    minimum_negative_valley_contiguous_points: 3
++    severe_negative_depth_iqr_multiplier: 3.0
++  peak_diversity_evaluation:
++    baseline_sigma_cm1: 30.0
++    smoothing_sigma_cm1: 2.0
++    minimum_relative_prominence: 0.06
++    minimum_peak_distance_cm1: 12.0
++    maximum_peak_count: 10
++    edge_exclusion_cm1: 24.0
++    measurement_half_width_cm1: 12.0
++    minimum_position_std_cm1: 0.35
++  sampling_calibration:
++    enabled: false
++    non_peak_noise:
++      enabled: false
++      reference_smoothing_sigma_cm1: 30.0
++      minimum_relative_prominence: 0.06
++      minimum_peak_distance_cm1: 12.0
++      maximum_peak_count: 20
++      peak_protection_half_width_cm1: 24.0
++      transition_width_cm1: 6.0
++      fine_sigma_cm1: 1.5
++      broad_sigma_cm1: 7.0
++      broad_variation_scale: 0.46
++      middle_component_scale: 0.55
++      fine_component_scale: 0.85
++    raman_shift_jitter:
++      enabled: true
++      distribution: truncated_normal
++      standard_deviation_cm1: 1.2
++      maximum_absolute_shift_cm1: 3.0
++    peak_height_compression:
++      enabled: true
++      reference_smoothing_sigma_cm1: 30.0
++      reference_peak_smoothing_sigma_cm1: 2.0
++      minimum_relative_prominence: 0.06
++      minimum_peak_distance_cm1: 12.0
++      maximum_peak_count: 10
++      peak_half_width_cm1: 12.0
++      transition_width_cm1: 6.0
++      height_variation_scale: 0.9
++      minimum_batch_peak_median_height_fraction: 0.05
++      minimum_valid_height: 1.0e-08
++      minimum_factor: 0.65
++      maximum_factor: 1.25
++  training_guard:
++    enabled: true
++    reference_smoothing_sigma_cm1: 30.0
++    minimum_relative_prominence: 0.06
++    minimum_peak_distance_cm1: 12.0
++    maximum_peak_count: 20
++    metric_half_width_cm1: 24.0
++    position_margin_cm1: 2.0
++    bound_margin_iqr: 1.5
++    minimum_valid_training_count: 8
++    minimum_guard_peak_median_height_fraction: 0.05
++    check_peak_position: true
++    check_peak_height: true
++    check_peak_width: true
++    check_negative_minimum: true
++    maximum_peak_violation_fraction: 0.2
++  final_evaluation:
++    random_seed: 2026
++    pca_components: 6
++    bootstrap_repeats: 500
++    generated_pair_count: 50000
++    broad_sigma_cm1: 7.0
++  output_filename: generated_spectra.xlsx
++  output_formats:
++  - xlsx
++  require_training_cross_fit_checkpoint: true
++conditioning:
++  enabled: true
++  vector_size: 14
++  embedding_dimension: 32
++  injection: input_and_all_resnet_blocks_film
++  prior_spectrum:
++    enabled: true
++    source: condition_reconstruction_base
++    injection: input_channel

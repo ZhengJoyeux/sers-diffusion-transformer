@@ -1,0 +1,94 @@
+{
+  "status": "PASS",
+  "validation_date": "2026-10-09",
+  "scope": "Local CPU artificial spectra and uploaded reports only; no server real-data training",
+  "runtime": {
+    "python": "3.12.14",
+    "torch": "2.11.0+cpu",
+    "device": "cpu"
+  },
+  "final_check": {
+    "passed": 25,
+    "failed": 0,
+    "seconds": 49.478,
+    "entry": "run_t323.sh check with isolated fixtures"
+  },
+  "launcher_and_restore": {
+    "status": "PASS",
+    "artificial_data_only": true,
+    "check_entry_passed": true,
+    "restore_passed": true,
+    "original_files_unchanged": true,
+    "rejections": [
+      {
+        "target": "project/Dataset.py",
+        "returncode": 1
+      },
+      {
+        "target": "baseline/checkpoints/best_ordinal.pt",
+        "returncode": 1
+      },
+      {
+        "target": "weighted.pt",
+        "returncode": 1
+      },
+      {
+        "target": "project/data/real/artificial_0.csv",
+        "returncode": 1
+      },
+      {
+        "target": "previous/no_reference/checkpoints/recommended.pt",
+        "returncode": 1
+      }
+    ],
+    "server_training": false
+  },
+  "actual_training_and_inference_mains": {
+    "status": "PASS",
+    "scope": "Artificial spectra and artificial checkpoint only; actual main functions with explicit dataset mocks",
+    "training_mains": [
+      "protected",
+      "plain"
+    ],
+    "inference_mains": [
+      "protected",
+      "plain"
+    ],
+    "no_refits_during_inference": true,
+    "test_reads": 0,
+    "no_training_reads_during_inference": true,
+    "history_report_and_transitions": true,
+    "historical_comparison_table": true,
+    "server_real_training": false
+  },
+  "accepted_checkpoint_branch": "Unit test mocks adoption decision to validate accepted checkpoint save/reload; no claimed accuracy gain",
+  "invariants": [
+    "train-only reference buffers and normalization",
+    "reference matching masked in both actual experiment arms",
+    "zero correction exact anchor outputs",
+    "frozen base and unchanged classification probabilities",
+    "stable cumulative log-odds uses product not conditional H probability",
+    "finite extreme gradients",
+    "anchor-correct training mask only; anchor errors not preserved",
+    "absent drugs excluded",
+    "mixed-M loss only for true M in mixed training samples",
+    "plain gradients match old objective",
+    "both T3.22 regressions rejected by new guard",
+    "both smoke arms have equal parameters and cache",
+    "independent inference restores buffers without refitting",
+    "test spectra never evaluated",
+    "error transitions and historical comparison table generated"
+  ],
+  "python311_syntax": "PASS",
+  "shell_syntax": "PASS",
+  "old_T322_package_unchanged": true,
+  "original_Model_T317_source_byte_identity": true,
+  "parameters": {
+    "frozen": 1267823,
+    "trainable": 40742,
+    "total": 1308565
+  },
+  "real_training_executed": false,
+  "gpu_validation_executed": false,
+  "remaining_validation": "Server GPU anchor reproduction, protected/plain real-validation comparison and later independent test"
+}

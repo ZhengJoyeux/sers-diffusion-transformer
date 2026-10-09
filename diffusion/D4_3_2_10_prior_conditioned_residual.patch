@@ -1,0 +1,1134 @@
+diff --git a/config/ddpm_training_d4_3_formal.yaml b/config/ddpm_training_d4_3_formal.yaml
+index a7f51ac..d49b844 100644
+--- a/config/ddpm_training_d4_3_formal.yaml
++++ b/config/ddpm_training_d4_3_formal.yaml
+@@ -1,5 +1,7 @@
+ project:
+-  name: d4_3_2_9_joint_qq_peakshift_diversity_formal
++  # D4.3.2.10让残差U-Net显式接收本批次实际抽取的条件先验谱，
++  # 训练和生成统一学习p(local residual | sampled prior, condition)。
++  name: d4_3_2_10_prior_conditioned_residual_formal
+   random_seed: 2026
+ diagnostic_overfit:
+   enabled: false
+@@ -297,11 +299,11 @@ training:
+   maximum_validation_batches: 0
+   validation_random_seed: 2026001
+ output:
+-  output_directory: outputs/experiments/d4_3_2_9_joint_qq_peakshift_diversity_formal
+-  checkpoint_directory: outputs/experiments/d4_3_2_9_joint_qq_peakshift_diversity_formal/checkpoints
+-  log_directory: outputs/experiments/d4_3_2_9_joint_qq_peakshift_diversity_formal/logs
+-  generated_spectrum_directory: outputs/experiments/d4_3_2_9_joint_qq_peakshift_diversity_formal/generated
+-  preview_plot_directory: outputs/experiments/d4_3_2_9_joint_qq_peakshift_diversity_formal/plots
++  output_directory: outputs/experiments/d4_3_2_10_prior_conditioned_residual_formal
++  checkpoint_directory: outputs/experiments/d4_3_2_10_prior_conditioned_residual_formal/checkpoints
++  log_directory: outputs/experiments/d4_3_2_10_prior_conditioned_residual_formal/logs
++  generated_spectrum_directory: outputs/experiments/d4_3_2_10_prior_conditioned_residual_formal/generated
++  preview_plot_directory: outputs/experiments/d4_3_2_10_prior_conditioned_residual_formal/plots
+   latest_checkpoint_name: latest.pt
+   best_checkpoint_name: best.pt
+   training_log_name: training_log.csv
+@@ -469,3 +471,7 @@ conditioning:
+   vector_size: 14
+   embedding_dimension: 32
+   injection: input_and_all_resnet_blocks_film
++  prior_spectrum:
++    enabled: true
++    source: condition_reconstruction_base
++    injection: input_channel
+diff --git a/scripts/generate_conditional_spectra.py b/scripts/generate_conditional_spectra.py
+index f948fd0..51cd1dc 100644
+--- a/scripts/generate_conditional_spectra.py
++++ b/scripts/generate_conditional_spectra.py
+@@ -340,7 +340,17 @@ def main() -> None:
+         spectrum_root = spectrum_root.resolve()
+         plot_root = spectrum_root.parent / f"{spectrum_root.name}_plots"
+ 
+-    if diversity_enabled:
++    prior_conditioning_enabled = bool(
++        (
++            (checkpoint_configuration.get("conditioning", {}) or {}).get(
++                "prior_spectrum", {}
++            )
++            or {}
++        ).get("enabled", False)
++    )
++    if prior_conditioning_enabled:
++        stage_name = "D4.3.2.10先验条件化残差"
++    elif diversity_enabled:
+         stage_name = "D4.3条件感知多样性先验残差"
+     elif conditional_prior_bank:
+         stage_name = "D4.2条件先验残差"
+@@ -351,6 +361,10 @@ def main() -> None:
+     print(f"检查点step：{checkpoint_step}")
+     print(f"模型来源：{model_source}；设备：{device}")
+     print(f"本次条件数量：{len(condition_queries)}；每个条件生成：{number}条")
++    print(
++        "本次实际抽取的先验谱输入U-Net："
++        f"{prior_conditioning_enabled}"
++    )
+ 
+     manifest = {
+         "schema_version": "d4.2_source_named_generation_v1",
+@@ -359,6 +373,7 @@ def main() -> None:
+         "model_source": model_source,
+         "number_of_spectra_per_condition": number,
+         "requested_condition": requested,
++        "prior_spectrum_conditioning_enabled": prior_conditioning_enabled,
+         "pca_score_clip_runtime_override": score_clip_information,
+         "tail_calibration_configuration": (
+             tail_configuration if tail_enabled else None
+diff --git a/scripts/start_ddpm_training.py b/scripts/start_ddpm_training.py
+index 100ee41..c5581d9 100644
+--- a/scripts/start_ddpm_training.py
++++ b/scripts/start_ddpm_training.py
+@@ -1177,6 +1177,12 @@ def main() -> None:
+     conditioning_enabled = bool(
+         conditioning_config.get("enabled", False)
+     )
++    prior_spectrum_config = conditioning_config.get("prior_spectrum", {}) or {}
++    if not isinstance(prior_spectrum_config, dict):
++        raise TypeError("conditioning.prior_spectrum配置必须是字典。")
++    prior_conditioning_enabled = bool(
++        prior_spectrum_config.get("enabled", False)
++    )
+     if conditioning_enabled:
+         configured_vector_size = int(
+             conditioning_config.get("vector_size", CONDITION_VECTOR_SIZE)
+@@ -1740,6 +1746,7 @@ def main() -> None:
+     conditional_prior_residual_state = None
+ 
+     constraint_reconstruction_bases_full = None
++    prior_conditionings_full = None
+ 
+     spectra_for_model = (
+         normalized_full_spectra.copy()
+@@ -1778,11 +1785,21 @@ def main() -> None:
+                 dtype=np.float64,
+             ),
+         )
+-        spectra_for_model = conditional_prior_residual_bank.transform(
+-            normalized_full_spectra,
+-            valid_masks=valid_masks_on_model_axis,
+-            condition_ids=condition_ids_on_spectra,
+-        )
++        if prior_conditioning_enabled:
++            (
++                spectra_for_model,
++                prior_conditionings_full,
++            ) = conditional_prior_residual_bank.transform_with_conditioning(
++                normalized_full_spectra,
++                valid_masks=valid_masks_on_model_axis,
++                condition_ids=condition_ids_on_spectra,
++            )
++        else:
++            spectra_for_model = conditional_prior_residual_bank.transform(
++                normalized_full_spectra,
++                valid_masks=valid_masks_on_model_axis,
++                condition_ids=condition_ids_on_spectra,
++            )
+         training_scaled_residuals = spectra_for_model[training_indices]
+         conditional_prior_residual_state = (
+             conditional_prior_residual_bank.state_dict()
+@@ -2420,6 +2437,15 @@ def main() -> None:
+         * padded_valid_masks
+     ).astype(np.float32, copy=False)
+ 
++    padded_prior_conditionings = None
++    if prior_conditionings_full is not None:
++        padded_prior_conditionings = length_adapter.adapt(
++            prior_conditionings_full
++        )
++        padded_prior_conditionings = (
++            padded_prior_conditionings * padded_valid_masks
++        ).astype(np.float32, copy=False)
++
+     if not np.isfinite(
+         padded_spectra
+     ).all():
+@@ -2480,6 +2506,7 @@ def main() -> None:
+                 padded_constraint_reference_priors
+             ),
+             conditions=conditions_on_spectra,
++            prior_conditionings=padded_prior_conditionings,
+         )
+     )
+ 
+@@ -2820,15 +2847,23 @@ def main() -> None:
+         spectrum = batch["spectrum"].to(device)
+         valid_mask = batch.get("valid_mask")
+         condition = batch.get("condition")
++        prior_conditioning = batch.get("prior_conditioning")
+         if valid_mask is None or condition is None:
+-            raise RuntimeError("D4.2管线自检缺少valid_mask或condition。")
++            raise RuntimeError(
++                "D4.2管线自检缺少valid_mask或condition。"
++            )
++        if prior_conditioning_enabled and prior_conditioning is None:
++            raise RuntimeError("D4.3.2.10管线自检缺少prior_conditioning。")
+         valid_mask = valid_mask.to(device)
+         condition = condition.to(device)
++        if prior_conditioning is not None:
++            prior_conditioning = prior_conditioning.to(device)
+         diffusion = diffusion.to(device).train()
+         loss = diffusion(
+             spectrum,
+             valid_mask=valid_mask,
+             condition=condition,
++            prior_conditioning=prior_conditioning,
+         )
+         if loss.ndim != 0 or not torch.isfinite(loss):
+             raise RuntimeError("D4.2真实batch损失不是有限标量。")
+@@ -2847,6 +2882,8 @@ def main() -> None:
+         print("===== D4.2 管线自检通过 =====")
+         print(f"真实batch：{spectrum.shape[0]}条；loss={float(loss.detach().cpu()):.8g}")
+         print("掩码损失：已激活；14维条件：已激活；全层FiLM梯度：非零")
++        if prior_conditioning_enabled:
++            print("本次抽取的先验谱输入通道：已激活；先验与局部残差：逐样本配对")
+         if conditional_prior_residual_bank is not None:
+             summary = conditional_prior_residual_bank.summary()
+             print(
+diff --git a/src/conditional_prior_residual.py b/src/conditional_prior_residual.py
+index 2262490..25f2e28 100644
+--- a/src/conditional_prior_residual.py
++++ b/src/conditional_prior_residual.py
+@@ -198,6 +198,27 @@ class ConditionalPriorResidualBank:
+         valid_masks: np.ndarray,
+         condition_ids: Sequence[str],
+     ) -> np.ndarray:
++        transformed, _ = self.transform_with_conditioning(
++            spectra,
++            valid_masks=valid_masks,
++            condition_ids=condition_ids,
++        )
++        return transformed
++
++    def transform_with_conditioning(
++        self,
++        spectra: np.ndarray,
++        *,
++        valid_masks: np.ndarray,
++        condition_ids: Sequence[str],
++    ) -> tuple[np.ndarray, np.ndarray]:
++        """Return local residuals and their exact reconstruction bases.
++
++        The second array is the condition-specific outer PCA reference plus
++        the broad residual extracted from the same spectrum.  Feeding it to
++        the denoiser makes training learn ``p(local | sampled_base, condition)``
++        instead of silently learning only ``p(local | condition)``.
++        """
+         if self.model_axis is None or not self.entries:
+             raise RuntimeError("条件先验库尚未拟合。")
+         values = _as_2d_finite(spectra, "spectra")
+@@ -206,6 +227,7 @@ class ConditionalPriorResidualBank:
+             raise ValueError("待变换光谱、掩码与条件先验库轴不一致。")
+         conditions = self._condition_array(condition_ids, values.shape[0])
+         result = np.zeros_like(values, dtype=np.float32)
++        conditioning = np.zeros_like(values, dtype=np.float32)
+         for condition_id in sorted(set(str(value) for value in conditions)):
+             entry = self._entry(condition_id)
+             indices = np.flatnonzero(conditions == condition_id)
+@@ -217,10 +239,14 @@ class ConditionalPriorResidualBank:
+             active = values[indices, : entry.valid_length]
+             reference = entry.outer.reference_priors_for_spectra(active)
+             raw = (active - reference).astype(np.float32)
++            broad, _ = entry.broad_local.split_raw_residuals(raw)
+             result[indices, : entry.valid_length] = (
+                 entry.broad_local.transform_raw_residuals(raw)
+             )
+-        return result
++            conditioning[indices, : entry.valid_length] = reference + broad
++        if not np.isfinite(result).all() or not np.isfinite(conditioning).all():
++            raise RuntimeError("条件先验变换产生NaN或无穷值。")
++        return result, conditioning
+ 
+     def diagnostic_transform(
+         self,
+@@ -296,19 +322,70 @@ class ConditionalPriorResidualBank:
+         broad_random_generator: np.random.Generator,
+     ) -> np.ndarray:
+         values = _as_2d_finite(scaled_local_residuals, "scaled_local_residuals")
++        conditioning = self.sample_generation_conditioning(
++            values.shape[0],
++            condition_id=condition_id,
++            prior_random_generator=prior_random_generator,
++            broad_random_generator=broad_random_generator,
++        )
++        return self.reconstruct_generated_with_conditioning(
++            values,
++            prior_conditioning=conditioning,
++            condition_id=condition_id,
++        )
++
++    def sample_generation_conditioning(
++        self,
++        number: int,
++        *,
++        condition_id: str,
++        prior_random_generator: np.random.Generator,
++        broad_random_generator: np.random.Generator,
++    ) -> np.ndarray:
++        """Sample the exact outer-plus-broad base used by one generation batch."""
++
++        if self.model_axis is None or not self.entries:
++            raise RuntimeError("条件先验库尚未拟合。")
++        number = int(number)
++        if number <= 0:
++            raise ValueError("number必须大于0。")
++        entry = self._entry(condition_id)
++        prior = entry.outer.sample_reference_priors(
++            number, random_generator=prior_random_generator
++        )
++        broad = entry.broad_local.sample_broad_residuals(
++            number, random_generator=broad_random_generator
++        )
++        conditioning = np.zeros(
++            (number, self.model_axis.size), dtype=np.float32
++        )
++        conditioning[:, : entry.valid_length] = prior + broad
++        if not np.isfinite(conditioning).all():
++            raise RuntimeError("条件生成先验产生NaN或无穷值。")
++        return conditioning
++
++    def reconstruct_generated_with_conditioning(
++        self,
++        scaled_local_residuals: np.ndarray,
++        *,
++        prior_conditioning: np.ndarray,
++        condition_id: str,
++    ) -> np.ndarray:
++        """Reconstruct with the same prior base seen by the denoising U-Net."""
++
++        values = _as_2d_finite(scaled_local_residuals, "scaled_local_residuals")
++        conditioning = _as_2d_finite(prior_conditioning, "prior_conditioning")
++        if conditioning.shape != values.shape:
++            raise ValueError("prior_conditioning形状必须与生成残差一致。")
+         entry = self._entry(condition_id)
+         if values.shape[1] < entry.valid_length:
+             raise ValueError("生成残差长度小于条件有效Raman长度。")
+         local = entry.broad_local.inverse_local_transform(
+             values[:, : entry.valid_length]
+         )
+-        prior = entry.outer.sample_reference_priors(
+-            values.shape[0], random_generator=prior_random_generator
+-        )
+-        broad = entry.broad_local.sample_broad_residuals(
+-            values.shape[0], random_generator=broad_random_generator
++        reconstructed = (
++            conditioning[:, : entry.valid_length] + local
+         )
+-        reconstructed = prior + broad + local
+         if not np.isfinite(reconstructed).all():
+             raise RuntimeError("条件先验残差重建产生NaN或无穷值。")
+         return reconstructed.astype(np.float32, copy=False)
+diff --git a/src/configuration_loader.py b/src/configuration_loader.py
+index eac31fa..6362870 100644
+--- a/src/configuration_loader.py
++++ b/src/configuration_loader.py
+@@ -1441,6 +1441,26 @@ def validate_config(
+     conditioning["injection"] = str(
+         conditioning.get("injection", "input_only")
+     ).strip().lower()
++    prior_spectrum = conditioning.get("prior_spectrum", {}) or {}
++    if not isinstance(prior_spectrum, dict):
++        raise TypeError("conditioning.prior_spectrum必须是字典。")
++    prior_spectrum["enabled"] = bool(prior_spectrum.get("enabled", False))
++    prior_spectrum["source"] = str(
++        prior_spectrum.get("source", "condition_reconstruction_base")
++    ).strip().lower()
++    prior_spectrum["injection"] = str(
++        prior_spectrum.get("injection", "input_channel")
++    ).strip().lower()
++    if prior_spectrum["source"] != "condition_reconstruction_base":
++        raise ValueError(
++            "conditioning.prior_spectrum.source必须为"
++            "condition_reconstruction_base。"
++        )
++    if prior_spectrum["injection"] != "input_channel":
++        raise ValueError(
++            "conditioning.prior_spectrum.injection必须为input_channel。"
++        )
++    conditioning["prior_spectrum"] = prior_spectrum
+     if conditioning["vector_size"] != 14:
+         raise ValueError("D4.1的conditioning.vector_size必须为14。")
+     if conditioning["embedding_dimension"] <= 0:
+@@ -1481,6 +1501,19 @@ def validate_config(
+         )
+     )
+ 
++    if conditioning["prior_spectrum"]["enabled"]:
++        broad_local = configuration.get("broad_local_residual", {}) or {}
++        if not conditioning["enabled"]:
++            raise ValueError("先验谱条件化要求conditioning.enabled=true。")
++        if not bool(prior_residual.get("enabled", False)):
++            raise ValueError("先验谱条件化要求prior_residual.enabled=true。")
++        if not isinstance(broad_local, dict) or not bool(
++            broad_local.get("enabled", False)
++        ):
++            raise ValueError(
++                "先验谱条件化要求broad_local_residual.enabled=true。"
++            )
++
+     _validate_d3_configuration(
+         configuration,
+         prior_residual=prior_residual,
+diff --git a/src/ddpm_trainer.py b/src/ddpm_trainer.py
+index 639e455..547a637 100644
+--- a/src/ddpm_trainer.py
++++ b/src/ddpm_trainer.py
+@@ -218,12 +218,14 @@ class DdpmTrainer:
+         torch.Tensor | None,
+         torch.Tensor | None,
+         torch.Tensor | None,
++        torch.Tensor | None,
+     ]:
+         """兼容历史batch、PCA先验、D4掩码和D4.1条件。"""
+ 
+         reference_prior = None
+         valid_mask = None
+         condition = None
++        prior_conditioning = None
+         if isinstance(batch, dict):
+             if "spectrum" not in batch:
+                 raise KeyError("数据集字典batch缺少spectrum。")
+@@ -231,6 +233,7 @@ class DdpmTrainer:
+             reference_prior = batch.get("constraint_reference_prior")
+             valid_mask = batch.get("valid_mask")
+             condition = batch.get("condition")
++            prior_conditioning = batch.get("prior_conditioning")
+         elif isinstance(batch, (tuple, list)):
+             spectrum = batch[0]
+             if len(batch) > 1:
+@@ -273,7 +276,24 @@ class DdpmTrainer:
+             if condition.ndim != 2 or condition.shape[0] != spectrum.shape[0]:
+                 raise ValueError("condition形状必须为[B,C]。")
+ 
+-        return spectrum, reference_prior, valid_mask, condition
++        if prior_conditioning is not None:
++            if not torch.is_tensor(prior_conditioning):
++                raise TypeError("prior_conditioning必须是torch.Tensor。")
++            prior_conditioning = prior_conditioning.to(
++                self.device, non_blocking=True
++            )
++            if prior_conditioning.shape != spectrum.shape:
++                raise ValueError("prior_conditioning形状必须与spectrum一致。")
++            if not torch.isfinite(prior_conditioning).all():
++                raise ValueError("prior_conditioning包含NaN或无穷值。")
++
++        return (
++            spectrum,
++            reference_prior,
++            valid_mask,
++            condition,
++            prior_conditioning,
++        )
+ 
+     def _calculate_loss(
+         self,
+@@ -281,6 +301,7 @@ class DdpmTrainer:
+         constraint_reference_prior: torch.Tensor | None,
+         valid_mask: torch.Tensor | None,
+         condition: torch.Tensor | None = None,
++        prior_conditioning: torch.Tensor | None = None,
+     ) -> torch.Tensor:
+         arguments = {}
+ 
+@@ -302,6 +323,13 @@ class DdpmTrainer:
+                 raise RuntimeError("当前扩散模型不支持condition。")
+             arguments["condition"] = condition
+ 
++        if prior_conditioning is not None:
++            if not bool(
++                getattr(self.diffusion, "supports_prior_conditioning", False)
++            ):
++                raise RuntimeError("当前扩散模型不支持prior_conditioning。")
++            arguments["prior_conditioning"] = prior_conditioning
++
+         if constraint_reference_prior is None:
+             return self.diffusion(spectrum, **arguments)
+         if not bool(
+@@ -324,6 +352,7 @@ class DdpmTrainer:
+         torch.Tensor | None,
+         torch.Tensor | None,
+         torch.Tensor | None,
++        torch.Tensor | None,
+     ]:
+         if self._training_iterator is None:
+             self._training_iterator = iter(self.training_loader)
+@@ -461,6 +490,7 @@ class DdpmTrainer:
+                         constraint_reference_prior,
+                         valid_mask,
+                         condition,
++                        prior_conditioning,
+                     ) = (
+                         self._move_batch_to_device(batch)
+                     )
+@@ -475,6 +505,7 @@ class DdpmTrainer:
+                             constraint_reference_prior,
+                             valid_mask,
+                             condition,
++                            prior_conditioning,
+                         )
+ 
+                     detached_loss = loss.detach()
+@@ -553,6 +584,7 @@ class DdpmTrainer:
+                     constraint_reference_prior,
+                     valid_mask,
+                     condition,
++                    prior_conditioning,
+                 ) = (
+                     self._next_training_batch()
+                 )
+@@ -567,6 +599,7 @@ class DdpmTrainer:
+                         constraint_reference_prior,
+                         valid_mask,
+                         condition,
++                        prior_conditioning,
+                     )
+                     backward_loss = (
+                         loss / self.gradient_accumulation_steps
+diff --git a/src/masked_diffusion.py b/src/masked_diffusion.py
+index 40b4215..8eec860 100644
+--- a/src/masked_diffusion.py
++++ b/src/masked_diffusion.py
+@@ -289,6 +289,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+ 
+     supports_valid_mask = True
+     supports_condition = True
++    supports_prior_conditioning = True
+ 
+     def __init__(
+         self,
+@@ -304,6 +305,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+         super().__init__(*args, **kwargs)
+         self._sampling_valid_mask: torch.Tensor | None = None
+         self._sampling_condition: torch.Tensor | None = None
++        self._sampling_prior_conditioning: torch.Tensor | None = None
+         self._latest_loss_components: dict[str, torch.Tensor] = {}
+         self.diversity_configuration = (
+             normalize_condition_aware_diversity_configuration(
+@@ -868,12 +870,47 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             raise ValueError("每条光谱至少需要一个有效Raman点。")
+         return mask
+ 
++    def _prepare_prior_conditioning(
++        self,
++        prior_conditioning: torch.Tensor | None,
++        reference: torch.Tensor,
++    ) -> torch.Tensor | None:
++        enabled = bool(
++            getattr(self.model, "prior_conditioning_enabled", False)
++        )
++        if not enabled:
++            if prior_conditioning is not None:
++                raise ValueError("当前U-Net未启用prior_conditioning。")
++            return None
++        if prior_conditioning is None:
++            raise ValueError("先验条件化扩散必须提供prior_conditioning。")
++        if not torch.is_tensor(prior_conditioning):
++            raise TypeError("prior_conditioning必须是torch.Tensor。")
++        prepared = prior_conditioning.to(
++            device=reference.device, dtype=reference.dtype
++        )
++        if prepared.ndim == 1:
++            prepared = prepared.reshape(1, 1, -1)
++        elif prepared.ndim == 2:
++            prepared = prepared.unsqueeze(1)
++        if prepared.shape[0] == 1 and reference.shape[0] > 1:
++            prepared = prepared.expand(reference.shape[0], -1, -1)
++        if prepared.shape != reference.shape:
++            raise ValueError(
++                "prior_conditioning形状必须与光谱一致："
++                f"先验={tuple(prepared.shape)}，光谱={tuple(reference.shape)}。"
++            )
++        if not torch.isfinite(prepared).all():
++            raise ValueError("prior_conditioning包含NaN或无穷值。")
++        return prepared
++
+     def forward(
+         self,
+         img: torch.Tensor,
+         *args,
+         valid_mask: torch.Tensor | None = None,
+         condition: torch.Tensor | None = None,
++        prior_conditioning: torch.Tensor | None = None,
+         **kwargs,
+     ) -> torch.Tensor:
+         batch_size, channels, sequence_length = img.shape
+@@ -891,6 +928,11 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             img.device,
+             img.dtype,
+         )
++        prepared_prior = self._prepare_prior_conditioning(
++            prior_conditioning, img
++        )
++        if prepared_prior is not None:
++            prepared_prior = prepared_prior * mask
+         if self.diversity_enabled:
+             if prepared_condition is None:
+                 raise RuntimeError("D4.3多样性约束要求提供condition。")
+@@ -914,6 +956,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             *args,
+             valid_mask=mask,
+             condition=prepared_condition,
++            prior_conditioning=prepared_prior,
+             **kwargs,
+         )
+ 
+@@ -927,6 +970,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+         loss_reduction: str = "mean",
+         valid_mask: torch.Tensor | None = None,
+         condition: torch.Tensor | None = None,
++        prior_conditioning: torch.Tensor | None = None,
+     ) -> torch.Tensor:
+         if model_forward_kwargs is None:
+             model_forward_kwargs = {}
+@@ -940,6 +984,11 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             x_start.device,
+             x_start.dtype,
+         )
++        prepared_prior = self._prepare_prior_conditioning(
++            prior_conditioning, x_start
++        )
++        if prepared_prior is not None:
++            prepared_prior = prepared_prior * mask
+         x_start = x_start * mask
+         if noise is None:
+             noise = torch.randn_like(x_start)
+@@ -968,6 +1017,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             t,
+             valid_mask=mask,
+             condition=prepared_condition,
++            prior_conditioning=prepared_prior,
+             **model_forward_kwargs,
+         )
+ 
+@@ -1155,12 +1205,20 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+         model_forward_kwargs: dict[str, Any] | None = None,
+         valid_mask: torch.Tensor | None = None,
+         condition: torch.Tensor | None = None,
++        prior_conditioning: torch.Tensor | None = None,
+         **kwargs,
+     ):
+         if self._sampling_valid_mask is not None and valid_mask is not None:
+             raise RuntimeError("采样内部掩码不能与显式valid_mask同时提供。")
+         if self._sampling_condition is not None and condition is not None:
+             raise RuntimeError("采样内部条件不能与显式condition同时提供。")
++        if (
++            self._sampling_prior_conditioning is not None
++            and prior_conditioning is not None
++        ):
++            raise RuntimeError(
++                "采样内部先验条件不能与显式prior_conditioning同时提供。"
++            )
+ 
+         mask = (
+             self._sampling_valid_mask
+@@ -1172,7 +1230,12 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             if self._sampling_condition is not None
+             else condition
+         )
+-        if mask is None and active_condition is None:
++        active_prior = (
++            self._sampling_prior_conditioning
++            if self._sampling_prior_conditioning is not None
++            else prior_conditioning
++        )
++        if mask is None and active_condition is None and active_prior is None:
+             return super().model_predictions(
+                 x,
+                 t,
+@@ -1188,6 +1251,9 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             x.device,
+             x.dtype,
+         )
++        prepared_prior = self._prepare_prior_conditioning(active_prior, x)
++        if prepared_prior is not None:
++            prepared_prior = prepared_prior * prepared
+         if x_self_cond is not None:
+             x_self_cond = x_self_cond * prepared
+ 
+@@ -1199,6 +1265,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             t,
+             valid_mask=prepared,
+             condition=prepared_condition,
++            prior_conditioning=prepared_prior,
+             **forward_kwargs,
+         )
+ 
+@@ -1254,6 +1321,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+         *args,
+         valid_mask: torch.Tensor | None = None,
+         condition: torch.Tensor | None = None,
++        prior_conditioning: torch.Tensor | None = None,
+         **kwargs,
+     ):
+         reference = torch.empty(
+@@ -1267,15 +1335,22 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+             reference.device,
+             reference.dtype,
+         )
++        prepared_prior = self._prepare_prior_conditioning(
++            prior_conditioning, reference
++        )
++        if prepared_prior is not None:
++            prepared_prior = prepared_prior * mask
+ 
+         if (
+             self._sampling_valid_mask is not None
+             or self._sampling_condition is not None
++            or self._sampling_prior_conditioning is not None
+         ):
+             raise RuntimeError("同一个扩散对象不能同时执行两次掩码采样。")
+ 
+         self._sampling_valid_mask = mask
+         self._sampling_condition = prepared_condition
++        self._sampling_prior_conditioning = prepared_prior
+         try:
+             generated = super().sample(
+                 batch_size,
+@@ -1285,6 +1360,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
+         finally:
+             self._sampling_valid_mask = None
+             self._sampling_condition = None
++            self._sampling_prior_conditioning = None
+ 
+         if isinstance(generated, tuple):
+             primary = generated[0] * mask
+diff --git a/src/masked_unet.py b/src/masked_unet.py
+index ca9a4d6..ff0e348 100644
+--- a/src/masked_unet.py
++++ b/src/masked_unet.py
+@@ -37,6 +37,7 @@ class MaskConditionedUnet1D(nn.Module):
+         condition_dimension: int = 0,
+         condition_embedding_dimension: int = 8,
+         condition_injection: str = "input_only",
++        prior_conditioning_enabled: bool = False,
+     ) -> None:
+         super().__init__()
+         if channels <= 0:
+@@ -45,6 +46,7 @@ class MaskConditionedUnet1D(nn.Module):
+         self.channels = int(channels)
+         self.out_dim = int(channels)
+         self.self_condition = False
++        self.prior_conditioning_enabled = bool(prior_conditioning_enabled)
+         self.condition_dimension = int(condition_dimension)
+         if self.condition_dimension < 0:
+             raise ValueError("condition_dimension不能小于0。")
+@@ -88,6 +90,7 @@ class MaskConditionedUnet1D(nn.Module):
+             channels=(
+                 self.channels
+                 + 1
++                + int(self.prior_conditioning_enabled)
+                 + self.condition_embedding_dimension
+             ),
+             out_dim=self.channels,
+@@ -131,6 +134,7 @@ class MaskConditionedUnet1D(nn.Module):
+         *,
+         valid_mask: torch.Tensor | None = None,
+         condition: torch.Tensor | None = None,
++        prior_conditioning: torch.Tensor | None = None,
+         **kwargs,
+     ) -> torch.Tensor:
+         if kwargs:
+@@ -148,6 +152,26 @@ class MaskConditionedUnet1D(nn.Module):
+             dtype=spectrum.dtype,
+         )
+         input_channels = [spectrum * mask, mask]
++        if self.prior_conditioning_enabled:
++            if prior_conditioning is None:
++                raise ValueError("先验条件化U-Net必须提供prior_conditioning。")
++            if not torch.is_tensor(prior_conditioning):
++                raise TypeError("prior_conditioning必须是torch.Tensor。")
++            prior_conditioning = prior_conditioning.to(
++                device=spectrum.device,
++                dtype=spectrum.dtype,
++            )
++            if prior_conditioning.shape != spectrum.shape:
++                raise ValueError(
++                    "prior_conditioning形状必须与spectrum一致："
++                    f"实际{tuple(prior_conditioning.shape)}，"
++                    f"期望{tuple(spectrum.shape)}。"
++                )
++            if not torch.isfinite(prior_conditioning).all():
++                raise ValueError("prior_conditioning包含NaN或无穷值。")
++            input_channels.append(prior_conditioning * mask)
++        elif prior_conditioning is not None:
++            raise ValueError("未启用先验谱条件化的U-Net不能接收prior_conditioning。")
+         if self.condition_encoder is not None:
+             if condition is None:
+                 raise ValueError("条件生成模型必须提供condition。")
+diff --git a/src/model_builder.py b/src/model_builder.py
+index 521751c..692b893 100644
+--- a/src/model_builder.py
++++ b/src/model_builder.py
+@@ -152,6 +152,21 @@ def build_diffusion_model(
+     condition_injection = str(
+         conditioning_config.get("injection", "input_only")
+     ).strip().lower()
++    prior_spectrum_config = _as_optional_dictionary(
++        conditioning_config.get("prior_spectrum", {}),
++        name="conditioning.prior_spectrum",
++    )
++    prior_conditioning_enabled = bool(
++        prior_spectrum_config.get("enabled", False)
++    )
++    prior_conditioning_injection = str(
++        prior_spectrum_config.get("injection", "input_channel")
++    ).strip().lower()
++    prior_conditioning_source = str(
++        prior_spectrum_config.get(
++            "source", "condition_reconstruction_base"
++        )
++    ).strip().lower()
+     if condition_dimension < 0:
+         raise ValueError("conditioning.vector_size不能小于0。")
+     if conditioning_enabled and condition_dimension <= 0:
+@@ -163,6 +178,26 @@ def build_diffusion_model(
+             "D4.1条件模型要求data.raman_axis_mode="
+             "union_with_valid_mask。"
+         )
++    if prior_conditioning_injection != "input_channel":
++        raise ValueError(
++            "conditioning.prior_spectrum.injection当前只支持input_channel。"
++        )
++    if prior_conditioning_source != "condition_reconstruction_base":
++        raise ValueError(
++            "conditioning.prior_spectrum.source当前只支持"
++            "condition_reconstruction_base。"
++        )
++    if prior_conditioning_enabled:
++        broad_local_config = _as_optional_dictionary(
++            model_configuration.get("broad_local_residual", {}),
++            name="broad_local_residual",
++        )
++        if not conditioning_enabled or not mask_enabled:
++            raise ValueError("先验谱条件化要求同时启用化学条件和valid_mask。")
++        if not bool(prior_config.get("enabled", False)):
++            raise ValueError("先验谱条件化要求prior_residual.enabled=true。")
++        if not bool(broad_local_config.get("enabled", False)):
++            raise ValueError("先验谱条件化要求broad_local_residual.enabled=true。")
+ 
+     dimension_multipliers = tuple(
+         int(value)
+@@ -218,6 +253,7 @@ def build_diffusion_model(
+                 condition_embedding_dimension
+             ),
+             condition_injection=condition_injection,
++            prior_conditioning_enabled=prior_conditioning_enabled,
+         )
+     else:
+         unet = Unet1D(
+@@ -482,5 +518,8 @@ def build_diffusion_model(
+     )
+     diffusion_model.configured_condition_dimension = condition_dimension
+     diffusion_model.configured_condition_injection = condition_injection
++    diffusion_model.configured_prior_conditioning_enabled = (
++        prior_conditioning_enabled
++    )
+ 
+     return unet, diffusion_model
+diff --git a/src/spectrum_dataset.py b/src/spectrum_dataset.py
+index 0f4064c..0d1eb35 100644
+--- a/src/spectrum_dataset.py
++++ b/src/spectrum_dataset.py
+@@ -36,6 +36,7 @@ class SpectrumDataset(
+         valid_masks: np.ndarray | None = None,
+         conditions: np.ndarray | None = None,
+         constraint_reference_priors: np.ndarray | None = None,
++        prior_conditionings: np.ndarray | None = None,
+     ) -> None:
+         values = np.asarray(
+             spectra,
+@@ -116,6 +117,17 @@ class SpectrumDataset(
+                     "constraint_reference_priors中存在NaN或无穷大。"
+                 )
+ 
++        prior_values = None
++        if prior_conditionings is not None:
++            prior_values = np.asarray(prior_conditionings, dtype=np.float32)
++            if prior_values.shape != values.shape:
++                raise ValueError(
++                    "prior_conditionings形状必须与spectra一致："
++                    f"先验条件为{prior_values.shape}，光谱为{values.shape}。"
++                )
++            if not np.isfinite(prior_values).all():
++                raise ValueError("prior_conditionings中存在NaN或无穷大。")
++
+         masks = None
+         if valid_masks is not None:
+             masks = np.asarray(
+@@ -202,6 +214,12 @@ class SpectrumDataset(
+             else torch.from_numpy(reference_priors).unsqueeze(1)
+         )
+ 
++        self.prior_conditionings = (
++            None
++            if prior_values is None
++            else torch.from_numpy(prior_values).unsqueeze(1)
++        )
++
+         self.valid_masks = (
+             None
+             if masks is None
+@@ -230,6 +248,7 @@ class SpectrumDataset(
+             self.constraint_reference_priors is None
+             and self.valid_masks is None
+             and self.conditions is None
++            and self.prior_conditionings is None
+         ):
+             return spectrum
+ 
+@@ -242,6 +261,8 @@ class SpectrumDataset(
+             item["constraint_reference_prior"] = (
+                 self.constraint_reference_priors[index]
+             )
++        if self.prior_conditionings is not None:
++            item["prior_conditioning"] = self.prior_conditionings[index]
+         return item
+ 
+     def get_original_metadata(
+diff --git a/src/spectrum_generator.py b/src/spectrum_generator.py
+index 4ac2d4c..808d9b0 100644
+--- a/src/spectrum_generator.py
++++ b/src/spectrum_generator.py
+@@ -1531,7 +1531,10 @@ def generate_spectra(
+ 
+     broad_random_generator = None
+ 
+-    if broad_local_residual_decomposer is not None:
++    if (
++        broad_local_residual_decomposer is not None
++        or conditional_prior_residual_bank is not None
++    ):
+         broad_random_seed = (
+             None
+             if prior_random_seed is None
+@@ -1554,9 +1557,43 @@ def generate_spectra(
+             number_of_spectra - number_generated,
+         )
+ 
++        batch_sampling_arguments = dict(sampling_arguments)
++        sampled_prior_conditioning = None
++        prior_conditioning_enabled = bool(
++            getattr(diffusion, "configured_prior_conditioning_enabled", False)
++            or getattr(
++                getattr(diffusion, "model", None),
++                "prior_conditioning_enabled",
++                False,
++            )
++        )
++        if prior_conditioning_enabled:
++            if conditional_prior_residual_bank is None:
++                raise RuntimeError(
++                    "先验条件化检查点生成时必须提供条件先验残差库。"
++                )
++            if broad_random_generator is None:
++                raise RuntimeError("条件先验库缺少broad随机数生成器。")
++            sampled_prior_conditioning = (
++                conditional_prior_residual_bank.sample_generation_conditioning(
++                    current_batch_size,
++                    condition_id=str(condition_id),
++                    prior_random_generator=prior_random_generator,
++                    broad_random_generator=broad_random_generator,
++                )
++            )
++            padded_prior_conditioning = length_adapter.adapt(
++                sampled_prior_conditioning
++            )
++            batch_sampling_arguments["prior_conditioning"] = (
++                torch.from_numpy(padded_prior_conditioning).to(
++                    device=device, dtype=torch.float32
++                )
++            )
++
+         generated = diffusion.sample(
+             batch_size=current_batch_size,
+-            **sampling_arguments,
++            **batch_sampling_arguments,
+         )
+ 
+         if generated.ndim != 3:
+@@ -1604,22 +1641,24 @@ def generate_spectra(
+         )
+ 
+         if conditional_prior_residual_bank is not None:
+-            if broad_random_generator is None:
+-                # 条件先验库同样需要独立的broad随机流。
+-                broad_random_seed = (
+-                    None
+-                    if prior_random_seed is None
+-                    else int(prior_random_seed) + 1_000_003
++            if sampled_prior_conditioning is not None:
++                restored = (
++                    conditional_prior_residual_bank
++                    .reconstruct_generated_with_conditioning(
++                        restored,
++                        prior_conditioning=sampled_prior_conditioning,
++                        condition_id=str(condition_id),
++                    )
+                 )
+-                broad_random_generator = np.random.default_rng(
+-                    broad_random_seed
++            else:
++                if broad_random_generator is None:
++                    raise RuntimeError("条件先验库缺少broad随机数生成器。")
++                restored = conditional_prior_residual_bank.reconstruct_generated(
++                    restored,
++                    condition_id=str(condition_id),
++                    prior_random_generator=prior_random_generator,
++                    broad_random_generator=broad_random_generator,
+                 )
+-            restored = conditional_prior_residual_bank.reconstruct_generated(
+-                restored,
+-                condition_id=str(condition_id),
+-                prior_random_generator=prior_random_generator,
+-                broad_random_generator=broad_random_generator,
+-            )
+             valid_length = conditional_prior_residual_bank.valid_length(
+                 str(condition_id)
+             )
+diff --git a/tests/test_conditional_prior_residual.py b/tests/test_conditional_prior_residual.py
+index 3fc3336..66fd72a 100644
+--- a/tests/test_conditional_prior_residual.py
++++ b/tests/test_conditional_prior_residual.py
+@@ -6,6 +6,7 @@ from torch import nn
+ 
+ from src.conditional_prior_residual import ConditionalPriorResidualBank
+ from src.spectrum_generator import generate_spectra
++from src.spectrum_dataset import SpectrumDataset
+ from src.spectrum_length_adapter import SpectrumLengthAdapter
+ 
+ 
+@@ -115,6 +116,43 @@ def test_condition_bank_checkpoint_round_trip_and_generation() -> None:
+     assert restored.valid_length("CHL-H_soil") == 16
+ 
+ 
++def test_transform_conditioning_round_trip_uses_matching_base() -> None:
++    spectra, masks, conditions, train, axis = _data()
++    prior, broad = _configuration()
++    bank = ConditionalPriorResidualBank(
++        prior_configuration=prior,
++        broad_local_configuration=broad,
++    ).fit(
++        spectra,
++        valid_masks=masks,
++        condition_ids=conditions,
++        training_indices=train,
++        raman_shift=axis,
++    )
++    residual, conditioning = bank.transform_with_conditioning(
++        spectra,
++        valid_masks=masks,
++        condition_ids=conditions,
++    )
++    restored = bank.reconstruct_generated_with_conditioning(
++        residual[:8],
++        prior_conditioning=conditioning[:8],
++        condition_id="DEL-H_water",
++    )
++    np.testing.assert_allclose(restored, spectra[:8, :12], atol=1.0e-5)
++    assert np.all(conditioning[:8, 12:] == 0.0)
++
++    dataset = SpectrumDataset(
++        residual,
++        valid_masks=masks,
++        conditions=np.zeros((residual.shape[0], 14), dtype=np.float32),
++        prior_conditionings=conditioning,
++    )
++    item = dataset[0]
++    assert isinstance(item, dict)
++    assert item["prior_conditioning"].shape == item["spectrum"].shape
++
++
+ def test_runtime_score_clip_override_updates_outer_and_broad_only_in_memory() -> None:
+     spectra, masks, conditions, train, axis = _data()
+     prior, broad = _configuration()
+@@ -184,9 +222,20 @@ def test_diagnostic_transform_round_trip_restores_selected_real_spectrum() -> No
+ class _ZeroMaskedDiffusion(nn.Module):
+     supports_valid_mask = True
+     supports_condition = True
++    supports_prior_conditioning = True
++    configured_prior_conditioning_enabled = True
+ 
+-    def sample(self, batch_size: int, *, valid_mask, condition):
++    def sample(
++        self,
++        batch_size: int,
++        *,
++        valid_mask,
++        condition,
++        prior_conditioning,
++    ):
+         assert condition.shape == (14,)
++        assert prior_conditioning.shape == (batch_size, 16)
++        assert torch.isfinite(prior_conditioning).all()
+         mask = valid_mask.reshape(1, 1, -1).expand(batch_size, 1, -1)
+         return torch.zeros_like(mask)
+ 
+diff --git a/tests/test_d4_3_masked_diffusion.py b/tests/test_d4_3_masked_diffusion.py
+index 123d6a1..f691301 100644
+--- a/tests/test_d4_3_masked_diffusion.py
++++ b/tests/test_d4_3_masked_diffusion.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import copy
+ import numpy as np
+ import torch
+ 
+@@ -131,3 +132,54 @@ def test_conditioned_model_predictions_supports_explicit_diagnostic_context() ->
+     assert prediction.pred_noise.shape == spectrum.shape
+     assert torch.all(prediction.pred_x_start[..., 12:] == 0.0)
+     assert torch.all(prediction.pred_noise[..., 12:] == 0.0)
++
++
++def test_prior_conditioned_residual_requires_and_uses_matching_prior() -> None:
++    configuration = copy.deepcopy(_configuration())
++    configuration["diversity_constraints"]["enabled"] = False
++    configuration["prior_residual"]["enabled"] = True
++    configuration["broad_local_residual"]["enabled"] = True
++    configuration["conditioning"]["prior_spectrum"] = {
++        "enabled": True,
++        "source": "condition_reconstruction_base",
++        "injection": "input_channel",
++    }
++    unet, diffusion = build_diffusion_model(configuration, sequence_length=16)
++    assert unet.prior_conditioning_enabled is True
++    assert diffusion.configured_prior_conditioning_enabled is True
++
++    spectrum = torch.randn(2, 1, 16)
++    mask = torch.ones_like(spectrum)
++    mask[..., 12:] = 0.0
++    condition = torch.zeros(2, 14)
++    condition[:, 0] = 1.0
++    prior = torch.randn_like(spectrum) * mask
++
++    with torch.no_grad():
++        try:
++            diffusion.p_losses(
++                spectrum,
++                torch.zeros(2, dtype=torch.long),
++                noise=torch.zeros_like(spectrum),
++                valid_mask=mask,
++                condition=condition,
++            )
++        except ValueError as error:
++            assert "prior_conditioning" in str(error)
++        else:
++            raise AssertionError("缺少prior_conditioning时应拒绝训练。")
++
++    loss = diffusion.p_losses(
++        spectrum,
++        torch.zeros(2, dtype=torch.long),
++        noise=torch.zeros_like(spectrum),
++        valid_mask=mask,
++        condition=condition,
++        prior_conditioning=prior,
++    )
++    assert torch.isfinite(loss)
++    loss.backward()
++    assert any(
++        parameter.grad is not None and torch.isfinite(parameter.grad).all()
++        for parameter in diffusion.parameters()
++    )

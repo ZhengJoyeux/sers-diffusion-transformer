@@ -15,8 +15,8 @@ Key design points:
 - Chemistry-core + training-derived auxiliary priors add a positive soft bias
   to attention logits; they never delete non-peak regions.
 - valid_mask remains authoritative for any unavailable Raman positions.
-- The formal downstream model uses the complete 600-2500 cm^-1 range. Every
-  real source must genuinely cover that range, so axis availability cannot leak labels.
+- The formal downstream model uses the complete 600-2500 cm^-1 input axis,
+  with the Dataset adapter's existing policy for shorter source spectra.
 - The default public forward interface remains [classification_probability, concentration].
 - T3.1 optionally uses pesticide-specific ordered S/M/H concentration heads while
   preserving the T1/T2 continuous-regression checkpoint path.
@@ -27,6 +27,7 @@ from __future__ import annotations
 import math
 from typing import Mapping, Sequence
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -34,6 +35,211 @@ from torch import Tensor
 
 
 DEFAULT_MODEL_LENGTH = 1901
+
+
+def ordinal_class_probabilities_numpy(probabilities: np.ndarray) -> np.ndarray:
+    """Convert ordered cumulative probabilities to [S, M, H] probabilities."""
+    values = np.asarray(probabilities, dtype=np.float64)
+    if values.shape[-1:] != (2,) or not np.isfinite(values).all():
+        raise ValueError("Expected finite cumulative probabilities ending in dimension 2")
+    if (values < -1e-7).any() or (values > 1.0 + 1e-7).any():
+        raise ValueError("Cumulative probabilities must be in [0, 1]")
+    if (values[..., 1] > values[..., 0] + 1e-7).any():
+        raise ValueError("P(level>=H) must not exceed P(level>=M)")
+    values = np.clip(values, 0.0, 1.0)
+    return np.maximum(np.stack(
+        (1.0 - values[..., 0], values[..., 0] - values[..., 1], values[..., 1]),
+        axis=-1,
+    ), 0.0)
+
+
+def decode_ordinal_numpy(
+    probabilities: np.ndarray, *, mode: str = "median", threshold: float = 0.5,
+) -> np.ndarray:
+    """One shared decoder for training metrics, inference tables and CSV rows.
+
+    median preserves the historical cumulative-threshold policy. map chooses
+    the most probable S/M/H class; exact ties choose the lower level.
+    """
+    classes = ordinal_class_probabilities_numpy(probabilities)
+    if mode == "map":
+        return 1 + classes.argmax(axis=-1)
+    if mode != "median":
+        raise ValueError("ordinal decoding must be median or map")
+    if not 0.0 < float(threshold) < 1.0:
+        raise ValueError("ordinal threshold must be in (0, 1)")
+    return 1 + (np.asarray(probabilities) >= float(threshold)).sum(axis=-1)
+
+
+class LocalQuantitativeBranch(nn.Module):
+    """T3.13: native-resolution windows plus train-normalized intensity features.
+
+    The window CNN has no strided pooling. A linear baseline is estimated
+    from the two window flanks; signed local residuals are retained. Features
+    describe positive area/height, centroid, effective width, asymmetry,
+    baseline and flank noise. They are effective window measurements, not
+    chemically resolved individual-peak fits.
+
+    The final projections start at zero: this path initially contributes no
+    concentration correction. All normalization buffers are checkpointed.
+    """
+
+    feature_names = (
+        "log_height", "log_area", "relative_centroid", "relative_width",
+        "asymmetry", "log_rms", "signed_log_baseline", "log_flank_noise",
+    )
+
+    def __init__(
+        self, d_model: int, model_length: int, centers: Sequence[Sequence[float]],
+        half_width: int = 24, hidden: int = 16, strength: float = 0.25,
+        projection_hidden: int | None = None,
+    ) -> None:
+        super().__init__()
+        if model_length != DEFAULT_MODEL_LENGTH:
+            raise ValueError("T3.13 local windows require the project's 1901-point axis")
+        if half_width < 8 or half_width > 60 or hidden < 4:
+            raise ValueError("local half-width must be 8..60 and local hidden must be >=4")
+        if not 0.0 < float(strength) <= 1.0:
+            raise ValueError("local correction strength must be in (0,1]")
+        if len(centers) != 3 or any(not group for group in centers):
+            raise ValueError("Provide nonempty DEL/CHL/TEB window-center groups")
+        self.half_width = int(half_width)
+        self.strength = float(strength)
+        self.window_count = max(len(group) for group in centers)
+        center_array = torch.zeros(3, self.window_count, dtype=torch.float32)
+        active = torch.zeros(3, self.window_count, dtype=torch.bool)
+        for pesticide, group in enumerate(centers):
+            for window, center in enumerate(group):
+                if not math.isfinite(float(center)):
+                    raise ValueError("local window center must be finite")
+                index = round(float(center) - 600.0)
+                if index - half_width < 0 or index + half_width >= model_length:
+                    raise ValueError("local window must lie inside the measured model axis")
+                center_array[pesticide, window] = float(center)
+                active[pesticide, window] = True
+        # Inactive padded slots use a safe index and are explicitly zeroed.
+        safe_centers = torch.where(active, center_array, torch.full_like(center_array, 1000.0))
+        offsets = torch.arange(-half_width, half_width + 1, dtype=torch.float32)
+        indices = (safe_centers - 600.0).round().long().unsqueeze(-1) + offsets.long()
+        self.register_buffer("centers_cm1", center_array)
+        self.register_buffer("window_active", active)
+        self.register_buffer("window_indices", indices)
+        self.register_buffer("offsets", offsets)
+        self.register_buffer("signal_scale", torch.ones(3, self.window_count))
+        self.register_buffer("feature_mean", torch.zeros(3, self.window_count, 8))
+        self.register_buffer("feature_std", torch.ones(3, self.window_count, 8))
+        self.register_buffer("normalization_fitted", torch.tensor(False))
+        self.window_cnn = nn.Sequential(
+            nn.Conv1d(3, hidden, kernel_size=5, padding=2), nn.GELU(),
+            nn.Conv1d(hidden, hidden, kernel_size=3, padding=1), nn.GELU(),
+            nn.AdaptiveAvgPool1d(4), nn.Flatten(),
+        )
+        feature_dim = self.window_count * (hidden * 4 + 8) + self.window_count
+        projection_dim = d_model if projection_hidden is None else int(projection_hidden)
+        if projection_dim < 1:
+            raise ValueError("local projection hidden dimension must be positive")
+        self.projections = nn.ModuleList([
+            nn.Sequential(nn.Linear(feature_dim, projection_dim), nn.GELU(), nn.Linear(projection_dim, d_model))
+            for _ in range(3)
+        ])
+        for projection in self.projections:
+            nn.init.zeros_(projection[-1].weight)
+            nn.init.zeros_(projection[-1].bias)
+
+    def _measure(self, intensity: Tensor, valid_mask: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        if intensity.ndim != 3 or intensity.shape[1:] != (1, DEFAULT_MODEL_LENGTH):
+            raise ValueError("raw_intensity must have shape [B,1,1901]")
+        if valid_mask.shape != (intensity.shape[0], DEFAULT_MODEL_LENGTH):
+            raise ValueError("local branch valid_mask shape mismatch")
+        if not torch.isfinite(intensity).all():
+            raise ValueError("raw_intensity contains NaN or Inf")
+        windows = intensity[:, 0, self.window_indices]
+        masks = valid_mask[:, self.window_indices].bool()
+        available = masks.all(dim=-1) & self.window_active.unsqueeze(0)
+        flank = max(3, windows.shape[-1] // 6)
+        left = windows[..., :flank].mean(dim=-1, keepdim=True)
+        right = windows[..., -flank:].mean(dim=-1, keepdim=True)
+        # Anchor the baseline at flank midpoints rather than the outermost points.
+        coordinate = torch.arange(windows.shape[-1], device=windows.device, dtype=windows.dtype)
+        fraction = (coordinate - (flank - 1) / 2.0) / (windows.shape[-1] - flank)
+        baseline = left + (right - left) * fraction
+        corrected = windows - baseline
+        corrected = corrected * available.unsqueeze(-1)
+        positive = corrected.clamp_min(0.0)
+        area = positive.sum(dim=-1)
+        height = positive.amax(dim=-1)
+        mass = area.clamp_min(1e-8)
+        centroid = (positive * self.offsets).sum(dim=-1) / mass
+        width = torch.sqrt(((positive * (self.offsets - centroid.unsqueeze(-1)).square()).sum(dim=-1) / mass).clamp_min(0.0))
+        middle = self.half_width
+        asymmetry = (positive[..., middle + 1:].sum(dim=-1) - positive[..., :middle].sum(dim=-1)) / mass
+        rms = corrected.square().mean(dim=-1).sqrt()
+        noise = torch.cat((corrected[..., :flank], corrected[..., -flank:]), dim=-1).std(dim=-1, unbiased=False)
+        background = baseline.mean(dim=-1)
+        features = torch.stack((
+            torch.log1p(height), torch.log1p(area), centroid / self.half_width,
+            width / self.half_width, asymmetry, torch.log1p(rms),
+            background.sign() * torch.log1p(background.abs()), torch.log1p(noise),
+        ), dim=-1)
+        features = features * available.unsqueeze(-1)
+        signed_signal = corrected.sign() * torch.log1p(corrected.abs())
+        return signed_signal, features, available
+
+    @torch.no_grad()
+    def fit_normalization(self, intensity: Tensor, valid_mask: Tensor) -> dict[str, object]:
+        """Called once by the training entry with real training rows only."""
+        if bool(self.normalization_fitted):
+            raise RuntimeError("Local normalization is already fitted; do not refit on validation/test")
+        signal, features, available = self._measure(intensity.float(), valid_mask.bool())
+        counts = []
+        for pesticide in range(3):
+            group_counts = []
+            for window in range(self.window_count):
+                if not bool(self.window_active[pesticide, window]):
+                    group_counts.append(0)
+                    continue
+                rows = available[:, pesticide, window]
+                count = int(rows.sum())
+                if count < 8:
+                    raise ValueError("Every active quantitative window needs >=8 real training rows")
+                values = features[rows, pesticide, window]
+                self.feature_mean[pesticide, window].copy_(values.mean(dim=0))
+                self.feature_std[pesticide, window].copy_(values.std(dim=0, unbiased=False).clamp_min(0.05))
+                self.signal_scale[pesticide, window].copy_(
+                    torch.quantile(signal[rows, pesticide, window].abs().flatten(), 0.95).clamp_min(0.1)
+                )
+                group_counts.append(count)
+            counts.append(group_counts)
+        self.normalization_fitted.fill_(True)
+        return {
+            "centers_cm1": self.centers_cm1.tolist(), "window_active": self.window_active.tolist(),
+            "half_width_cm1": self.half_width, "feature_names": list(self.feature_names),
+            "fit_rows_per_window": counts, "fit_scope": "real training rows only",
+            "signal_scale": self.signal_scale.tolist(),
+            "feature_mean": self.feature_mean.tolist(), "feature_std": self.feature_std.tolist(),
+        }
+
+    def forward(self, intensity: Tensor, valid_mask: Tensor) -> Tensor:
+        if not bool(self.normalization_fitted):
+            raise RuntimeError("Fit local normalization on real training spectra before forward")
+        signal, features, available = self._measure(intensity, valid_mask)
+        amplitude = signal / self.signal_scale.unsqueeze(0).unsqueeze(-1)
+        shape = signal / signal.abs().amax(dim=-1, keepdim=True).clamp_min(0.1)
+        mask_channel = available.unsqueeze(-1).expand_as(signal).to(signal.dtype)
+        cnn_input = torch.stack((amplitude.clamp(-8.0, 8.0), shape, mask_channel), dim=-2)
+        batch_size = intensity.shape[0]
+        local = self.window_cnn(cnn_input.reshape(-1, 3, signal.shape[-1]))
+        local = local.reshape(batch_size, 3, self.window_count, -1) * available.unsqueeze(-1)
+        numerical = ((features - self.feature_mean) / self.feature_std).clamp(-8.0, 8.0)
+        numerical = numerical * available.unsqueeze(-1)
+        # log(1+area) differences approximate log-area ratios without dividing by noise.
+        pair_available = available & available[..., :1]
+        area_ratios = (features[..., 1] - features[..., :1, 1]) * pair_available
+        pesticide_features = torch.cat((local.flatten(2), numerical.flatten(2), area_ratios), dim=-1)
+        result = torch.stack([
+            head(pesticide_features[:, pesticide]) for pesticide, head in enumerate(self.projections)
+        ], dim=1)
+        return self.strength * result * available.any(dim=-1).unsqueeze(-1)
 
 
 def _conv_pool_output_length(length: int) -> int:
@@ -886,6 +1092,16 @@ class TransformerClassifyRegress_sep(nn.Module):
         use_mixture_aware_query_fusion: bool = False,
         use_adaptive_mixture_gate: bool = False,
         use_boundary_specific_mixture_gate: bool = False,
+        use_local_quantitative_branch: bool = False,
+        local_window_centers: Sequence[Sequence[float]] | None = None,
+        local_half_width: int = 24,
+        local_hidden: int = 16,
+        local_strength: float = 0.25,
+        use_anchored_local_calibration: bool = False,
+        calibration_logit_bound: float = 0.5,
+        calibration_uncertainty_band: float = 0.15,
+        calibration_hidden: int = 16,
+        calibration_half_width: int = 24,
     ) -> None:
         super().__init__()
 
@@ -911,6 +1127,7 @@ class TransformerClassifyRegress_sep(nn.Module):
         self.use_boundary_specific_mixture_gate = bool(
             use_boundary_specific_mixture_gate
         )
+        self.use_local_quantitative_branch = bool(use_local_quantitative_branch)
 
         if (
             self.use_adaptive_mixture_gate
@@ -1086,6 +1303,50 @@ class TransformerClassifyRegress_sep(nn.Module):
                     ),
                 )
             )
+
+        # Construct after all legacy parameters: same seed + disabled path keeps
+        # the T3.10-T3.12 state dictionary and parameter initialization unchanged.
+        self.local_quantitative_branch = None
+        if self.use_local_quantitative_branch:
+            if self.n_labels != 3 or self.concentration_head_mode != "ordinal":
+                raise ValueError("T3.13 local quantitative branch requires three ordinal pesticide heads")
+            if self.use_boundary_specific_mixture_gate:
+                raise ValueError("First T3.13 ablation uses shared concentration features; disable boundary-specific gate")
+            centers = local_window_centers or ((1000.0, 1600.0), (2230.0,), (1090.0, 1597.0))
+            self.local_quantitative_branch = LocalQuantitativeBranch(
+                feature_dim, self.model_length, centers, half_width=local_half_width,
+                hidden=local_hidden, strength=local_strength,
+            )
+
+        # T3.14 is a separate, optional anchored calibration path. Default OFF
+        # adds no state_dict entries to the historical T3.10/T3.13 models.
+        self.anchored_local_calibration = None
+        if use_anchored_local_calibration:
+            if (self.n_labels != 3 or self.concentration_head_mode != "ordinal"
+                    or not self.use_mixture_aware_query_fusion
+                    or self.use_local_quantitative_branch
+                    or self.use_adaptive_mixture_gate
+                    or self.use_boundary_specific_mixture_gate):
+                raise ValueError("T3.14 requires the original three-head ordinal T3.10 path; disable T3.13/adaptive/boundary gates")
+            from T3_14_Calibration import AnchoredLocalCalibrator
+            centers = local_window_centers or ((1000.0, 1600.0), (2230.0,), (1090.0, 1597.0))
+            self.anchored_local_calibration = AnchoredLocalCalibrator(
+                centers, logit_bound=calibration_logit_bound,
+                uncertainty_band=calibration_uncertainty_band,
+                hidden=calibration_hidden, half_width=calibration_half_width,
+            )
+            for name, parameter in self.named_parameters():
+                parameter.requires_grad_(name.startswith("anchored_local_calibration."))
+            self.train(False)
+
+    def train(self, mode: bool = True):
+        if getattr(self, "anchored_local_calibration", None) is not None:
+            # requires_grad=False alone does NOT freeze BatchNorm buffers or
+            # disable dropout. Keep every anchor child in eval mode explicitly.
+            super().train(False)
+            self.anchored_local_calibration.train(mode)
+            return self
+        return super().train(mode)
 
     def set_peak_prior(self, peak_prior: Tensor) -> None:
         """Install [DEL, CHL, TEB] point-level soft priors into the model."""
@@ -1289,6 +1550,12 @@ class TransformerClassifyRegress_sep(nn.Module):
                     fusion_output
                 )
 
+        if self.local_quantitative_branch is not None:
+            if not isinstance(data, Mapping) or "raw_intensity" not in data:
+                raise ValueError("T3.13 requires raw_intensity from the updated Dataset.py")
+            local_correction = self.local_quantitative_branch(data["raw_intensity"], valid_mask)
+            concentration_query_features = concentration_query_features + local_correction
+
         ordinal_probabilities: Tensor | None = None
         ordinal_logits: Tensor | None = None
 
@@ -1362,6 +1629,13 @@ class TransformerClassifyRegress_sep(nn.Module):
                         )
                     ],
                     dim=1,
+                )
+
+            if self.anchored_local_calibration is not None:
+                if not isinstance(data, Mapping) or "raw_intensity" not in data:
+                    raise ValueError("T3.14 requires raw_intensity from the updated Dataset.py")
+                ordinal_logits = self.anchored_local_calibration(
+                    data["raw_intensity"], valid_mask, ordinal_logits,
                 )
 
             ordinal_probabilities = self._ordered_probabilities_from_logits(

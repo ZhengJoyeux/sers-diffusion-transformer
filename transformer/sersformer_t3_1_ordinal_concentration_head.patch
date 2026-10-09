@@ -1,0 +1,969 @@
+diff --git a/Inference.py b/Inference.py
+index 7717a21..f235e84 100644
+--- a/Inference.py
++++ b/Inference.py
+@@ -267,6 +267,128 @@ def _regression_metrics(
+     return overall, pd.DataFrame(rows)
+ 
+ 
++def _ordinal_level_metrics(
++    y_reg: np.ndarray,
++    ordinal_probability: np.ndarray,
++    y_class: np.ndarray,
++    y_pred_class: np.ndarray,
++    frame: pd.DataFrame,
++    threshold: float = 0.5,
++) -> tuple[dict[str, Any], pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame]]:
++    """Evaluate present-only pesticide-specific ordered S/M/H predictions.
++
++    ``ordinal_probability[...,0]`` is P(level>=M) and ``[...,1]`` is
++    P(level>=H). Classification is used only for the final 0/S/M/H profile;
++    present-target S/M/H accuracy is measured independently of presence gating.
++    """
++    y_reg = np.asarray(y_reg, dtype=np.float64)
++    ordinal_probability = np.asarray(ordinal_probability, dtype=np.float64)
++    y_class = np.asarray(y_class, dtype=np.int64)
++    y_pred_class = np.asarray(y_pred_class, dtype=np.int64)
++
++    if ordinal_probability.shape != (*y_reg.shape, 2):
++        raise ValueError(
++            "ordinal_probability must be [samples,pesticides,2], got "
++            f"{ordinal_probability.shape} for y_reg {y_reg.shape}"
++        )
++
++    true_level = np.rint(y_reg).astype(np.int64)
++    present = y_class > 0
++    predicted_present_level = 1 + (
++        ordinal_probability >= float(threshold)
++    ).sum(axis=-1).astype(np.int64)
++    final_predicted_level = np.where(
++        y_pred_class > 0, predicted_present_level, 0
++    )
++
++    if present.any():
++        present_accuracy = float(
++            np.mean(predicted_present_level[present] == true_level[present])
++        )
++    else:
++        present_accuracy = float("nan")
++    profile_exact = np.all(final_predicted_level == true_level, axis=1)
++
++    per_rows: list[dict[str, Any]] = []
++    confusion_tables: dict[str, pd.DataFrame] = {}
++    level_names = {1: "S", 2: "M", 3: "H"}
++    for index, pesticide in enumerate(PESTICIDES):
++        mask = present[:, index]
++        truth = true_level[mask, index]
++        pred = predicted_present_level[mask, index]
++        row: dict[str, Any] = {
++            "pesticide": pesticide,
++            "n_present": int(mask.sum()),
++            "accuracy": float(np.mean(truth == pred)) if truth.size else float("nan"),
++        }
++        cm = confusion_matrix(truth, pred, labels=[1, 2, 3])
++        confusion_tables[pesticide] = pd.DataFrame(
++            cm,
++            index=["True_S", "True_M", "True_H"],
++            columns=["Pred_S", "Pred_M", "Pred_H"],
++        )
++        for level, name in level_names.items():
++            level_mask = truth == level
++            n_level = int(level_mask.sum())
++            correct = int(np.sum(pred[level_mask] == level)) if n_level else 0
++            row[f"{name}_n"] = n_level
++            row[f"{name}_correct"] = correct
++            row[f"{name}_accuracy"] = (
++                float(correct / n_level) if n_level else float("nan")
++            )
++        per_rows.append(row)
++
++    mixture_count = y_class.sum(axis=1)
++    mixture_rows: list[dict[str, Any]] = []
++    for count, name in ((1, "single"), (2, "binary"), (3, "ternary")):
++        mask = mixture_count == count
++        n = int(mask.sum())
++        correct = int(profile_exact[mask].sum()) if n else 0
++        mixture_rows.append(
++            {
++                "group": name,
++                "n": n,
++                "correct": correct,
++                "exact_concentration_accuracy": (
++                    float(correct / n) if n else float("nan")
++                ),
++            }
++        )
++
++    matrix_rows: list[dict[str, Any]] = []
++    matrix_values = frame["matrix"].astype(str).to_numpy()
++    for matrix in sorted(pd.unique(matrix_values)):
++        mask = matrix_values == matrix
++        n = int(mask.sum())
++        correct = int(profile_exact[mask].sum()) if n else 0
++        matrix_rows.append(
++            {
++                "matrix": matrix,
++                "n": n,
++                "correct": correct,
++                "exact_concentration_accuracy": (
++                    float(correct / n) if n else float("nan")
++                ),
++            }
++        )
++
++    overall = {
++        "ordinal_threshold": float(threshold),
++        "present_target_accuracy": present_accuracy,
++        "present_target_n": int(present.sum()),
++        "full_0_S_M_H_profile_exact_accuracy": float(profile_exact.mean()),
++        "full_profile_correct": int(profile_exact.sum()),
++        "samples": int(len(profile_exact)),
++    }
++    return (
++        overall,
++        pd.DataFrame(per_rows),
++        pd.DataFrame(mixture_rows),
++        pd.DataFrame(matrix_rows),
++        confusion_tables,
++    )
++
++
+ def _plot_matrix(
+     matrix: np.ndarray,
+     labels: list[str],
+@@ -777,7 +899,15 @@ def _collect_predictions(
+     device: torch.device,
+     batch_size: int,
+     num_workers: int,
+-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, pd.DataFrame]:
++) -> tuple[
++    np.ndarray,
++    np.ndarray,
++    np.ndarray,
++    np.ndarray,
++    np.ndarray | None,
++    np.ndarray,
++    pd.DataFrame,
++]:
+     loader = DataLoader(
+         dataset,
+         batch_size=batch_size,
+@@ -797,6 +927,12 @@ def _collect_predictions(
+     concentration_targets: list[np.ndarray] = []
+     concentration_predictions: list[np.ndarray] = []
+     query_attentions: list[np.ndarray] = []
++    ordinal_probabilities: list[np.ndarray] = []
++    concentration_head_mode = str(
++        checkpoint.get("model_config", {}).get(
++            "concentration_head_mode", "continuous"
++        )
++    )
+     rows: list[dict[str, Any]] = []
+ 
+     with torch.no_grad():
+@@ -807,9 +943,17 @@ def _collect_predictions(
+                 "smoothed": batch["smoothed"].to(device, non_blocking=True),
+                 "valid_mask": batch["valid_mask"].to(device, non_blocking=True),
+             }
+-            class_pred, reg_pred, attention = model(
+-                model_batch, return_attention=True
+-            )
++            if concentration_head_mode == "ordinal":
++                class_pred, reg_pred, attention, ordinal_probability = model(
++                    model_batch, return_attention=True, return_ordinal=True
++                )
++                ordinal_probability_np = ordinal_probability.cpu().numpy()
++                ordinal_probabilities.append(ordinal_probability_np)
++            else:
++                class_pred, reg_pred, attention = model(
++                    model_batch, return_attention=True
++                )
++                ordinal_probability_np = None
+             class_true_np = batch["class_target"].numpy()
+             class_prob_np = class_pred.cpu().numpy()
+             reg_true_np = batch["concentration_target"].numpy()
+@@ -844,13 +988,26 @@ def _collect_predictions(
+                     row[f"pred_concentration_{pesticide}"] = float(
+                         reg_pred_np[row_index, pesticide_index]
+                     )
++                    if ordinal_probability_np is not None:
++                        row[f"prob_level_ge_M_{pesticide}"] = float(
++                            ordinal_probability_np[row_index, pesticide_index, 0]
++                        )
++                        row[f"prob_level_ge_H_{pesticide}"] = float(
++                            ordinal_probability_np[row_index, pesticide_index, 1]
++                        )
+                 rows.append(row)
+ 
++    ordinal_output = (
++        np.concatenate(ordinal_probabilities, axis=0)
++        if ordinal_probabilities
++        else None
++    )
+     return (
+         np.concatenate(class_targets, axis=0),
+         np.concatenate(class_probabilities, axis=0),
+         np.concatenate(concentration_targets, axis=0),
+         np.concatenate(concentration_predictions, axis=0),
++        ordinal_output,
+         np.concatenate(query_attentions, axis=0),
+         pd.DataFrame(rows),
+     )
+@@ -870,7 +1027,15 @@ def evaluate_split(
+     split_dir = output_directory / split
+     split_dir.mkdir(parents=True, exist_ok=True)
+ 
+-    y_class, p_class, y_reg, p_reg, query_attention, frame = _collect_predictions(
++    (
++        y_class,
++        p_class,
++        y_reg,
++        p_reg,
++        ordinal_probability,
++        query_attention,
++        frame,
++    ) = _collect_predictions(
+         checkpoint,
+         dataset,
+         device,
+@@ -889,13 +1054,63 @@ def evaluate_split(
+         y_pred,
+     )
+ 
++    ordinal_result: dict[str, Any] | None = None
++    ordinal_per_pesticide: pd.DataFrame | None = None
++    ordinal_by_mixture: pd.DataFrame | None = None
++    ordinal_by_matrix: pd.DataFrame | None = None
++    ordinal_confusions: dict[str, pd.DataFrame] | None = None
++    if ordinal_probability is not None:
++        (
++            ordinal_result,
++            ordinal_per_pesticide,
++            ordinal_by_mixture,
++            ordinal_by_matrix,
++            ordinal_confusions,
++        ) = _ordinal_level_metrics(
++            y_reg,
++            ordinal_probability,
++            y_class,
++            y_pred,
++            frame,
++            threshold=0.5,
++        )
++
+     for index, pesticide in enumerate(PESTICIDES):
+         frame[f"pred_class_{pesticide}"] = y_pred[:, index]
++        if ordinal_probability is not None:
++            present_level = 1 + (
++                ordinal_probability[:, index, :] >= 0.5
++            ).sum(axis=-1).astype(np.int64)
++            frame[f"pred_level_{pesticide}"] = np.where(
++                y_pred[:, index] > 0, present_level, 0
++            )
+     frame.to_csv(split_dir / "predictions.csv", index=False)
+     per_pesticide.to_csv(split_dir / "classification_per_pesticide.csv", index=False)
+     regression_per_pesticide.to_csv(
+         split_dir / "regression_per_pesticide.csv", index=False
+     )
++    if ordinal_result is not None:
++        ordinal_per_pesticide.to_csv(
++            split_dir / "ordinal_per_pesticide.csv", index=False
++        )
++        ordinal_by_mixture.to_csv(
++            split_dir / "ordinal_by_mixture_complexity.csv", index=False
++        )
++        ordinal_by_matrix.to_csv(
++            split_dir / "ordinal_by_matrix.csv", index=False
++        )
++        ordinal_confusion_dir = split_dir / "ordinal_confusion_matrices"
++        ordinal_confusion_dir.mkdir(parents=True, exist_ok=True)
++        for pesticide, table in ordinal_confusions.items():
++            table.to_csv(
++                ordinal_confusion_dir / f"{pesticide}_S_M_H_confusion.csv"
++            )
++        with (split_dir / "ordinal_metrics.json").open(
++            "w", encoding="utf-8"
++        ) as handle:
++            json.dump(
++                ordinal_result, handle, ensure_ascii=False, indent=2, allow_nan=True
++            )
+ 
+     complexity, matrix_metrics, combination_metrics = _stratified_metrics(
+         frame, classification_threshold
+@@ -938,6 +1153,12 @@ def evaluate_split(
+         ),
+         "classification": classification,
+         "regression": regression,
++        "concentration_head_mode": str(
++            checkpoint.get("model_config", {}).get(
++                "concentration_head_mode", "continuous"
++            )
++        ),
++        "ordinal_concentration": ordinal_result,
+     }
+     with (split_dir / "metrics.json").open("w", encoding="utf-8") as handle:
+         json.dump(result, handle, ensure_ascii=False, indent=2, allow_nan=True)
+@@ -954,6 +1175,10 @@ def evaluate_split(
+     lines.extend(["", "[Regression]"])
+     for scope, values in regression.items():
+         lines.append(f"{scope}: {values}")
++    if ordinal_result is not None:
++        lines.extend(["", "[Ordinal S/M/H concentration levels]"])
++        for key, value in ordinal_result.items():
++            lines.append(f"{key}: {value}")
+     if target_mode != "physical":
+         lines.extend(
+             [
+@@ -980,6 +1205,13 @@ def evaluate_split(
+         f"MAE={present_metrics['mae']}, RMSE={present_metrics['rmse']}, "
+         f"R2={present_metrics['r2']}"
+     )
++    if ordinal_result is not None:
++        print(
++            "ordinal S/M/H: "
++            f"present_acc={ordinal_result['present_target_accuracy']:.4f}, "
++            f"full_profile_exact="
++            f"{ordinal_result['full_0_S_M_H_profile_exact_accuracy']:.4f}"
++        )
+     print(f"saved: {split_dir}")
+     return result
+ 
+diff --git a/Model_v2.py b/Model_v2.py
+index c8706b7..2e0b874 100644
+--- a/Model_v2.py
++++ b/Model_v2.py
+@@ -17,7 +17,9 @@ Key design points:
+ - valid_mask remains authoritative for any unavailable Raman positions.
+ - The formal downstream model uses the common 600-2000 cm^-1 range to prevent
+   source-axis length from leaking the CHL label.
+-- The public forward interface remains [classification_probability, concentration].
++- The default public forward interface remains [classification_probability, concentration].
++- T3.1 optionally uses pesticide-specific ordered S/M/H concentration heads while
++  preserving the T1/T2 continuous-regression checkpoint path.
+ """
+ 
+ from __future__ import annotations
+@@ -106,6 +108,45 @@ def _sinusoidal_position_encoding(length: int, dimension: int) -> Tensor:
+     return encoding.unsqueeze(0)
+ 
+ 
++def level_codes_to_ordinal_targets(concentration_target: Tensor) -> Tensor:
++    """Convert 0/S/M/H codes to cumulative ordinal targets.
++
++    Present levels are encoded as S=1->[0,0], M=2->[1,0], H=3->[1,1].
++    Absent entries (0) are intentionally handled by a separate presence mask.
++    """
++    if concentration_target.ndim != 2:
++        raise ValueError(
++            "concentration_target must be [B,P], got "
++            f"{tuple(concentration_target.shape)}"
++        )
++    ge_m = (concentration_target >= 2.0).to(concentration_target.dtype)
++    ge_h = (concentration_target >= 3.0).to(concentration_target.dtype)
++    return torch.stack((ge_m, ge_h), dim=-1)
++
++
++def present_only_ordinal_bce(
++    ordinal_probability: Tensor,
++    concentration_target: Tensor,
++    presence_target: Tensor,
++) -> Tensor:
++    """Cumulative BCE evaluated only where the pesticide is truly present."""
++    if ordinal_probability.ndim != 3 or ordinal_probability.shape[-1] != 2:
++        raise ValueError(
++            "ordinal_probability must be [B,P,2], got "
++            f"{tuple(ordinal_probability.shape)}"
++        )
++    if concentration_target.shape != ordinal_probability.shape[:2]:
++        raise ValueError("concentration_target shape does not match ordinal probabilities")
++    if presence_target.shape != ordinal_probability.shape[:2]:
++        raise ValueError("presence_target shape does not match ordinal probabilities")
++
++    target = level_codes_to_ordinal_targets(concentration_target)
++    present = presence_target > 0.5
++    if not bool(present.any()):
++        return ordinal_probability.sum() * 0.0
++    return F.binary_cross_entropy(ordinal_probability[present], target[present])
++
++
+ class regression_features(nn.Module):
+     """Percentile-feature 1-D CNN branch."""
+ 
+@@ -321,6 +362,7 @@ class TransformerClassifyRegress_sep(nn.Module):
+         model_length: int = DEFAULT_MODEL_LENGTH,
+         peak_guidance_strength_init: float = 1.5,
+         use_peak_guidance: bool = True,
++        concentration_head_mode: str = "continuous",
+     ) -> None:
+         super().__init__()
+ 
+@@ -334,6 +376,12 @@ class TransformerClassifyRegress_sep(nn.Module):
+         self.dim_model = int(dim_model)
+         self.n_labels = int(n_labels)
+         self.model_length = int(model_length)
++        self.concentration_head_mode = str(concentration_head_mode)
++        if self.concentration_head_mode not in {"continuous", "ordinal"}:
++            raise ValueError(
++                "concentration_head_mode must be 'continuous' or 'ordinal', "
++                f"got {self.concentration_head_mode!r}"
++            )
+         self.token_length = _conv_pool_output_length(self.model_length)
+         feature_dim = self.dim_model * 2
+ 
+@@ -402,23 +450,82 @@ class TransformerClassifyRegress_sep(nn.Module):
+                 for _ in range(self.n_labels)
+             ]
+         )
+-        self.regression_heads = nn.ModuleList(
+-            [
+-                nn.Sequential(
+-                    nn.Linear(feature_dim, head_hidden),
+-                    nn.GELU(),
+-                    nn.Dropout(drop),
+-                    nn.Linear(head_hidden, 1),
+-                    nn.ReLU(),
+-                )
+-                for _ in range(self.n_labels)
+-            ]
+-        )
++        if self.concentration_head_mode == "continuous":
++            # T2-compatible scalar regression heads. Keeping these keys only in
++            # continuous mode preserves strict loading of existing T1/T2 checkpoints.
++            self.regression_heads = nn.ModuleList(
++                [
++                    nn.Sequential(
++                        nn.Linear(feature_dim, head_hidden),
++                        nn.GELU(),
++                        nn.Dropout(drop),
++                        nn.Linear(head_hidden, 1),
++                        nn.ReLU(),
++                    )
++                    for _ in range(self.n_labels)
++                ]
++            )
++        else:
++            # T3.1: one pesticide-specific ordinal head per query. Each head
++            # predicts two ordered cumulative events: level >= M and level >= H.
++            # The second probability is parameterized conditionally so that
++            # P(level>=H) <= P(level>=M) by construction.
++            self.ordinal_heads = nn.ModuleList(
++                [
++                    nn.Sequential(
++                        nn.Linear(feature_dim, head_hidden),
++                        nn.GELU(),
++                        nn.Dropout(drop),
++                        nn.Linear(head_hidden, 2),
++                    )
++                    for _ in range(self.n_labels)
++                ]
++            )
+ 
+     def set_peak_prior(self, peak_prior: Tensor) -> None:
+         """Install [DEL, CHL, TEB] point-level soft priors into the model."""
+         self.peak_guided_attention.set_peak_prior(peak_prior)
+ 
++    @staticmethod
++    def _ordered_probabilities_from_logits(logits: Tensor) -> Tensor:
++        """Convert two raw ordinal logits to monotonic cumulative probabilities.
++
++        Output order is [P(level>=M), P(level>=H)]. Multiplicative
++        parameterization guarantees the chemically sensible ordering
++        P(level>=H) <= P(level>=M) without a hard post-hoc correction.
++        """
++        if logits.shape[-1] != 2:
++            raise ValueError(
++                f"ordinal logits must end with dimension 2, got {tuple(logits.shape)}"
++            )
++        probability_ge_m = torch.sigmoid(logits[..., 0])
++        probability_h_given_ge_m = torch.sigmoid(logits[..., 1])
++        probability_ge_h = probability_ge_m * probability_h_given_ge_m
++        return torch.stack((probability_ge_m, probability_ge_h), dim=-1)
++
++    @staticmethod
++    def ordinal_probabilities_to_expected_level(probabilities: Tensor) -> Tensor:
++        """Decode cumulative probabilities to a differentiable expected level in [1,3]."""
++        if probabilities.shape[-1] != 2:
++            raise ValueError(
++                "ordinal probabilities must end with dimension 2, "
++                f"got {tuple(probabilities.shape)}"
++            )
++        return 1.0 + probabilities.sum(dim=-1)
++
++    @staticmethod
++    def ordinal_probabilities_to_level(
++        probabilities: Tensor,
++        threshold: float = 0.5,
++    ) -> Tensor:
++        """Decode cumulative probabilities to discrete S/M/H codes 1/2/3."""
++        if probabilities.shape[-1] != 2:
++            raise ValueError(
++                "ordinal probabilities must end with dimension 2, "
++                f"got {tuple(probabilities.shape)}"
++            )
++        return 1 + (probabilities >= float(threshold)).to(torch.long).sum(dim=-1)
++
+     @staticmethod
+     def _unpack_data(
+         data: Mapping[str, Tensor] | Sequence[Tensor],
+@@ -488,6 +595,7 @@ class TransformerClassifyRegress_sep(nn.Module):
+         data: Mapping[str, Tensor] | Sequence[Tensor],
+         valid_mask: Tensor | None = None,
+         return_attention: bool = False,
++        return_ordinal: bool = False,
+     ) -> list[Tensor]:
+         raw, percentile, smoothed, valid_mask = self._unpack_data(data, valid_mask)
+         valid_mask = self._validate_inputs(raw, percentile, smoothed, valid_mask)
+@@ -528,13 +636,45 @@ class TransformerClassifyRegress_sep(nn.Module):
+             head(query_features[:, pesticide_index, :])
+             for pesticide_index, head in enumerate(self.classification_heads)
+         ]
+-        regression_columns = [
+-            head(query_features[:, pesticide_index, :])
+-            for pesticide_index, head in enumerate(self.regression_heads)
+-        ]
+         classify = torch.cat(class_columns, dim=1)
+-        regress = torch.cat(regression_columns, dim=1)
+ 
++        ordinal_probabilities: Tensor | None = None
++        if self.concentration_head_mode == "continuous":
++            regression_columns = [
++                head(query_features[:, pesticide_index, :])
++                for pesticide_index, head in enumerate(self.regression_heads)
++            ]
++            regress = torch.cat(regression_columns, dim=1)
++        else:
++            ordinal_logits = torch.stack(
++                [
++                    head(query_features[:, pesticide_index, :])
++                    for pesticide_index, head in enumerate(self.ordinal_heads)
++                ],
++                dim=1,
++            )
++            ordinal_probabilities = self._ordered_probabilities_from_logits(
++                ordinal_logits
++            )
++            # Keep the public concentration tensor [B,3] so the existing
++            # evaluation/plotting pipeline can still report level-code MAE/RMSE.
++            # This is the conditional expected S/M/H code, not a physical concentration.
++            regress = self.ordinal_probabilities_to_expected_level(
++                ordinal_probabilities
++            )
++
++        if return_attention and return_ordinal:
++            if ordinal_probabilities is None:
++                raise RuntimeError(
++                    "return_ordinal=True requires concentration_head_mode='ordinal'"
++                )
++            return [classify, regress, attention, ordinal_probabilities]
+         if return_attention:
+             return [classify, regress, attention]
++        if return_ordinal:
++            if ordinal_probabilities is None:
++                raise RuntimeError(
++                    "return_ordinal=True requires concentration_head_mode='ordinal'"
++                )
++            return [classify, regress, ordinal_probabilities]
+         return [classify, regress]
+diff --git a/SERSFormer_Training.py b/SERSFormer_Training.py
+index 0ead442..ef3fcc3 100644
+--- a/SERSFormer_Training.py
++++ b/SERSFormer_Training.py
+@@ -36,7 +36,10 @@ from Metric import (
+     multilabel_classification_metrics,
+     regression_metrics,
+ )
+-from Model_v2 import TransformerClassifyRegress_sep
++from Model_v2 import (
++    TransformerClassifyRegress_sep,
++    present_only_ordinal_bce,
++)
+ 
+ 
+ def parse_args() -> argparse.Namespace:
+@@ -67,6 +70,15 @@ def parse_args() -> argparse.Namespace:
+     parser.add_argument("--dim-ff", type=int, default=64)
+     parser.add_argument("--dropout", type=float, default=0.1)
+     parser.add_argument("--encoder-layers", type=int, default=4)
++    parser.add_argument(
++        "--concentration-head-mode",
++        choices=("continuous", "ordinal"),
++        default="continuous",
++        help=(
++            "continuous keeps the T1/T2 scalar level-code regression head; "
++            "ordinal enables T3.1 pesticide-specific present-only ordered S/M/H heads."
++        ),
++    )
+ 
+     parser.add_argument(
+         "--query-attention-mode",
+@@ -175,6 +187,43 @@ def _to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
+     return output
+ 
+ 
++def _ordinal_metrics_from_probabilities(
++    concentration_target: np.ndarray,
++    class_target: np.ndarray,
++    class_probability: np.ndarray,
++    ordinal_probability: np.ndarray,
++    threshold: float = 0.5,
++) -> dict[str, float]:
++    """Training-time level metrics; final detailed tables are produced by Inference.py."""
++    concentration_target = np.asarray(concentration_target)
++    class_target = np.asarray(class_target)
++    class_probability = np.asarray(class_probability)
++    ordinal_probability = np.asarray(ordinal_probability)
++
++    present = class_target > 0.5
++    predicted_present_level = 1 + (ordinal_probability >= float(threshold)).sum(axis=-1)
++    true_level = np.rint(concentration_target).astype(np.int64)
++    present_accuracy = float(
++        np.mean(predicted_present_level[present] == true_level[present])
++    ) if present.any() else float("nan")
++
++    predicted_presence = class_probability >= 0.5
++    final_level = np.where(predicted_presence, predicted_present_level, 0)
++    exact_profile = float(np.mean(np.all(final_level == true_level, axis=1)))
++
++    metrics = {
++        "ordinal_accuracy_present": present_accuracy,
++        "ordinal_exact_profile_accuracy": exact_profile,
++    }
++    for index, pesticide in enumerate(PESTICIDES):
++        mask = present[:, index]
++        value = float(
++            np.mean(predicted_present_level[mask, index] == true_level[mask, index])
++        ) if mask.any() else float("nan")
++        metrics[f"ordinal_accuracy_{pesticide}"] = value
++    return metrics
++
++
+ def run_epoch(
+     *,
+     model: nn.Module,
+@@ -182,6 +231,7 @@ def run_epoch(
+     device: torch.device,
+     classification_loss_fn: nn.Module,
+     regression_loss_fn: nn.Module,
++    concentration_head_mode: str,
+     classification_weight: float,
+     regression_weight: float,
+     optimizer: torch.optim.Optimizer | None,
+@@ -199,6 +249,7 @@ def run_epoch(
+     class_probabilities: list[np.ndarray] = []
+     concentration_targets: list[np.ndarray] = []
+     concentration_predictions: list[np.ndarray] = []
++    ordinal_probabilities: list[np.ndarray] = []
+ 
+     context = torch.enable_grad() if training else torch.no_grad()
+     with context:
+@@ -210,12 +261,29 @@ def run_epoch(
+             if training:
+                 optimizer.zero_grad(set_to_none=True)
+ 
+-            class_pred, reg_pred = model(batch)
+             class_target = batch["class_target"]
+             reg_target = batch["concentration_target"]
+ 
++            if concentration_head_mode == "ordinal":
++                class_pred, reg_pred, ordinal_probability = model(
++                    batch, return_ordinal=True
++                )
++                reg_loss = present_only_ordinal_bce(
++                    ordinal_probability,
++                    reg_target,
++                    class_target,
++                )
++            elif concentration_head_mode == "continuous":
++                class_pred, reg_pred = model(batch)
++                ordinal_probability = None
++                # Preserve the exact T1/T2 objective for checkpoint/ablation compatibility.
++                reg_loss = regression_loss_fn(reg_pred, reg_target)
++            else:
++                raise ValueError(
++                    f"Unknown concentration_head_mode: {concentration_head_mode}"
++                )
++
+             class_loss = classification_loss_fn(class_pred, class_target)
+-            reg_loss = regression_loss_fn(reg_pred, reg_target)
+             total_loss = classification_weight * class_loss + regression_weight * reg_loss
+ 
+             if training:
+@@ -232,6 +300,10 @@ def run_epoch(
+             class_probabilities.append(class_pred.detach().cpu().numpy())
+             concentration_targets.append(reg_target.detach().cpu().numpy())
+             concentration_predictions.append(reg_pred.detach().cpu().numpy())
++            if ordinal_probability is not None:
++                ordinal_probabilities.append(
++                    ordinal_probability.detach().cpu().numpy()
++                )
+ 
+     if sample_count == 0:
+         raise RuntimeError("No samples were processed in the epoch")
+@@ -257,6 +329,19 @@ def run_epoch(
+         "concentration_target": y_reg,
+         "concentration_prediction": p_reg,
+     }
++    if concentration_head_mode == "ordinal":
++        if not ordinal_probabilities:
++            raise RuntimeError("Ordinal mode produced no ordinal probabilities")
++        p_ordinal = np.concatenate(ordinal_probabilities, axis=0)
++        metrics.update(
++            _ordinal_metrics_from_probabilities(
++                y_reg,
++                y_class,
++                p_class,
++                p_ordinal,
++            )
++        )
++        arrays["ordinal_probability"] = p_ordinal
+     return metrics, arrays
+ 
+ 
+@@ -276,7 +361,7 @@ def save_checkpoint(
+     path.parent.mkdir(parents=True, exist_ok=True)
+     torch.save(
+         {
+-            "checkpoint_version": 1,
++            "checkpoint_version": 2,
+             "epoch": int(epoch),
+             "best_validation_loss": float(best_validation_loss),
+             "model_state_dict": model.state_dict(),
+@@ -331,6 +416,15 @@ def main() -> None:
+             "WARNING: concentration_target currently uses level codes 0/1/2/3; "
+             "do not interpret regression metrics as physical concentration metrics."
+         )
++    if (
++        args.concentration_head_mode == "ordinal"
++        and train_dataset.repository.target_mode != "level_code"
++    ):
++        raise ValueError(
++            "T3.1 ordinal concentration head requires level_code targets S/M/H. "
++            "Use continuous mode when physical concentration targets are enabled."
++        )
++    print(f"concentration head: {args.concentration_head_mode}")
+ 
+     train_loader = make_loader(
+         train_dataset, args.batch_size, True, args.num_workers, device
+@@ -413,6 +507,7 @@ def main() -> None:
+         "model_length": MODEL_LENGTH,
+         "peak_guidance_strength_init": args.peak_guidance_strength,
+         "use_peak_guidance": use_peak_guidance,
++        "concentration_head_mode": args.concentration_head_mode,
+     }
+     model = TransformerClassifyRegress_sep(**model_config)
+     model.set_peak_prior(torch.from_numpy(peak_prior))
+@@ -457,6 +552,12 @@ def main() -> None:
+         ),
+         "axis_label_audit": axis_audit,
+         "query_attention_mode": args.query_attention_mode,
++        "concentration_head_mode": args.concentration_head_mode,
++        "concentration_training_scope": (
++            "present-only cumulative ordinal BCE"
++            if args.concentration_head_mode == "ordinal"
++            else "legacy T1/T2 continuous MSE"
++        ),
+         "peak_prior_fit": (
+             "real training spectra only; validation/test/generated excluded"
+             if use_peak_guidance
+@@ -484,6 +585,7 @@ def main() -> None:
+             device=device,
+             classification_loss_fn=classification_loss_fn,
+             regression_loss_fn=regression_loss_fn,
++            concentration_head_mode=args.concentration_head_mode,
+             classification_weight=class_weight,
+             regression_weight=reg_weight,
+             optimizer=optimizer,
+@@ -498,6 +600,7 @@ def main() -> None:
+             device=device,
+             classification_loss_fn=classification_loss_fn,
+             regression_loss_fn=regression_loss_fn,
++            concentration_head_mode=args.concentration_head_mode,
+             classification_weight=class_weight,
+             regression_weight=reg_weight,
+             optimizer=None,
+@@ -528,12 +631,24 @@ def main() -> None:
+         rows.append(row)
+         pd.DataFrame(rows).to_csv(output_directory / "training_history.csv", index=False)
+ 
++        if args.concentration_head_mode == "ordinal":
++            concentration_text = (
++                f"val_level_acc_present="
++                f"{validation_metrics['ordinal_accuracy_present']:.4f} "
++                f"val_level_exact="
++                f"{validation_metrics['ordinal_exact_profile_accuracy']:.4f}"
++            )
++        else:
++            concentration_text = (
++                f"val_RMSE_present="
++                f"{validation_metrics['reg_rmse_present']:.6f}"
++            )
+         print(
+             f"epoch={epoch:03d} "
+             f"train={train_metrics['loss_total']:.6f} "
+             f"val={validation_loss:.6f} "
+             f"val_F1_micro={validation_metrics['class_f1_micro']:.4f} "
+-            f"val_RMSE_present={validation_metrics['reg_rmse_present']:.6f} "
++            f"{concentration_text} "
+             f"weights=({class_weight:.3f},{reg_weight:.3f}) "
+             f"lr={learning_rate:.3e}"
+         )
+diff --git a/tests/test_ordinal_concentration_head.py b/tests/test_ordinal_concentration_head.py
+new file mode 100644
+index 0000000..674dea5
+--- /dev/null
++++ b/tests/test_ordinal_concentration_head.py
+@@ -0,0 +1,154 @@
++from __future__ import annotations
++
++import numpy as np
++import pandas as pd
++import torch
++
++from Inference import _ordinal_level_metrics
++from Model_v2 import (
++    TransformerClassifyRegress_sep,
++    level_codes_to_ordinal_targets,
++    present_only_ordinal_bce,
++)
++
++
++def _batch(batch_size: int = 2, length: int = 1401):
++    return {
++        "raw": torch.rand(batch_size, 1, length),
++        "percentile": torch.rand(batch_size, 4, length),
++        "smoothed": torch.rand(batch_size, 1, length),
++        "valid_mask": torch.ones(batch_size, length, dtype=torch.bool),
++    }
++
++
++def test_ordinal_head_shapes_monotonicity_and_default_interface():
++    torch.manual_seed(2026)
++    model = TransformerClassifyRegress_sep(
++        dim_model=8,
++        attn_head=2,
++        dim_ff=32,
++        encoder_layers=1,
++        n_labels=3,
++        model_length=1401,
++        concentration_head_mode="ordinal",
++    )
++    model.eval()
++
++    with torch.no_grad():
++        class_pred, level_expectation, ordinal_probability = model(
++            _batch(), return_ordinal=True
++        )
++
++    assert class_pred.shape == (2, 3)
++    assert level_expectation.shape == (2, 3)
++    assert ordinal_probability.shape == (2, 3, 2)
++    assert torch.all(ordinal_probability[..., 1] <= ordinal_probability[..., 0])
++    assert torch.all(level_expectation >= 1.0)
++    assert torch.all(level_expectation <= 3.0)
++
++    # Existing callers still receive exactly two outputs by default.
++    default_outputs = model(_batch())
++    assert len(default_outputs) == 2
++
++
++def test_present_only_ordinal_bce_ignores_absent_pesticides():
++    probability = torch.tensor(
++        [
++            [[0.2, 0.1], [0.8, 0.2], [0.9, 0.8]],
++            [[0.4, 0.2], [0.7, 0.3], [0.6, 0.2]],
++        ],
++        dtype=torch.float32,
++    )
++    concentration = torch.tensor(
++        [
++            [1.0, 2.0, 3.0],
++            [0.0, 2.0, 0.0],
++        ],
++        dtype=torch.float32,
++    )
++    presence = torch.tensor(
++        [
++            [1.0, 1.0, 1.0],
++            [0.0, 1.0, 0.0],
++        ],
++        dtype=torch.float32,
++    )
++
++    target = level_codes_to_ordinal_targets(concentration)
++    assert target[0].tolist() == [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]
++
++    loss_a = present_only_ordinal_bce(probability, concentration, presence)
++
++    changed_absent = probability.clone()
++    changed_absent[1, 0] = torch.tensor([0.99, 0.99])
++    changed_absent[1, 2] = torch.tensor([0.01, 0.01])
++    loss_b = present_only_ordinal_bce(changed_absent, concentration, presence)
++
++    torch.testing.assert_close(loss_a, loss_b)
++
++
++def test_ordinal_evaluation_reports_present_and_profile_accuracy():
++    y_class = np.array(
++        [
++            [1, 0, 0],
++            [1, 1, 0],
++            [1, 1, 1],
++        ],
++        dtype=np.int64,
++    )
++    y_reg = np.array(
++        [
++            [1, 0, 0],
++            [2, 3, 0],
++            [3, 2, 1],
++        ],
++        dtype=np.float64,
++    )
++    # All six present pesticide-level targets are decoded correctly.
++    ordinal_probability = np.array(
++        [
++            [[0.10, 0.02], [0.10, 0.02], [0.10, 0.02]],
++            [[0.90, 0.10], [0.95, 0.80], [0.10, 0.02]],
++            [[0.95, 0.80], [0.90, 0.10], [0.10, 0.02]],
++        ],
++        dtype=np.float64,
++    )
++    y_pred_class = y_class.copy()
++    frame = pd.DataFrame({"matrix": ["water", "water", "soil"]})
++
++    overall, per_pesticide, by_mixture, by_matrix, confusion = (
++        _ordinal_level_metrics(
++            y_reg,
++            ordinal_probability,
++            y_class,
++            y_pred_class,
++            frame,
++        )
++    )
++
++    assert overall["present_target_accuracy"] == 1.0
++    assert overall["full_0_S_M_H_profile_exact_accuracy"] == 1.0
++    assert set(per_pesticide["pesticide"]) == {"DEL", "CHL", "TEB"}
++    assert set(by_mixture["group"]) == {"single", "binary", "ternary"}
++    assert set(by_matrix["matrix"]) == {"water", "soil"}
++    assert set(confusion) == {"DEL", "CHL", "TEB"}
++
++
++def test_continuous_mode_remains_t2_compatible():
++    torch.manual_seed(2026)
++    model = TransformerClassifyRegress_sep(
++        dim_model=8,
++        attn_head=2,
++        dim_ff=32,
++        encoder_layers=1,
++        n_labels=3,
++        model_length=1401,
++        concentration_head_mode="continuous",
++    )
++    model.eval()
++    with torch.no_grad():
++        class_pred, reg_pred = model(_batch())
++    assert class_pred.shape == (2, 3)
++    assert reg_pred.shape == (2, 3)
++    assert hasattr(model, "regression_heads")
++    assert not hasattr(model, "ordinal_heads")

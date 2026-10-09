@@ -1,0 +1,897 @@
+diff --git a/Dataset.py b/Dataset.py
+index 035e3e0..e041718 100644
+--- a/Dataset.py
++++ b/Dataset.py
+@@ -367,6 +367,216 @@ class SERSDataRepository:
+         self.generated_data = generated
+ 
+ 
++
++def build_training_peak_priors(
++    repository: SERSDataRepository,
++    *,
++    top_k: int = 8,
++    min_peak_distance_cm1: float = 20.0,
++    peak_prominence: float = 0.02,
++    peak_half_width_cm1: float = 15.0,
++    min_support_fraction: float = 0.25,
++) -> tuple[np.ndarray, dict[str, Any]]:
++    """
++    Build DEL/CHL/TEB soft peak priors from *real training spectra only*.
++
++    Important leakage rule:
++    - only REAL_TRAIN_INDICES (0..11) are used;
++    - validation/test spectra are never read for prior fitting;
++    - generated spectra are never used for prior fitting.
++
++    The prior is not a hard spectral mask. It is a [3, 1901] non-negative
++    guidance map later added to attention logits. Consequently a pesticide
++    query can still use every valid non-peak region.
++
++    Peak candidates are detected on the mean normalized spectrum of all
++    training spectra containing the pesticide and are ranked by a combination
++    of peak prominence, positive-vs-negative contrast and valid-axis support.
++    This makes the prior data-driven instead of hard-coding literature peak
++    positions.
++    """
++    if top_k <= 0:
++        raise ValueError("top_k must be positive")
++    if min_peak_distance_cm1 <= 0.0:
++        raise ValueError("min_peak_distance_cm1 must be positive")
++    if peak_prominence < 0.0:
++        raise ValueError("peak_prominence must be non-negative")
++    if peak_half_width_cm1 <= 0.0:
++        raise ValueError("peak_half_width_cm1 must be positive")
++    if not (0.0 < min_support_fraction <= 1.0):
++        raise ValueError("min_support_fraction must be in (0, 1]")
++
++    signals: list[np.ndarray] = []
++    masks: list[np.ndarray] = []
++    labels: list[np.ndarray] = []
++
++    for condition in sorted(repository.real_data):
++        record = repository.real_data[condition]
++        info: ConditionInfo = record["condition_info"]
++        for spectrum_index in REAL_TRAIN_INDICES:
++            spectrum = record["spectra"][:, spectrum_index]
++            adapted, valid_mask = _adapt_spectrum_to_model_axis(
++                record["axis"], spectrum
++            )
++            raw, _, _ = _preprocess_spectrum(adapted, valid_mask)
++            signals.append(raw[0].astype(np.float32, copy=False))
++            masks.append(valid_mask.astype(np.bool_, copy=False))
++            labels.append(info.presence.astype(np.float32, copy=False))
++
++    signal_matrix = np.stack(signals, axis=0)
++    valid_matrix = np.stack(masks, axis=0)
++    label_matrix = np.stack(labels, axis=0)
++
++    expected_samples = len(repository.real_data) * len(REAL_TRAIN_INDICES)
++    if signal_matrix.shape != (expected_samples, MODEL_LENGTH):
++        raise RuntimeError(
++            "Unexpected training matrix shape while fitting peak priors: "
++            f"{signal_matrix.shape}"
++        )
++
++    axis_step = float(np.median(np.diff(MODEL_RAMAN_AXIS)))
++    distance_points = max(
++        1, int(round(float(min_peak_distance_cm1) / max(axis_step, 1e-8)))
++    )
++    gaussian_sigma = max(
++        float(peak_half_width_cm1) / 2.0 / max(axis_step, 1e-8), 1.0
++    )
++
++    priors = np.zeros((len(PESTICIDES), MODEL_LENGTH), dtype=np.float32)
++    summary: dict[str, Any] = {
++        "fit_source": "real training spectra only",
++        "real_training_indices": list(REAL_TRAIN_INDICES),
++        "number_of_training_spectra": int(expected_samples),
++        "parameters": {
++            "top_k": int(top_k),
++            "min_peak_distance_cm-1": float(min_peak_distance_cm1),
++            "peak_prominence": float(peak_prominence),
++            "peak_half_width_cm-1": float(peak_half_width_cm1),
++            "min_support_fraction": float(min_support_fraction),
++        },
++        "pesticides": {},
++    }
++
++    point_index = np.arange(MODEL_LENGTH, dtype=np.float64)
++
++    for pesticide_index, pesticide in enumerate(PESTICIDES):
++        positive_rows = label_matrix[:, pesticide_index] > 0.5
++        negative_rows = ~positive_rows
++        positive_total = int(positive_rows.sum())
++        negative_total = int(negative_rows.sum())
++        if positive_total == 0:
++            raise RuntimeError(f"No positive training spectra found for {pesticide}")
++
++        positive_mask = valid_matrix[positive_rows]
++        positive_signal = signal_matrix[positive_rows]
++        positive_count = positive_mask.sum(axis=0).astype(np.float64)
++        positive_sum = (positive_signal * positive_mask).sum(axis=0, dtype=np.float64)
++        positive_mean = np.divide(
++            positive_sum,
++            positive_count,
++            out=np.zeros(MODEL_LENGTH, dtype=np.float64),
++            where=positive_count > 0,
++        )
++
++        negative_mask = valid_matrix[negative_rows]
++        negative_signal = signal_matrix[negative_rows]
++        negative_count = negative_mask.sum(axis=0).astype(np.float64)
++        negative_sum = (negative_signal * negative_mask).sum(axis=0, dtype=np.float64)
++        negative_mean = np.divide(
++            negative_sum,
++            negative_count,
++            out=np.zeros(MODEL_LENGTH, dtype=np.float64),
++            where=negative_count > 0,
++        )
++
++        support_fraction = positive_count / float(max(positive_total, 1))
++        supported = support_fraction >= float(min_support_fraction)
++
++        # Smooth only for robust peak discovery. The model still receives the
++        # original preprocessed spectra, not this smoothed average.
++        gaussian_radius = max(2, int(round(3.0 * gaussian_sigma)))
++        kernel_x = np.arange(-gaussian_radius, gaussian_radius + 1, dtype=np.float64)
++        kernel = np.exp(-0.5 * (kernel_x / gaussian_sigma) ** 2)
++        kernel /= kernel.sum()
++        positive_smooth = np.convolve(positive_mean, kernel, mode="same")
++        positive_smooth[~supported] = 0.0
++
++        candidate_indices, properties = signal.find_peaks(
++            positive_smooth,
++            distance=distance_points,
++            prominence=float(peak_prominence),
++        )
++        if candidate_indices.size == 0:
++            candidate_indices, properties = signal.find_peaks(
++                positive_smooth,
++                distance=distance_points,
++            )
++
++        candidate_indices = candidate_indices[supported[candidate_indices]]
++        if candidate_indices.size == 0:
++            supported_indices = np.flatnonzero(supported)
++            if supported_indices.size == 0:
++                raise RuntimeError(
++                    f"No Raman position has sufficient training support for {pesticide}"
++                )
++            candidate_indices = np.asarray(
++                [supported_indices[np.argmax(positive_smooth[supported_indices])]],
++                dtype=np.int64,
++            )
++
++        prominences = signal.peak_prominences(
++            positive_smooth, candidate_indices
++        )[0]
++        contrast = np.maximum(positive_mean - negative_mean, 0.0)
++        contrast_max = float(contrast.max())
++        if contrast_max > 0.0:
++            contrast_norm = contrast / contrast_max
++        else:
++            contrast_norm = np.zeros_like(contrast)
++
++        # Prominence keeps the prior focused on real spectral peaks; contrast
++        # makes pesticide-specific evidence rank above peaks shared by all
++        # spectra; a non-zero base term retains useful shared peaks.
++        ranking = prominences * (
++            0.25 + 0.75 * contrast_norm[candidate_indices]
++        ) * support_fraction[candidate_indices]
++        order = np.argsort(ranking)[::-1][: int(top_k)]
++        selected = candidate_indices[order]
++        selected_scores = ranking[order]
++
++        score_max = float(selected_scores.max()) if selected_scores.size else 0.0
++        if score_max > 0.0:
++            selected_weights = selected_scores / score_max
++        else:
++            selected_weights = np.ones_like(selected_scores, dtype=np.float64)
++
++        prior = np.zeros(MODEL_LENGTH, dtype=np.float64)
++        for center_index, weight in zip(selected, selected_weights, strict=True):
++            gaussian = np.exp(
++                -0.5 * ((point_index - float(center_index)) / gaussian_sigma) ** 2
++            )
++            prior = np.maximum(prior, float(weight) * gaussian)
++
++        prior_max = float(prior.max())
++        if prior_max > 0.0:
++            prior /= prior_max
++        priors[pesticide_index] = prior.astype(np.float32)
++
++        summary["pesticides"][pesticide] = {
++            "positive_training_spectra": positive_total,
++            "negative_training_spectra": negative_total,
++            "peak_centers_cm-1": [
++                float(MODEL_RAMAN_AXIS[index]) for index in selected.tolist()
++            ],
++            "peak_weights": [float(value) for value in selected_weights.tolist()],
++            "support_fractions": [
++                float(support_fraction[index]) for index in selected.tolist()
++            ],
++        }
++
++    return priors, summary
++
++
+ class SERSDataset(Dataset):
+     """
+     Real-only validation/test; generated spectra may be added only to training.
+diff --git a/Inference.py b/Inference.py
+index e362f91..83fd655 100644
+--- a/Inference.py
++++ b/Inference.py
+@@ -1,4 +1,4 @@
+-"""Pure-PyTorch inference/evaluation for the adapted SERSFormer2 T0 baseline."""
++"""Inference/evaluation for baseline-compatible or peak-guided SERSFormer checkpoints."""
+ 
+ from __future__ import annotations
+ 
+diff --git a/Model_v2.py b/Model_v2.py
+index 46f40c9..3f81f41 100644
+--- a/Model_v2.py
++++ b/Model_v2.py
+@@ -1,22 +1,27 @@
+ """
+-Adapted SERSFormer2 core model for fixed 1901-point Raman input.
+-
+-The original SERSFormer2 architecture is retained conceptually:
+-- classification CNN -> shared Transformer encoder -> classification MLP
+-- smoothed-signal CNN -> shared Transformer encoder
+-- percentile-feature CNN + transformer feature fusion -> regression MLP
+-
+-Engineering adaptations:
+-- input length is fixed to 1901 points
+-- 1401-point spectra are zero-padded by Dataset.py and accompanied by valid_mask
+-- valid_mask is downsampled through the same Conv/Pool geometry
+-- Transformer receives src_key_padding_mask
+-- invalid output tokens are zeroed before the original flatten+MLP heads
+-- hard-coded 172 tokens are replaced by the correct token count for 1901 points
++Peak-guided SERSFormer for the DEL/CHL/TEB multi-task SERS project.
++
++Model path:
++    three 1-D CNN branches
++        raw spectrum / smoothed spectrum / percentile features
++    -> token-level feature fusion
++    -> shared Transformer encoder
++    -> pesticide-specific peak-guided query attention
++    -> one classification head and one concentration head per pesticide
++
++Key design points:
++- DEL, CHL and TEB each own a learnable query vector.
++- Every query can attend to every *valid* Raman token.
++- Training-data-derived peak priors add a positive soft bias to attention logits;
++  they never delete non-peak regions.
++- valid_mask remains authoritative. A short 1401-point spectrum cannot attend to
++  padded 2000-2500 cm^-1 positions even if a pesticide prior has a peak there.
++- The public forward interface remains [classification_probability, concentration].
+ """
+ 
+ from __future__ import annotations
+ 
++import math
+ from typing import Mapping, Sequence
+ 
+ import torch
+@@ -62,8 +67,46 @@ def _downsample_valid_mask(valid_mask: Tensor) -> Tensor:
+     return mask.squeeze(1).bool()
+ 
+ 
++def _downsample_peak_prior(peak_prior: Tensor) -> Tensor:
++    """
++    Map point-level peak priors [Q, L] onto CNN/Transformer tokens [Q, T].
++
++    Average pooling models the Conv1d receptive field and max pooling preserves
++    a local peak hint inside each pooling cell. The result is re-normalized to
++    [0, 1] independently for every pesticide query.
++    """
++    if peak_prior.ndim != 2:
++        raise ValueError(
++            f"peak_prior must have shape [Q, L], got {tuple(peak_prior.shape)}"
++        )
++
++    prior = peak_prior.to(dtype=torch.float32).unsqueeze(1)
++    for _ in range(2):
++        prior = F.avg_pool1d(prior, kernel_size=3, stride=1)
++        prior = F.max_pool1d(prior, kernel_size=3, stride=3)
++    prior = prior.squeeze(1)
++
++    maximum = prior.amax(dim=-1, keepdim=True).clamp_min(1e-8)
++    prior = torch.where(maximum > 1e-8, prior / maximum, prior)
++    return prior.clamp_(0.0, 1.0)
++
++
++def _sinusoidal_position_encoding(length: int, dimension: int) -> Tensor:
++    """Standard fixed positional encoding for the Raman-token sequence."""
++    position = torch.arange(length, dtype=torch.float32).unsqueeze(1)
++    div_term = torch.exp(
++        torch.arange(0, dimension, 2, dtype=torch.float32)
++        * (-math.log(10000.0) / float(dimension))
++    )
++    encoding = torch.zeros(length, dimension, dtype=torch.float32)
++    encoding[:, 0::2] = torch.sin(position * div_term)
++    if dimension > 1:
++        encoding[:, 1::2] = torch.cos(position * div_term[: encoding[:, 1::2].shape[1]])
++    return encoding.unsqueeze(0)
++
++
+ class regression_features(nn.Module):
+-    """Original SERSFormer2 percentile-feature CNN branch."""
++    """Percentile-feature 1-D CNN branch."""
+ 
+     def __init__(self, dim_model: int = 32, channels: int = 4) -> None:
+         super().__init__()
+@@ -86,6 +129,171 @@ class regression_features(nn.Module):
+         return x
+ 
+ 
++class PeakGuidedQueryAttention(nn.Module):
++    """
++    Pesticide-specific query attention with a *soft* training-data peak prior.
++
++    The prior is additive in attention-logit space:
++
++        logits = QK^T / sqrt(d) + positive_strength * peak_prior
++
++    Therefore every valid token remains visible. The model can also learn to
++    reduce the positive guidance strength toward zero when the prior is not
++    useful for a pesticide or matrix.
++    """
++
++    def __init__(
++        self,
++        d_model: int,
++        n_queries: int,
++        n_heads: int,
++        model_length: int,
++        dropout: float = 0.1,
++        guidance_strength_init: float = 1.5,
++    ) -> None:
++        super().__init__()
++        if d_model % n_heads != 0:
++            raise ValueError(
++                f"d_model={d_model} must be divisible by query n_heads={n_heads}"
++            )
++        if guidance_strength_init <= 0.0:
++            raise ValueError("guidance_strength_init must be positive")
++
++        self.d_model = int(d_model)
++        self.n_queries = int(n_queries)
++        self.n_heads = int(n_heads)
++        self.head_dim = self.d_model // self.n_heads
++        self.model_length = int(model_length)
++
++        self.query_embedding = nn.Parameter(torch.empty(self.n_queries, self.d_model))
++        nn.init.normal_(self.query_embedding, mean=0.0, std=0.02)
++
++        self.q_proj = nn.Linear(self.d_model, self.d_model, bias=False)
++        self.k_proj = nn.Linear(self.d_model, self.d_model, bias=False)
++        self.v_proj = nn.Linear(self.d_model, self.d_model, bias=False)
++        self.out_proj = nn.Linear(self.d_model, self.d_model)
++        self.attention_dropout = nn.Dropout(dropout)
++
++        inverse_softplus = math.log(math.expm1(float(guidance_strength_init)))
++        self.guidance_log_strength = nn.Parameter(
++            torch.full((self.n_queries,), inverse_softplus, dtype=torch.float32)
++        )
++
++        self.output_norm = nn.LayerNorm(self.d_model)
++        self.ffn = nn.Sequential(
++            nn.Linear(self.d_model, self.d_model * 2),
++            nn.GELU(),
++            nn.Dropout(dropout),
++            nn.Linear(self.d_model * 2, self.d_model),
++            nn.Dropout(dropout),
++        )
++        self.ffn_norm = nn.LayerNorm(self.d_model)
++
++        # Stored in the checkpoint. It is fitted from real training spectra only.
++        self.register_buffer(
++            "peak_prior_points",
++            torch.zeros(self.n_queries, self.model_length, dtype=torch.float32),
++            persistent=True,
++        )
++
++    @property
++    def guidance_strength(self) -> Tensor:
++        """Positive, learnable guidance strength for each pesticide query."""
++        return F.softplus(self.guidance_log_strength)
++
++    def set_peak_prior(self, peak_prior: Tensor) -> None:
++        peak_prior = torch.as_tensor(peak_prior, dtype=torch.float32)
++        expected = (self.n_queries, self.model_length)
++        if tuple(peak_prior.shape) != expected:
++            raise ValueError(
++                f"peak_prior must have shape {expected}, got {tuple(peak_prior.shape)}"
++            )
++        if not torch.isfinite(peak_prior).all():
++            raise ValueError("peak_prior contains NaN or Inf")
++        if (peak_prior < 0.0).any():
++            raise ValueError("peak_prior must be non-negative")
++
++        maximum = peak_prior.amax(dim=-1, keepdim=True)
++        normalized = torch.where(
++            maximum > 0.0,
++            peak_prior / maximum.clamp_min(1e-8),
++            peak_prior,
++        ).clamp(0.0, 1.0)
++        self.peak_prior_points.copy_(normalized.to(self.peak_prior_points.device))
++
++    def forward(
++        self,
++        tokens: Tensor,
++        token_mask: Tensor,
++    ) -> tuple[Tensor, Tensor]:
++        if tokens.ndim != 3:
++            raise ValueError(f"tokens must be [B,T,D], got {tuple(tokens.shape)}")
++        if token_mask.shape != tokens.shape[:2]:
++            raise ValueError(
++                f"token_mask must be {tuple(tokens.shape[:2])}, "
++                f"got {tuple(token_mask.shape)}"
++            )
++        if not token_mask.any(dim=1).all():
++            raise ValueError("Every sample must contain at least one valid Raman token")
++
++        batch_size, token_length, _ = tokens.shape
++        queries = self.query_embedding.unsqueeze(0).expand(batch_size, -1, -1)
++
++        q = self.q_proj(queries).view(
++            batch_size, self.n_queries, self.n_heads, self.head_dim
++        )
++        q = q.permute(0, 2, 1, 3)  # [B,H,Q,Dh]
++
++        k = self.k_proj(tokens).view(
++            batch_size, token_length, self.n_heads, self.head_dim
++        )
++        k = k.permute(0, 2, 1, 3)  # [B,H,T,Dh]
++
++        v = self.v_proj(tokens).view(
++            batch_size, token_length, self.n_heads, self.head_dim
++        )
++        v = v.permute(0, 2, 1, 3)  # [B,H,T,Dh]
++
++        logits = torch.einsum("bhqd,bhtd->bhqt", q, k)
++        logits = logits / math.sqrt(float(self.head_dim))
++
++        peak_prior_tokens = _downsample_peak_prior(self.peak_prior_points)
++        if peak_prior_tokens.shape != (self.n_queries, token_length):
++            raise RuntimeError(
++                "Peak prior token length does not match Transformer token length: "
++                f"{tuple(peak_prior_tokens.shape)} vs {(self.n_queries, token_length)}"
++            )
++
++        # Positive additive bias only. Non-peak regions receive zero bias rather
++        # than being deleted, so every valid Raman region can still contribute.
++        guidance = self.guidance_strength.view(1, 1, self.n_queries, 1)
++        logits = logits + guidance * peak_prior_tokens.view(
++            1, 1, self.n_queries, token_length
++        ).to(dtype=logits.dtype, device=logits.device)
++
++        invalid = ~token_mask[:, None, None, :]
++        logits = logits.masked_fill(invalid, torch.finfo(logits.dtype).min)
++
++        attention = torch.softmax(logits.float(), dim=-1).to(dtype=logits.dtype)
++        attention = attention.masked_fill(invalid, 0.0)
++        attention_for_output = attention
++        attention = self.attention_dropout(attention)
++
++        context = torch.einsum("bhqt,bhtd->bhqd", attention, v)
++        context = context.permute(0, 2, 1, 3).contiguous().view(
++            batch_size, self.n_queries, self.d_model
++        )
++        context = self.out_proj(context)
++
++        query_features = self.output_norm(context + queries)
++        query_features = self.ffn_norm(query_features + self.ffn(query_features))
++
++        # Average heads only for diagnostics/visualization. This does not affect
++        # the model prediction path.
++        attention_mean = attention_for_output.mean(dim=1)
++        return query_features, attention_mean
++
++
+ class TransformerClassifyRegress_sep(nn.Module):
+     def __init__(
+         self,
+@@ -97,6 +305,7 @@ class TransformerClassifyRegress_sep(nn.Module):
+         encoder_layers: int = 1,
+         n_labels: int = 3,
+         model_length: int = DEFAULT_MODEL_LENGTH,
++        peak_guidance_strength_init: float = 1.5,
+     ) -> None:
+         super().__init__()
+ 
+@@ -125,10 +334,22 @@ class TransformerClassifyRegress_sep(nn.Module):
+                 nn.Dropout1d(p=0.5),
+             )
+ 
++        # Three 1-D CNN routes: raw, smoothed and percentile features.
+         self.cnn = make_signal_cnn()
+         self.cnn2 = make_signal_cnn()
+         self.reg_feat = regression_features(dim_model=self.dim_model, channels=4)
+-        self.layernorm = nn.LayerNorm(feature_dim)
++
++        self.cnn_fusion = nn.Sequential(
++            nn.Linear(feature_dim * 3, feature_dim),
++            nn.GELU(),
++            nn.Dropout(drop),
++            nn.LayerNorm(feature_dim),
++        )
++        self.register_buffer(
++            "position_encoding",
++            _sinusoidal_position_encoding(self.token_length, feature_dim),
++            persistent=False,
++        )
+ 
+         self.transformer_encoder_layer = nn.TransformerEncoderLayer(
+             d_model=feature_dim,
+@@ -136,40 +357,51 @@ class TransformerClassifyRegress_sep(nn.Module):
+             dim_feedforward=dim_ff,
+             dropout=drop,
+             batch_first=True,
++            activation="gelu",
+         )
+         self.transformer_encoder = nn.TransformerEncoder(
+             encoder_layer=self.transformer_encoder_layer,
+             num_layers=encoder_layers,
+         )
+ 
+-        # Upstream SERSFormer2 hard-coded 172 tokens. For the fixed 1901-point
+-        # model axis the CNN frontend produces 210 tokens.
+-        classification_flat_dim = self.token_length * feature_dim
+-        regression_flat_dim = self.token_length * feature_dim * 2
+-
+-        self.MLPclass = nn.Sequential(
+-            nn.Linear(classification_flat_dim, self.dim_model * 4),
+-            nn.ReLU(),
+-            nn.BatchNorm1d(self.dim_model * 4),
+-            nn.Linear(self.dim_model * 4, self.dim_model),
+-            nn.ReLU(),
+-            nn.BatchNorm1d(self.dim_model),
+-            nn.Linear(self.dim_model, self.n_labels),
+-            nn.Sigmoid(),
++        self.peak_guided_attention = PeakGuidedQueryAttention(
++            d_model=feature_dim,
++            n_queries=self.n_labels,
++            n_heads=attn_head,
++            model_length=self.model_length,
++            dropout=drop,
++            guidance_strength_init=peak_guidance_strength_init,
+         )
+ 
+-        self.MLPreg = nn.Sequential(
+-            nn.Linear(regression_flat_dim, self.dim_model * 4),
+-            nn.ReLU(),
+-            nn.BatchNorm1d(self.dim_model * 4),
+-            nn.Linear(self.dim_model * 4, self.dim_model),
+-            nn.ReLU(),
+-            nn.BatchNorm1d(self.dim_model),
+-            nn.Linear(self.dim_model, self.n_labels),
+-            nn.ReLU(),
++        head_hidden = max(self.dim_model, feature_dim // 2)
++        self.classification_heads = nn.ModuleList(
++            [
++                nn.Sequential(
++                    nn.Linear(feature_dim, head_hidden),
++                    nn.GELU(),
++                    nn.Dropout(drop),
++                    nn.Linear(head_hidden, 1),
++                    nn.Sigmoid(),
++                )
++                for _ in range(self.n_labels)
++            ]
++        )
++        self.regression_heads = nn.ModuleList(
++            [
++                nn.Sequential(
++                    nn.Linear(feature_dim, head_hidden),
++                    nn.GELU(),
++                    nn.Dropout(drop),
++                    nn.Linear(head_hidden, 1),
++                    nn.ReLU(),
++                )
++                for _ in range(self.n_labels)
++            ]
+         )
+ 
+-        self.activation_ELU = nn.GELU()
++    def set_peak_prior(self, peak_prior: Tensor) -> None:
++        """Install [DEL, CHL, TEB] point-level soft priors into the model."""
++        self.peak_guided_attention.set_peak_prior(peak_prior)
+ 
+     @staticmethod
+     def _unpack_data(
+@@ -212,7 +444,7 @@ class TransformerClassifyRegress_sep(nn.Module):
+             raw.shape[0] == percentile.shape[0] == smoothed.shape[0]
+             and raw.shape[-1] == percentile.shape[-1] == smoothed.shape[-1]
+         ):
+-            raise ValueError("All SERSFormer2 branches must share batch and length")
++            raise ValueError("All SERSFormer branches must share batch and length")
+         if raw.shape[-1] != self.model_length:
+             raise ValueError(
+                 f"Model expects fixed length {self.model_length}, got {raw.shape[-1]}"
+@@ -239,6 +471,7 @@ class TransformerClassifyRegress_sep(nn.Module):
+         self,
+         data: Mapping[str, Tensor] | Sequence[Tensor],
+         valid_mask: Tensor | None = None,
++        return_attention: bool = False,
+     ) -> list[Tensor]:
+         raw, percentile, smoothed, valid_mask = self._unpack_data(data, valid_mask)
+         valid_mask = self._validate_inputs(raw, percentile, smoothed, valid_mask)
+@@ -251,29 +484,41 @@ class TransformerClassifyRegress_sep(nn.Module):
+             )
+         key_padding_mask = ~token_mask
+ 
+-        # Classification branch.
+-        emb = self.cnn(raw).transpose(1, 2)
+-        x = self.activation_ELU(self.layernorm(emb))
+-        x_c = self.transformer_encoder(x, src_key_padding_mask=key_padding_mask)
+-        x_c = self.activation_ELU(x_c)
+-        x_c = self._zero_invalid_tokens(x_c, token_mask)
+-        classify = self.MLPclass(x_c.flatten(start_dim=1))
+-
+-        # Smoothed-signal regression branch, reusing the shared transformer.
+-        emb1 = self.cnn2(smoothed).transpose(1, 2)
+-        x3 = self.activation_ELU(self.layernorm(emb1))
+-        x3 = self.transformer_encoder(x3, src_key_padding_mask=key_padding_mask)
+-        x3 = self._zero_invalid_tokens(x3, token_mask)
+-        x3 = self.activation_ELU(x3 + x_c)
+-        x3 = self._zero_invalid_tokens(x3, token_mask)
+-
+-        # Percentile branch and fusion.
+-        x1 = self.reg_feat(percentile).transpose(1, 2)
+-        x1 = self._zero_invalid_tokens(x1, token_mask)
+-
+-        x2 = torch.cat((x1, x3), dim=-1)
+-        x2 = self.activation_ELU(x2)
+-        x2 = self._zero_invalid_tokens(x2, token_mask)
+-        regress = self.MLPreg(x2.flatten(start_dim=1))
++        # Three CNN routes are aligned token-by-token before the Transformer.
++        raw_tokens = self.cnn(raw).transpose(1, 2)
++        smooth_tokens = self.cnn2(smoothed).transpose(1, 2)
++        percentile_tokens = self.reg_feat(percentile).transpose(1, 2)
+ 
++        raw_tokens = self._zero_invalid_tokens(raw_tokens, token_mask)
++        smooth_tokens = self._zero_invalid_tokens(smooth_tokens, token_mask)
++        percentile_tokens = self._zero_invalid_tokens(percentile_tokens, token_mask)
++
++        fused = torch.cat(
++            (raw_tokens, smooth_tokens, percentile_tokens), dim=-1
++        )
++        fused = self.cnn_fusion(fused)
++        fused = fused + self.position_encoding.to(dtype=fused.dtype, device=fused.device)
++        fused = self._zero_invalid_tokens(fused, token_mask)
++
++        encoded = self.transformer_encoder(
++            fused,
++            src_key_padding_mask=key_padding_mask,
++        )
++        encoded = self._zero_invalid_tokens(encoded, token_mask)
++
++        query_features, attention = self.peak_guided_attention(encoded, token_mask)
++
++        class_columns = [
++            head(query_features[:, pesticide_index, :])
++            for pesticide_index, head in enumerate(self.classification_heads)
++        ]
++        regression_columns = [
++            head(query_features[:, pesticide_index, :])
++            for pesticide_index, head in enumerate(self.regression_heads)
++        ]
++        classify = torch.cat(class_columns, dim=1)
++        regress = torch.cat(regression_columns, dim=1)
++
++        if return_attention:
++            return [classify, regress, attention]
+         return [classify, regress]
+diff --git a/SERSFormer_Training.py b/SERSFormer_Training.py
+index f69a515..bec9856 100644
+--- a/SERSFormer_Training.py
++++ b/SERSFormer_Training.py
+@@ -1,7 +1,8 @@
+-"""Pure-PyTorch training entry for the adapted SERSFormer2 T0 baseline.
++"""Training entry for the peak-guided DEL/CHL/TEB SERSFormer variant.
+ 
+-This replaces the upstream Lightning/W&B training wrapper while keeping the
+-SERSFormer2 multi-task classification + regression objective and DWA option.
++The data split and multi-task losses remain aligned with the adapted baseline,
++while the model uses training-only data-driven peak priors and three pesticide
++query vectors after the shared Transformer.
+ """
+ 
+ from __future__ import annotations
+@@ -19,7 +20,13 @@ import torch
+ import torch.nn as nn
+ from torch.utils.data import DataLoader
+ 
+-from Dataset import PESTICIDES, build_datasets, load_concentration_map
++from Dataset import (
++    MODEL_RAMAN_AXIS,
++    PESTICIDES,
++    build_datasets,
++    build_training_peak_priors,
++    load_concentration_map,
++)
+ from Metric import (
+     compute_dwa_weights,
+     merge_metrics,
+@@ -31,9 +38,13 @@ from Model_v2 import TransformerClassifyRegress_sep
+ 
+ def parse_args() -> argparse.Namespace:
+     parser = argparse.ArgumentParser(
+-        description="Train the adapted SERSFormer2 baseline on DEL/CHL/TEB SERS spectra."
++        description="Train peak-guided SERSFormer on DEL/CHL/TEB SERS spectra."
++    )
++    parser.add_argument(
++        "--output-directory",
++        type=Path,
++        default=Path("outputs/t1_peak_guided_sersformer_real_only"),
+     )
+-    parser.add_argument("--output-directory", type=Path, default=Path("outputs/t0_sersformer2_real_only"))
+     parser.add_argument("--include-generated", action="store_true")
+     parser.add_argument("--maximum-generated-per-condition", type=int, default=None)
+     parser.add_argument("--allow-incomplete-generated", action="store_true")
+@@ -54,6 +65,15 @@ def parse_args() -> argparse.Namespace:
+     parser.add_argument("--dropout", type=float, default=0.1)
+     parser.add_argument("--encoder-layers", type=int, default=4)
+ 
++    # Peak prior is fitted from the fixed real training split only. These
++    # arguments control prior extraction and its initial soft-attention bias.
++    parser.add_argument("--peak-top-k", type=int, default=8)
++    parser.add_argument("--peak-min-distance-cm1", type=float, default=20.0)
++    parser.add_argument("--peak-prominence", type=float, default=0.02)
++    parser.add_argument("--peak-half-width-cm1", type=float, default=15.0)
++    parser.add_argument("--peak-min-support-fraction", type=float, default=0.25)
++    parser.add_argument("--peak-guidance-strength", type=float, default=1.5)
++
+     parser.add_argument("--loss-weighting", choices=("fixed", "dwa"), default="dwa")
+     parser.add_argument("--classification-weight", type=float, default=0.5)
+     parser.add_argument("--regression-weight", type=float, default=0.5)
+@@ -262,6 +282,32 @@ def main() -> None:
+         validation_dataset, args.batch_size, False, args.num_workers, device
+     )
+ 
++    # Fit the peak guidance only from the 12 real training spectra per source
++    # file. Generated spectra, validation spectra and test spectra are excluded.
++    peak_prior, peak_prior_summary = build_training_peak_priors(
++        train_dataset.repository,
++        top_k=args.peak_top_k,
++        min_peak_distance_cm1=args.peak_min_distance_cm1,
++        peak_prominence=args.peak_prominence,
++        peak_half_width_cm1=args.peak_half_width_cm1,
++        min_support_fraction=args.peak_min_support_fraction,
++    )
++
++    peak_prior_frame = pd.DataFrame({"Raman_shift_cm-1": MODEL_RAMAN_AXIS})
++    for pesticide_index, pesticide in enumerate(PESTICIDES):
++        peak_prior_frame[f"peak_prior_{pesticide}"] = peak_prior[pesticide_index]
++    peak_prior_frame.to_csv(output_directory / "training_peak_priors.csv", index=False)
++    with (output_directory / "training_peak_prior_summary.json").open(
++        "w", encoding="utf-8"
++    ) as handle:
++        json.dump(peak_prior_summary, handle, ensure_ascii=False, indent=2)
++
++    print("===== Training-only peak priors =====")
++    for pesticide in PESTICIDES:
++        info = peak_prior_summary["pesticides"][pesticide]
++        centers = ", ".join(f"{value:.1f}" for value in info["peak_centers_cm-1"])
++        print(f"{pesticide}: {centers} cm^-1")
++
+     model_config = {
+         "dim_model": args.dim_model,
+         "attn_head": args.attention_heads,
+@@ -271,8 +317,11 @@ def main() -> None:
+         "encoder_layers": args.encoder_layers,
+         "n_labels": len(PESTICIDES),
+         "model_length": 1901,
++        "peak_guidance_strength_init": args.peak_guidance_strength,
+     }
+-    model = TransformerClassifyRegress_sep(**model_config).to(device)
++    model = TransformerClassifyRegress_sep(**model_config)
++    model.set_peak_prior(torch.from_numpy(peak_prior))
++    model = model.to(device)
+ 
+     optimizer = torch.optim.Adam(
+         model.parameters(),
+@@ -308,6 +357,8 @@ def main() -> None:
+         "split": "12/4/4 within each source file",
+         "model_axis": "600-2500 cm^-1, 1901 points",
+         "short_axis_handling": "zero padding + valid_mask; generated tail masked by matching real condition",
++        "peak_prior_fit": "real training spectra only; validation/test/generated excluded",
++        "peak_prior_summary": peak_prior_summary,
+         "target_mode": train_dataset.repository.target_mode,
+     }
+ 
+@@ -359,6 +410,14 @@ def main() -> None:
+             "classification_weight": class_weight,
+             "regression_weight": reg_weight,
+         }
++        with torch.no_grad():
++            peak_strength = (
++                model.peak_guided_attention.guidance_strength.detach().cpu().numpy()
++            )
++        for pesticide_index, pesticide in enumerate(PESTICIDES):
++            row[f"peak_guidance_strength_{pesticide}"] = float(
++                peak_strength[pesticide_index]
++            )
+         row.update({f"train_{k}": v for k, v in train_metrics.items()})
+         row.update({f"validation_{k}": v for k, v in validation_metrics.items()})
+         rows.append(row)
+diff --git a/tests/test_peak_guided_sersformer.py b/tests/test_peak_guided_sersformer.py
+new file mode 100644
+index 0000000..c541aec
+--- /dev/null
++++ b/tests/test_peak_guided_sersformer.py
+@@ -0,0 +1,70 @@
++import torch
++
++from Model_v2 import TransformerClassifyRegress_sep, _downsample_valid_mask
++
++
++def test_peak_guided_attention_respects_valid_mask_and_keeps_nonpeak_visible():
++    torch.manual_seed(2026)
++    model = TransformerClassifyRegress_sep(
++        dim_model=16,
++        attn_head=4,
++        dim_ff=64,
++        encoder_layers=1,
++        n_labels=3,
++        model_length=1901,
++        peak_guidance_strength_init=1.5,
++    )
++
++    axis = torch.arange(600.0, 2501.0)
++    centers = torch.tensor([1000.0, 2235.0, 1090.0])[:, None]
++    prior = torch.exp(-0.5 * ((axis[None, :] - centers) / 10.0) ** 2)
++    model.set_peak_prior(prior)
++
++    valid_mask = torch.ones(2, 1901, dtype=torch.bool)
++    valid_mask[1, 1401:] = False
++    batch = {
++        "raw": torch.rand(2, 1, 1901),
++        "percentile": torch.rand(2, 4, 1901),
++        "smoothed": torch.rand(2, 1, 1901),
++        "valid_mask": valid_mask,
++    }
++
++    class_pred, reg_pred, attention = model(batch, return_attention=True)
++    token_mask = _downsample_valid_mask(valid_mask)
++
++    assert class_pred.shape == (2, 3)
++    assert reg_pred.shape == (2, 3)
++    assert attention.shape == (2, 3, 210)
++    assert int(token_mask[0].sum()) == 210
++    assert int(token_mask[1].sum()) == 154
++
++    # A 1401-point spectrum must never attend to padded 2000-2500 cm^-1 tokens.
++    assert torch.count_nonzero(attention[1, :, ~token_mask[1]]) == 0
++
++    # Peak guidance is soft: a valid non-peak token is still visible.
++    assert torch.all(attention[1, :, 5] > 0.0)
++
++    (class_pred.mean() + reg_pred.mean()).backward()
++    assert model.peak_guided_attention.query_embedding.grad is not None
++    assert model.peak_guided_attention.guidance_log_strength.grad is not None
++
++
++def test_peak_prior_is_saved_in_model_state_dict():
++    model = TransformerClassifyRegress_sep(
++        dim_model=8,
++        attn_head=2,
++        dim_ff=32,
++        encoder_layers=1,
++        n_labels=3,
++        model_length=1901,
++    )
++    prior = torch.zeros(3, 1901)
++    prior[0, 400] = 1.0
++    prior[1, 1635] = 1.0
++    prior[2, 490] = 1.0
++    model.set_peak_prior(prior)
++
++    state = model.state_dict()
++    key = "peak_guided_attention.peak_prior_points"
++    assert key in state
++    assert torch.equal(state[key].cpu(), prior)

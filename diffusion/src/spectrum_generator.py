@@ -199,6 +199,7 @@ def _protect_pairwise_diversity_after_calibration(
     minimum_ratio: float,
     search_iterations: int,
     minimum_calibration_blend_factor: float = 0.0,
+    minimum_precalibration_diversity_retention: float = 1.0,
     pair_count: int = 10000,
     random_seed: int = 2026,
 ) -> tuple[np.ndarray, dict[str, float | int | bool]]:
@@ -224,6 +225,10 @@ def _protect_pairwise_diversity_after_calibration(
     if not 0.0 <= float(minimum_calibration_blend_factor) <= 1.0:
         raise ValueError(
             "minimum_calibration_blend_factor必须位于[0,1]。"
+        )
+    if not 0.0 <= float(minimum_precalibration_diversity_retention) <= 1.0:
+        raise ValueError(
+            "minimum_precalibration_diversity_retention必须位于[0,1]。"
         )
     if not 4 <= int(search_iterations) <= 64:
         raise ValueError("diversity_guard_search_iterations必须位于[4,64]。")
@@ -264,7 +269,26 @@ def _protect_pairwise_diversity_after_calibration(
     denominator = max(training_median, 1.0e-12)
     ratio_before = original_median / denominator
     ratio_unguarded = calibrated_median / denominator
-    required_ratio = min(float(minimum_ratio), ratio_before)
+    retention_target = (
+        ratio_before * float(minimum_precalibration_diversity_retention)
+    )
+
+    # 两种情况必须分开：
+    #
+    # 1. QQ校准前的生成多样性本来就低于绝对floor：
+    #    后处理不能凭空要求它达到minimum_ratio，只要求保留
+    #    配置比例的pre-calibration diversity。
+    #
+    # 2. QQ校准前已经达到或超过绝对floor：
+    #    则必须同时满足绝对floor和相对retention约束，
+    #    因而取两者中的较大值。
+    if ratio_before < float(minimum_ratio):
+        required_ratio = retention_target
+    else:
+        required_ratio = max(
+            float(minimum_ratio),
+            retention_target,
+        )
 
     blend = 1.0
     activated = bool(
@@ -329,6 +353,12 @@ def _protect_pairwise_diversity_after_calibration(
         ),
         "minimum_calibration_blend_factor": float(
             minimum_calibration_blend_factor
+        ),
+        "minimum_precalibration_diversity_retention": float(
+            minimum_precalibration_diversity_retention
+        ),
+        "precalibration_diversity_retention_target": float(
+            retention_target
         ),
         "diversity_floor_satisfied": bool(
             diversity_floor_satisfied
@@ -1012,6 +1042,12 @@ def _apply_condition_oracle_piecewise_quantile_calibration(
             0.0,
         )
     )
+    minimum_precalibration_diversity_retention = float(
+        configuration.get(
+            "minimum_precalibration_diversity_retention",
+            1.0,
+        )
+    )
     diversity_search_iterations = int(
         configuration.get("diversity_guard_search_iterations", 20)
     )
@@ -1147,6 +1183,9 @@ def _apply_condition_oracle_piecewise_quantile_calibration(
         search_iterations=diversity_search_iterations,
         minimum_calibration_blend_factor=(
             minimum_calibration_blend_factor
+        ),
+        minimum_precalibration_diversity_retention=(
+            minimum_precalibration_diversity_retention
         ),
         pair_count=diversity_pair_count,
         random_seed=random_seed,
@@ -2061,6 +2100,8 @@ def generate_spectra(
     ) = None,
     prior_random_seed: int | None = None,
     generated_scaled_residual_batches: list[np.ndarray] | None = None,
+    generated_prior_components: list[dict[str, np.ndarray]] | None = None,
+    generated_sampling_rng_fingerprints: list[dict] | None = None,
     variation_scale: float = 1.0,
     sampling_calibrator: (
         SersSamplingCalibrator | None
@@ -2279,12 +2320,15 @@ def generate_spectra(
                 )
             if broad_random_generator is None:
                 raise RuntimeError("条件先验库缺少broad随机数生成器。")
+            component_arguments = ({"sampled_components": generated_prior_components}
+                                   if generated_prior_components is not None else {})
             sampled_prior_conditioning = (
                 conditional_prior_residual_bank.sample_generation_conditioning(
                     current_batch_size,
                     condition_id=str(condition_id),
                     prior_random_generator=prior_random_generator,
                     broad_random_generator=broad_random_generator,
+                    **component_arguments,
                 )
             )
             padded_prior_conditioning = length_adapter.adapt(
@@ -2296,6 +2340,13 @@ def generate_spectra(
                 )
             )
 
+        if generated_sampling_rng_fingerprints is not None:
+            import hashlib
+            fingerprint = {'batch_size': current_batch_size,
+                'cpu': hashlib.sha256(torch.get_rng_state().cpu().numpy().tobytes()).hexdigest()}
+            if torch.device(device).type == 'cuda':
+                fingerprint['cuda'] = hashlib.sha256(torch.cuda.get_rng_state(device).cpu().numpy().tobytes()).hexdigest()
+            generated_sampling_rng_fingerprints.append(fingerprint)
         generated = diffusion.sample(
             batch_size=current_batch_size,
             **batch_sampling_arguments,

@@ -1,0 +1,820 @@
+diff --git a/Dataset.py b/Dataset.py
+index e640c65..ec4523f 100644
+--- a/Dataset.py
++++ b/Dataset.py
+@@ -610,6 +610,323 @@ def build_training_peak_priors(
+     return priors, summary
+ 
+ 
++def _training_condition_representative(
++    record: Mapping[str, Any],
++) -> tuple[np.ndarray, np.ndarray]:
++    """Build one robust representative from the 12 real training mappings.
++
++    Mapping spectra from the same source condition are aggregated before any
++    cross-condition comparison. This avoids treating highly related mappings as
++    independent evidence when constructing a pesticide-specific spectral prior.
++    """
++    signals: list[np.ndarray] = []
++    masks: list[np.ndarray] = []
++
++    for spectrum_index in REAL_TRAIN_INDICES:
++        adapted, valid_mask = _adapt_spectrum_to_model_axis(
++            record["axis"],
++            record["spectra"][:, spectrum_index],
++        )
++        raw, _, _ = _preprocess_spectrum(adapted, valid_mask)
++        signals.append(raw[0].astype(np.float32, copy=False))
++        masks.append(valid_mask.astype(np.bool_, copy=False))
++
++    signal_matrix = np.stack(signals, axis=0).astype(np.float64)
++    valid_matrix = np.stack(masks, axis=0)
++    masked = np.where(valid_matrix, signal_matrix, np.nan)
++    with np.errstate(invalid="ignore"):
++        representative = np.nanmedian(masked, axis=0)
++    representative = np.nan_to_num(representative, nan=0.0).astype(np.float32)
++    valid = valid_matrix.any(axis=0)
++    return representative, valid
++
++
++def build_matched_condition_peak_priors(
++    repository: SERSDataRepository,
++    *,
++    top_k: int = 8,
++    min_peak_distance_cm1: float = 20.0,
++    peak_prominence: float = 0.02,
++    peak_half_width_cm1: float = 15.0,
++    min_matched_pairs: int = 4,
++    shared_peak_floor: float = 0.35,
++) -> tuple[np.ndarray, dict[str, Any]]:
++    """Build shared-aware soft priors from matched training conditions.
++
++    For pesticide p, a present condition is compared only with an available
++    condition having the same matrix and the same concentrations of the other
++    pesticides, but p=absent. Thus the spectral difference is much less
++    confounded by co-occurring pesticides than an all-positive vs all-negative
++    average.
++
++    The result is deliberately *not* an exclusive peak assignment. A Raman
++    region can be informative for DEL and TEB simultaneously. Specificity only
++    attenuates heavily shared regions; ``shared_peak_floor`` guarantees that a
++    genuinely shared/overlapping region can still guide multiple queries.
++
++    Leakage rules:
++    - only the 12 real training mappings are used;
++    - each source condition is first collapsed to one median representative;
++    - validation, test and generated spectra are never used.
++    """
++    if top_k <= 0:
++        raise ValueError("top_k must be positive")
++    if min_peak_distance_cm1 <= 0.0:
++        raise ValueError("min_peak_distance_cm1 must be positive")
++    if peak_prominence < 0.0:
++        raise ValueError("peak_prominence must be non-negative")
++    if peak_half_width_cm1 <= 0.0:
++        raise ValueError("peak_half_width_cm1 must be positive")
++    if min_matched_pairs <= 0:
++        raise ValueError("min_matched_pairs must be positive")
++    if not (0.0 <= shared_peak_floor <= 1.0):
++        raise ValueError("shared_peak_floor must be in [0, 1]")
++
++    # One representative per condition, built from training mappings only.
++    representatives: dict[str, tuple[np.ndarray, np.ndarray]] = {}
++    condition_lookup: dict[tuple[str, tuple[int, ...]], str] = {}
++    for condition, record in repository.real_data.items():
++        info: ConditionInfo = record["condition_info"]
++        levels = tuple(int(round(float(v))) for v in info.level_codes.tolist())
++        key = (info.matrix_name, levels)
++        if key in condition_lookup:
++            raise RuntimeError(
++                "Matched-condition prior requires unique matrix/level conditions; "
++                f"duplicate key={key}"
++            )
++        condition_lookup[key] = condition
++        representatives[condition] = _training_condition_representative(record)
++
++    delta_profiles: list[np.ndarray] = []
++    valid_profiles: list[np.ndarray] = []
++    pair_descriptions: list[list[dict[str, Any]]] = []
++
++    for pesticide_index, pesticide in enumerate(PESTICIDES):
++        pesticide_deltas: list[np.ndarray] = []
++        pesticide_valids: list[np.ndarray] = []
++        pesticide_pairs: list[dict[str, Any]] = []
++
++        for present_condition, present_record in sorted(repository.real_data.items()):
++            present_info: ConditionInfo = present_record["condition_info"]
++            present_levels = np.asarray(present_info.level_codes, dtype=np.int64)
++            target_level = int(present_levels[pesticide_index])
++            if target_level <= 0:
++                continue
++
++            absent_levels = present_levels.copy()
++            absent_levels[pesticide_index] = 0
++
++            # The current 126-condition dataset has no all-absent blank. A
++            # single-pesticide condition therefore cannot form a matched pair
++            # and is intentionally omitted instead of using an unmatched blank.
++            absent_key = (
++                present_info.matrix_name,
++                tuple(int(v) for v in absent_levels.tolist()),
++            )
++            absent_condition = condition_lookup.get(absent_key)
++            if absent_condition is None:
++                continue
++
++            present_rep, present_valid = representatives[present_condition]
++            absent_rep, absent_valid = representatives[absent_condition]
++            common_valid = present_valid & absent_valid
++            if int(common_valid.sum()) < 2:
++                continue
++
++            delta = np.zeros(MODEL_LENGTH, dtype=np.float32)
++            delta[common_valid] = (
++                present_rep[common_valid] - absent_rep[common_valid]
++            )
++            pesticide_deltas.append(delta)
++            pesticide_valids.append(common_valid)
++            pesticide_pairs.append(
++                {
++                    "present_condition": present_condition,
++                    "matched_absent_condition": absent_condition,
++                    "target_level_code": target_level,
++                    "matrix": present_info.matrix_name,
++                }
++            )
++
++        if len(pesticide_deltas) < int(min_matched_pairs):
++            raise RuntimeError(
++                f"Only {len(pesticide_deltas)} matched pairs are available for "
++                f"{pesticide}; require at least {min_matched_pairs}."
++            )
++
++        delta_profiles.append(np.stack(pesticide_deltas, axis=0))
++        valid_profiles.append(np.stack(pesticide_valids, axis=0))
++        pair_descriptions.append(pesticide_pairs)
++
++    # First pass: robust target-sensitive effect and direction consistency.
++    effect_profiles = np.zeros((len(PESTICIDES), MODEL_LENGTH), dtype=np.float64)
++    consistency_profiles = np.zeros_like(effect_profiles)
++    support_profiles = np.zeros_like(effect_profiles)
++
++    for pesticide_index in range(len(PESTICIDES)):
++        deltas = delta_profiles[pesticide_index].astype(np.float64)
++        valids = valid_profiles[pesticide_index]
++        masked_abs = np.where(valids, np.abs(deltas), np.nan)
++        with np.errstate(invalid="ignore"):
++            effect = np.nanmedian(masked_abs, axis=0)
++        effect = np.nan_to_num(effect, nan=0.0)
++
++        valid_count = valids.sum(axis=0).astype(np.float64)
++        support = valid_count / float(max(deltas.shape[0], 1))
++
++        signs = np.sign(deltas)
++        signed_sum = (signs * valids).sum(axis=0, dtype=np.float64)
++        direction_consistency = np.divide(
++            np.abs(signed_sum),
++            valid_count,
++            out=np.zeros(MODEL_LENGTH, dtype=np.float64),
++            where=valid_count > 0,
++        )
++
++        effect_profiles[pesticide_index] = effect
++        consistency_profiles[pesticide_index] = direction_consistency
++        support_profiles[pesticide_index] = support
++
++    # Normalize each pesticide effect independently before estimating whether a
++    # region is pesticide-specific or shared. This prevents one globally
++    # stronger pesticide from suppressing all other priors.
++    effect_norm = np.zeros_like(effect_profiles)
++    for pesticide_index in range(len(PESTICIDES)):
++        maximum = float(effect_profiles[pesticide_index].max())
++        if maximum > 0.0:
++            effect_norm[pesticide_index] = effect_profiles[pesticide_index] / maximum
++
++    total_effect = effect_norm.sum(axis=0)
++    specificity = np.divide(
++        effect_norm,
++        total_effect[np.newaxis, :],
++        out=np.zeros_like(effect_norm),
++        where=total_effect[np.newaxis, :] > 1e-12,
++    )
++
++    axis_step = float(np.median(np.diff(MODEL_RAMAN_AXIS)))
++    distance_points = max(
++        1, int(round(float(min_peak_distance_cm1) / max(axis_step, 1e-8)))
++    )
++    gaussian_sigma = max(
++        float(peak_half_width_cm1) / 2.0 / max(axis_step, 1e-8), 1.0
++    )
++    gaussian_radius = max(2, int(round(3.0 * gaussian_sigma)))
++    kernel_x = np.arange(-gaussian_radius, gaussian_radius + 1, dtype=np.float64)
++    kernel = np.exp(-0.5 * (kernel_x / gaussian_sigma) ** 2)
++    kernel /= kernel.sum()
++    point_index = np.arange(MODEL_LENGTH, dtype=np.float64)
++
++    priors = np.zeros((len(PESTICIDES), MODEL_LENGTH), dtype=np.float32)
++    summary: dict[str, Any] = {
++        "method": "matched_condition_shared_aware",
++        "fit_source": "real training mappings only; one median representative per condition",
++        "real_training_indices": list(REAL_TRAIN_INDICES),
++        "parameters": {
++            "top_k": int(top_k),
++            "min_peak_distance_cm-1": float(min_peak_distance_cm1),
++            "peak_prominence": float(peak_prominence),
++            "peak_half_width_cm-1": float(peak_half_width_cm1),
++            "min_matched_pairs": int(min_matched_pairs),
++            "shared_peak_floor": float(shared_peak_floor),
++        },
++        "interpretation": (
++            "Selected regions are pesticide-sensitive spectral evidence, not "
++            "chemically exclusive peak assignments. Shared regions remain usable "
++            "by multiple pesticide queries."
++        ),
++        "pesticides": {},
++    }
++
++    for pesticide_index, pesticide in enumerate(PESTICIDES):
++        smooth_effect = np.convolve(
++            effect_norm[pesticide_index], kernel, mode="same"
++        )
++        candidates, _ = signal.find_peaks(
++            smooth_effect,
++            distance=distance_points,
++            prominence=float(peak_prominence),
++        )
++        if candidates.size == 0:
++            candidates, _ = signal.find_peaks(
++                smooth_effect,
++                distance=distance_points,
++            )
++        if candidates.size == 0:
++            candidates = np.asarray(
++                [int(np.argmax(smooth_effect))], dtype=np.int64
++            )
++
++        prominences = signal.peak_prominences(smooth_effect, candidates)[0]
++        consistency_factor = 0.5 + 0.5 * consistency_profiles[
++            pesticide_index, candidates
++        ]
++        specificity_factor = (
++            float(shared_peak_floor)
++            + (1.0 - float(shared_peak_floor))
++            * specificity[pesticide_index, candidates]
++        )
++        ranking = (
++            prominences
++            * effect_norm[pesticide_index, candidates]
++            * consistency_factor
++            * specificity_factor
++            * support_profiles[pesticide_index, candidates]
++        )
++
++        order = np.argsort(ranking)[::-1][: int(top_k)]
++        selected = candidates[order]
++        selected_scores = ranking[order]
++        score_max = float(selected_scores.max()) if selected_scores.size else 0.0
++        if score_max > 0.0:
++            selected_weights = selected_scores / score_max
++        else:
++            selected_weights = np.ones_like(selected_scores, dtype=np.float64)
++
++        prior = np.zeros(MODEL_LENGTH, dtype=np.float64)
++        selected_evidence: list[dict[str, Any]] = []
++        for rank, (center_index, weight) in enumerate(
++            zip(selected, selected_weights, strict=True), start=1
++        ):
++            gaussian = np.exp(
++                -0.5 * ((point_index - float(center_index)) / gaussian_sigma) ** 2
++            )
++            prior = np.maximum(prior, float(weight) * gaussian)
++            selected_evidence.append(
++                {
++                    "rank": int(rank),
++                    "raman_shift_cm-1": float(MODEL_RAMAN_AXIS[center_index]),
++                    "prior_weight": float(weight),
++                    "matched_effect": float(effect_norm[pesticide_index, center_index]),
++                    "direction_consistency": float(
++                        consistency_profiles[pesticide_index, center_index]
++                    ),
++                    "specificity": float(specificity[pesticide_index, center_index]),
++                    "sharedness": float(1.0 - specificity[pesticide_index, center_index]),
++                    "support_fraction": float(
++                        support_profiles[pesticide_index, center_index]
++                    ),
++                }
++            )
++
++        prior_max = float(prior.max())
++        if prior_max > 0.0:
++            prior /= prior_max
++        priors[pesticide_index] = prior.astype(np.float32)
++
++        summary["pesticides"][pesticide] = {
++            "matched_pair_count": int(delta_profiles[pesticide_index].shape[0]),
++            "matched_pairs": pair_descriptions[pesticide_index],
++            "peak_centers_cm-1": [
++                float(MODEL_RAMAN_AXIS[index]) for index in selected.tolist()
++            ],
++            "peak_weights": [float(value) for value in selected_weights.tolist()],
++            "selected_evidence": selected_evidence,
++        }
++
++    return priors, summary
++
++
+ class SERSDataset(Dataset):
+     """
+     Real-only validation/test; generated spectra may be added only to training.
+diff --git a/Inference.py b/Inference.py
+index 2240c60..7717a21 100644
+--- a/Inference.py
++++ b/Inference.py
+@@ -101,6 +101,38 @@ def _regression_metric_block(
+     }
+ 
+ 
++def _safe_binary_auc(
++    truth: np.ndarray,
++    probability: np.ndarray,
++) -> float:
++    """Return NaN without sklearn warnings when a subset has only one class."""
++    truth = np.asarray(truth, dtype=np.int64).reshape(-1)
++    probability = np.asarray(probability, dtype=np.float64).reshape(-1)
++    if truth.size == 0 or np.unique(truth).size < 2:
++        return float("nan")
++    return float(roc_auc_score(truth, probability))
++
++
++def _safe_multilabel_auc(
++    y_true: np.ndarray,
++    probabilities: np.ndarray,
++    average: str,
++) -> float:
++    y_true = np.asarray(y_true, dtype=np.int64)
++    probabilities = np.asarray(probabilities, dtype=np.float64)
++    if average == "micro":
++        return _safe_binary_auc(y_true.reshape(-1), probabilities.reshape(-1))
++    if average != "macro":
++        raise ValueError(f"Unsupported AUROC average: {average}")
++
++    values = [
++        _safe_binary_auc(y_true[:, index], probabilities[:, index])
++        for index in range(y_true.shape[1])
++    ]
++    finite = [value for value in values if np.isfinite(value)]
++    return float(np.mean(finite)) if finite else float("nan")
++
++
+ def _classification_metrics(
+     y_true: np.ndarray,
+     probabilities: np.ndarray,
+@@ -132,18 +164,12 @@ def _classification_metrics(
+         result[f"recall_{average}"] = float(recall)
+         result[f"f1_{average}"] = float(f1)
+ 
+-    try:
+-        result["auroc_macro"] = float(
+-            roc_auc_score(y_true, probabilities, average="macro")
+-        )
+-    except ValueError:
+-        result["auroc_macro"] = float("nan")
+-    try:
+-        result["auroc_micro"] = float(
+-            roc_auc_score(y_true, probabilities, average="micro")
+-        )
+-    except ValueError:
+-        result["auroc_micro"] = float("nan")
++    result["auroc_macro"] = _safe_multilabel_auc(
++        y_true, probabilities, average="macro"
++    )
++    result["auroc_micro"] = _safe_multilabel_auc(
++        y_true, probabilities, average="micro"
++    )
+ 
+     per_pesticide_rows: list[dict[str, Any]] = []
+     for index, pesticide in enumerate(PESTICIDES):
+@@ -157,10 +183,7 @@ def _classification_metrics(
+             average="binary",
+             zero_division=0,
+         )
+-        try:
+-            label_auc = float(roc_auc_score(truth, prob))
+-        except ValueError:
+-            label_auc = float("nan")
++        label_auc = _safe_binary_auc(truth, prob)
+         specificity = float(tn / (tn + fp)) if (tn + fp) else float("nan")
+         per_pesticide_rows.append(
+             {
+@@ -535,12 +558,136 @@ def _query_token_raman_axis(token_length: int) -> np.ndarray:
+     return np.asarray(MODEL_RAMAN_AXIS, dtype=np.float64)[centers]
+ 
+ 
++def _attention_specialization_tables(
++    attention: np.ndarray,
++    y_true: np.ndarray,
++    top_k: int = 10,
++) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
++    """Quantify whether pesticide queries are selective and mutually distinct.
++
++    Uniform attention over T tokens has normalized entropy=1 and top-k mass=k/T.
++    Pairwise cosine similarity close to 1 means two pesticide queries use nearly
++    the same attention distribution. Jensen-Shannon divergence near 0 likewise
++    indicates highly similar query distributions.
++    """
++    attention = np.asarray(attention, dtype=np.float64)
++    y_true = np.asarray(y_true, dtype=np.int64)
++    if attention.ndim != 3 or attention.shape[1] != len(PESTICIDES):
++        raise ValueError(
++            "attention must be [samples, pesticides, tokens], got "
++            f"{attention.shape}"
++        )
++
++    eps = 1e-12
++    token_count = int(attention.shape[-1])
++    k = max(1, min(int(top_k), token_count))
++    distributions = attention / np.clip(
++        attention.sum(axis=-1, keepdims=True), eps, None
++    )
++    entropy = -np.sum(
++        distributions * np.log(np.clip(distributions, eps, None)), axis=-1
++    ) / math.log(float(token_count))
++    sorted_attention = np.sort(distributions, axis=-1)
++    topk_mass = sorted_attention[..., -k:].sum(axis=-1)
++    max_attention = distributions.max(axis=-1)
++
++    summary_rows: list[dict[str, Any]] = []
++    sample_rows: list[dict[str, Any]] = []
++    for pesticide_index, pesticide in enumerate(PESTICIDES):
++        masks = {
++            "all": np.ones(attention.shape[0], dtype=bool),
++            "present": y_true[:, pesticide_index] > 0,
++            "absent": y_true[:, pesticide_index] == 0,
++        }
++        for scope, mask in masks.items():
++            if not mask.any():
++                continue
++            summary_rows.append(
++                {
++                    "pesticide": pesticide,
++                    "scope": scope,
++                    "n": int(mask.sum()),
++                    "normalized_entropy_mean": float(
++                        entropy[mask, pesticide_index].mean()
++                    ),
++                    "normalized_entropy_median": float(
++                        np.median(entropy[mask, pesticide_index])
++                    ),
++                    "top_k": int(k),
++                    "top_k_mass_mean": float(
++                        topk_mass[mask, pesticide_index].mean()
++                    ),
++                    "uniform_top_k_mass": float(k / token_count),
++                    "max_attention_mean": float(
++                        max_attention[mask, pesticide_index].mean()
++                    ),
++                    "uniform_attention": float(1.0 / token_count),
++                }
++            )
++
++        for sample_index in range(attention.shape[0]):
++            sample_rows.append(
++                {
++                    "sample_index": int(sample_index),
++                    "pesticide": pesticide,
++                    "target_present": int(y_true[sample_index, pesticide_index] > 0),
++                    "normalized_entropy": float(
++                        entropy[sample_index, pesticide_index]
++                    ),
++                    "top_k_mass": float(topk_mass[sample_index, pesticide_index]),
++                    "max_attention": float(
++                        max_attention[sample_index, pesticide_index]
++                    ),
++                }
++            )
++
++    pair_rows: list[dict[str, Any]] = []
++    for left_index, right_index in combinations(range(len(PESTICIDES)), 2):
++        left = distributions[:, left_index, :]
++        right = distributions[:, right_index, :]
++        denominator = (
++            np.linalg.norm(left, axis=1) * np.linalg.norm(right, axis=1)
++        )
++        cosine = np.divide(
++            np.sum(left * right, axis=1),
++            denominator,
++            out=np.zeros(attention.shape[0], dtype=np.float64),
++            where=denominator > eps,
++        )
++        mixture = 0.5 * (left + right)
++        kl_left = np.sum(
++            left * np.log(np.clip(left, eps, None) / np.clip(mixture, eps, None)),
++            axis=1,
++        )
++        kl_right = np.sum(
++            right * np.log(np.clip(right, eps, None) / np.clip(mixture, eps, None)),
++            axis=1,
++        )
++        js = 0.5 * (kl_left + kl_right)
++        pair_rows.append(
++            {
++                "query_pair": f"{PESTICIDES[left_index]}__{PESTICIDES[right_index]}",
++                "n": int(attention.shape[0]),
++                "cosine_similarity_mean": float(cosine.mean()),
++                "cosine_similarity_median": float(np.median(cosine)),
++                "jensen_shannon_divergence_mean": float(js.mean()),
++                "jensen_shannon_divergence_median": float(np.median(js)),
++            }
++        )
++
++    return (
++        pd.DataFrame(summary_rows),
++        pd.DataFrame(pair_rows),
++        pd.DataFrame(sample_rows),
++    )
++
++
+ def _save_query_attention_profiles(
+     attention: np.ndarray,
+     y_true: np.ndarray,
+     output_directory: Path,
+ ) -> None:
+-    """Export interpretable pesticide-query attention without changing predictions."""
++    """Export Raman-region profiles plus query-specialization diagnostics."""
+     attention = np.asarray(attention, dtype=np.float64)
+     y_true = np.asarray(y_true, dtype=np.int64)
+     if attention.ndim != 3 or attention.shape[1] != len(PESTICIDES):
+@@ -610,6 +757,19 @@ def _save_query_attention_profiles(
+         output_directory / "query_attention_top_regions.csv", index=False
+     )
+ 
++    specialization, pairwise, sample_details = _attention_specialization_tables(
++        attention, y_true, top_k=10
++    )
++    specialization.to_csv(
++        output_directory / "query_attention_specialization.csv", index=False
++    )
++    pairwise.to_csv(
++        output_directory / "query_attention_pairwise_similarity.csv", index=False
++    )
++    sample_details.to_csv(
++        output_directory / "query_attention_sample_diagnostics.csv", index=False
++    )
++
+ 
+ def _collect_predictions(
+     checkpoint: dict[str, Any],
+diff --git a/SERSFormer_Training.py b/SERSFormer_Training.py
+index dc18983..0ead442 100644
+--- a/SERSFormer_Training.py
++++ b/SERSFormer_Training.py
+@@ -26,6 +26,7 @@ from Dataset import (
+     PESTICIDES,
+     build_axis_label_audit,
+     build_datasets,
++    build_matched_condition_peak_priors,
+     build_training_peak_priors,
+     load_concentration_map,
+ )
+@@ -80,11 +81,23 @@ def parse_args() -> argparse.Namespace:
+ 
+     # Peak prior is fitted from the fixed real training split only. These
+     # arguments control prior extraction and its initial soft-attention bias.
++    parser.add_argument(
++        "--peak-prior-mode",
++        choices=("global_contrast", "matched_shared"),
++        default="matched_shared",
++        help=(
++            "global_contrast keeps the earlier all-positive vs all-negative prior; "
++            "matched_shared compares conditions while fixing matrix and all non-target "
++            "pesticide levels, and retains shared Raman regions with reduced weight."
++        ),
++    )
+     parser.add_argument("--peak-top-k", type=int, default=8)
+     parser.add_argument("--peak-min-distance-cm1", type=float, default=20.0)
+     parser.add_argument("--peak-prominence", type=float, default=0.02)
+     parser.add_argument("--peak-half-width-cm1", type=float, default=15.0)
+     parser.add_argument("--peak-min-support-fraction", type=float, default=0.25)
++    parser.add_argument("--peak-min-matched-pairs", type=int, default=4)
++    parser.add_argument("--peak-shared-floor", type=float, default=0.35)
+     parser.add_argument("--peak-guidance-strength", type=float, default=1.5)
+ 
+     parser.add_argument("--loss-weighting", choices=("fixed", "dwa"), default="dwa")
+@@ -330,14 +343,25 @@ def main() -> None:
+     if use_peak_guidance:
+         # Peak guidance is fitted only from the fixed real training split.
+         # Generated spectra, validation spectra and test spectra are excluded.
+-        peak_prior, peak_prior_summary = build_training_peak_priors(
+-            train_dataset.repository,
+-            top_k=args.peak_top_k,
+-            min_peak_distance_cm1=args.peak_min_distance_cm1,
+-            peak_prominence=args.peak_prominence,
+-            peak_half_width_cm1=args.peak_half_width_cm1,
+-            min_support_fraction=args.peak_min_support_fraction,
+-        )
++        if args.peak_prior_mode == "matched_shared":
++            peak_prior, peak_prior_summary = build_matched_condition_peak_priors(
++                train_dataset.repository,
++                top_k=args.peak_top_k,
++                min_peak_distance_cm1=args.peak_min_distance_cm1,
++                peak_prominence=args.peak_prominence,
++                peak_half_width_cm1=args.peak_half_width_cm1,
++                min_matched_pairs=args.peak_min_matched_pairs,
++                shared_peak_floor=args.peak_shared_floor,
++            )
++        else:
++            peak_prior, peak_prior_summary = build_training_peak_priors(
++                train_dataset.repository,
++                top_k=args.peak_top_k,
++                min_peak_distance_cm1=args.peak_min_distance_cm1,
++                peak_prominence=args.peak_prominence,
++                peak_half_width_cm1=args.peak_half_width_cm1,
++                min_support_fraction=args.peak_min_support_fraction,
++            )
+ 
+         peak_prior_frame = pd.DataFrame({"Raman_shift_cm-1": MODEL_RAMAN_AXIS})
+         for pesticide_index, pesticide in enumerate(PESTICIDES):
+@@ -350,13 +374,19 @@ def main() -> None:
+         ) as handle:
+             json.dump(peak_prior_summary, handle, ensure_ascii=False, indent=2)
+ 
+-        print("===== Training-only peak priors =====")
++        print("===== Training-only soft spectral priors =====")
++        print(f"prior mode: {args.peak_prior_mode}")
+         for pesticide in PESTICIDES:
+             info = peak_prior_summary["pesticides"][pesticide]
+             centers = ", ".join(
+                 f"{value:.1f}" for value in info["peak_centers_cm-1"]
+             )
+-            print(f"{pesticide}: {centers} cm^-1")
++            pair_text = (
++                f" | matched_pairs={info.get('matched_pair_count')}"
++                if "matched_pair_count" in info
++                else ""
++            )
++            print(f"{pesticide}: {centers} cm^-1{pair_text}")
+     else:
+         peak_prior = np.zeros((len(PESTICIDES), MODEL_LENGTH), dtype=np.float32)
+         peak_prior_summary = {
+diff --git a/tests/test_attention_specialization_diagnostics.py b/tests/test_attention_specialization_diagnostics.py
+new file mode 100644
+index 0000000..c26293e
+--- /dev/null
++++ b/tests/test_attention_specialization_diagnostics.py
+@@ -0,0 +1,48 @@
++import numpy as np
++
++from Inference import _attention_specialization_tables
++
++
++def test_uniform_attention_has_max_entropy_and_high_query_similarity():
++    attention = np.full((6, 3, 10), 0.1, dtype=np.float64)
++    y_true = np.array(
++        [
++            [1, 0, 0],
++            [0, 1, 0],
++            [0, 0, 1],
++            [1, 1, 0],
++            [1, 0, 1],
++            [0, 1, 1],
++        ],
++        dtype=np.int64,
++    )
++
++    summary, pairwise, details = _attention_specialization_tables(
++        attention, y_true, top_k=2
++    )
++
++    all_rows = summary[summary["scope"] == "all"]
++    assert np.allclose(all_rows["normalized_entropy_mean"], 1.0)
++    assert np.allclose(all_rows["top_k_mass_mean"], 0.2)
++    assert np.allclose(pairwise["cosine_similarity_mean"], 1.0)
++    assert np.allclose(pairwise["jensen_shannon_divergence_mean"], 0.0)
++    assert len(details) == 6 * 3
++
++
++def test_distinct_concentrated_queries_reduce_entropy_and_similarity():
++    attention = np.full((4, 3, 10), 1e-6, dtype=np.float64)
++    attention[:, 0, 1] = 1.0
++    attention[:, 1, 4] = 1.0
++    attention[:, 2, 7] = 1.0
++    attention /= attention.sum(axis=-1, keepdims=True)
++    y_true = np.ones((4, 3), dtype=np.int64)
++
++    summary, pairwise, _ = _attention_specialization_tables(
++        attention, y_true, top_k=2
++    )
++    all_rows = summary[summary["scope"] == "all"]
++
++    assert (all_rows["normalized_entropy_mean"] < 0.1).all()
++    assert (all_rows["top_k_mass_mean"] > 0.99).all()
++    assert (pairwise["cosine_similarity_mean"] < 0.01).all()
++    assert (pairwise["jensen_shannon_divergence_mean"] > 0.5).all()
+diff --git a/tests/test_matched_condition_peak_prior.py b/tests/test_matched_condition_peak_prior.py
+new file mode 100644
+index 0000000..8fa430e
+--- /dev/null
++++ b/tests/test_matched_condition_peak_prior.py
+@@ -0,0 +1,102 @@
++from types import SimpleNamespace
++
++import numpy as np
++
++from Dataset import (
++    MODEL_LENGTH,
++    MODEL_RAMAN_AXIS,
++    ConditionInfo,
++    build_matched_condition_peak_priors,
++)
++
++
++def _gaussian(center: float, width: float = 5.0) -> np.ndarray:
++    return np.exp(-0.5 * ((MODEL_RAMAN_AXIS - center) / width) ** 2).astype(np.float32)
++
++
++def _condition_record(condition: str, levels: tuple[int, int, int]) -> dict:
++    base = 0.05 + 0.00001 * (MODEL_RAMAN_AXIS - 600.0)
++    spectrum = base.astype(np.float32)
++
++    # Pesticide-specific regions plus a deliberately shared region at 1200 cm^-1.
++    if levels[0] > 0:
++        spectrum = spectrum + (1.5 + 0.2 * levels[0]) * _gaussian(1000.0)
++        spectrum = spectrum + 0.55 * _gaussian(1200.0)
++    if levels[1] > 0:
++        spectrum = spectrum + (1.4 + 0.2 * levels[1]) * _gaussian(1300.0)
++        spectrum = spectrum + 0.55 * _gaussian(1200.0)
++    if levels[2] > 0:
++        spectrum = spectrum + (1.6 + 0.2 * levels[2]) * _gaussian(1090.0)
++        spectrum = spectrum + 0.55 * _gaussian(1200.0)
++
++    # 20 deterministic mapping spectra from the same source condition.
++    columns = []
++    for index in range(20):
++        scale = 1.0 + 0.002 * (index - 9.5)
++        columns.append((spectrum * scale).astype(np.float32))
++    spectra = np.stack(columns, axis=1)
++
++    presence = (np.asarray(levels) > 0).astype(np.float32)
++    level_codes = np.asarray(levels, dtype=np.float32)
++    info = ConditionInfo(
++        condition=condition,
++        presence=presence,
++        level_codes=level_codes,
++        concentration_target=level_codes.copy(),
++        matrix_name="water",
++        matrix_code=0,
++    )
++    return {
++        "axis": MODEL_RAMAN_AXIS.astype(np.float64),
++        "spectra": spectra,
++        "condition_info": info,
++    }
++
++
++def test_matched_condition_prior_finds_specific_and_retains_shared_regions():
++    # Six pairwise conditions are sufficient to build matched comparisons for
++    # each target pesticide without requiring an all-absent blank.
++    records = {
++        "DEL-M_water": _condition_record("DEL-M_water", (2, 0, 0)),
++        "CHL-M_water": _condition_record("CHL-M_water", (0, 2, 0)),
++        "TEB-M_water": _condition_record("TEB-M_water", (0, 0, 2)),
++        "DEL-M_CHL-M_water": _condition_record("DEL-M_CHL-M_water", (2, 2, 0)),
++        "DEL-M_TEB-M_water": _condition_record("DEL-M_TEB-M_water", (2, 0, 2)),
++        "CHL-M_TEB-M_water": _condition_record("CHL-M_TEB-M_water", (0, 2, 2)),
++    }
++    repository = SimpleNamespace(real_data=records)
++
++    priors, summary = build_matched_condition_peak_priors(
++        repository,
++        top_k=4,
++        peak_prominence=0.005,
++        min_matched_pairs=2,
++        shared_peak_floor=0.35,
++    )
++
++    assert priors.shape == (3, MODEL_LENGTH)
++    assert np.isfinite(priors).all()
++    assert (priors >= 0.0).all()
++    assert summary["method"] == "matched_condition_shared_aware"
++
++    expected = {"DEL": 1000.0, "CHL": 1300.0, "TEB": 1090.0}
++    for pesticide_index, pesticide in enumerate(("DEL", "CHL", "TEB")):
++        centers = np.asarray(
++            summary["pesticides"][pesticide]["peak_centers_cm-1"],
++            dtype=float,
++        )
++        assert np.min(np.abs(centers - expected[pesticide])) <= 20.0
++        assert summary["pesticides"][pesticide]["matched_pair_count"] >= 2
++
++        shared_index = int(np.argmin(np.abs(MODEL_RAMAN_AXIS - 1200.0)))
++        assert priors[pesticide_index, shared_index] > 0.0
++
++
++def test_shared_peak_floor_validation():
++    repository = SimpleNamespace(real_data={})
++    try:
++        build_matched_condition_peak_priors(repository, shared_peak_floor=1.1)
++    except ValueError as exc:
++        assert "shared_peak_floor" in str(exc)
++    else:
++        raise AssertionError("Expected shared_peak_floor validation error")

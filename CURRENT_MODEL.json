@@ -1,0 +1,17 @@
+{
+  "branch": "D26+T24",
+  "commit_message": "D26+T24",
+  "weights_uploaded": false,
+  "T3.24_selection": "accepted_residual_control",
+  "T3.24_epoch": 2,
+  "checkpoints": {
+    "D4.26": {
+      "server_path": "/home/wqzheng/project/outputs/experiments/d4_26_hybrid_e50_b16_seed2026_20261005_153523_720760/cross/checkpoints/best.pt",
+      "sha256": "30ac9150ac3f1e593b8bc3e976d762522331bf8277e49037eebfbeeca3b8f4ac"
+    },
+    "T3.24": {
+      "server_path": "/home/wqzheng/project_transformer/outputs/t3_24_concentration_update_train_20261009_203833_2694678/residual_control/checkpoints/recommended.pt",
+      "sha256": "bf1e2be7b2ffa46bd1adb7e2e80e48db1af8b70e8025a6c45ad56fbda57da1bd"
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "Inference_T3_23.py": "e6f90d01a8013adf620157144d657c8e423d207022be847b87a1da1260bd6e9d",
+  "Loss_T3_23.py": "e0989996ec255d7a137963dac9cb0f28996cb67cfc5ca54de044d1c047b501a2",
+  "Model_T3_17.py": "08ce21dc572492b150767129bda70f8efccdfbe5949d09c430e07878518da3c2",
+  "Model_T3_23.py": "5eae203020c511a25f899a2af47ba0e991a1c56c59e1bafadfe66cdb40a9d28a",
+  "PATCH_NOTES.md": "476e6e4d1155d4a552c89e7ee27d9d4dab535cc349248a3791b08e722a5db1c6",
+  "Paths_T3_23.py": "9e8f9fea4c2741945e45a5071aab1e21b486ce6de3f7161408df9dd54d7cfd32",
+  "README.md": "6fd2ce04faf5d3c44ecff8c6f4d4dca0b9cf895c5180c26a421259af4862e253",
+  "T3_17_LR.py": "4d623cff5c1d4106fdfb827e28a5bae8c82c1de383a6f764beca23ef05ed185a",
+  "T3_23_Training.py": "280db19d9ae508b83836148fa40dec2066fb87f06ac84799047c0f82559f0468",
+  "VALIDATION.json": "5d6ef66b01f5e51f9543c44e065f4d466b1ebaadf63f81422f65f30c931c5208",
+  "data_t323.py": "4aba8f720e7edd0680a38a70be90d3abf0f24877074411e59824399f1a58cdce",
+  "engine_t323.py": "0257bcb40f960c4e47a6bb756ca2bd80c66b68fafabe12f014592e3dd6dd3e64",
+  "expected_encoder_sources.json": "431a6573fbff5407ca0a944c99616ec12bb9772a779aa66f1a289d68393b30ce",
+  "expected_project_sources.json": "4b2cd3b6a3ce0e6ed162aeef7b25395626fc5c021b052dd8bc99433fc792874a",
+  "expected_reference_state.json": "49db7e5f37b9abd11e35adeab4401dc064f061fe42e6c1b68de69f299f2b46b4",
+  "experiment_t323.py": "3341565f79b8d1331b3b78c504cc5ece93a9560e5c0fd9b4da7dc2a902e5882e",
+  "prepare_t323.py": "a5a32905e4b802fb405b8fc7076ec44b93722777d093a6082bfa48e83ea45ae9",
+  "previous_validation_reference.json": "93a2cc5a2772d9ad7683324476352640170322f2129e7d051b1cdf8568819e25",
+  "reference_random48.json": "89f1535b5fa593419e37bf0ce4b14a4a78f24e244c80169268079ba67c33cd44",
+  "run_t323.sh": "4b91666db37ad05eed859b71a7eafb1ffdaf43d7dac45bab0d0611c0f7e87496",
+  "test_t323.py": "805aa800e92eb878a3113499f474c6b6f26bcd7e8463118acd0a593b2779bbcc"
+}

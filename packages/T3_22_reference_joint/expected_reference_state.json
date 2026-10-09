@@ -1,0 +1,7 @@
+{
+  "baseline_checkpoint_sha256": "232eb73ed526a77405db4a8acd0063efbd9e48a64372f601b2ccc8caa67befd7",
+  "baseline_model_state_sha256": "c13afaeee1380edfcf0ba1c6eca3d5c55447446d6edabe16852a835e0970f751",
+  "weighted_checkpoint_path": "/home/wqzheng/project_transformer/outputs/t3_20_real_weighted_random48_train_20261008_223314_2042245/checkpoints/best_ordinal.pt",
+  "weighted_checkpoint_sha256": "b76142ee7ecc850089ca795a57c68a31a1ffd54326e6ce6abf12b27be2371656",
+  "peak_centers": [813.0,827.0,981.0,1000.0,1013.0,1090.0,1125.0,1216.0,1298.0,1369.0,1463.0,1487.0,1534.0,1578.0,1597.0,1600.0,2230.0]
+}
