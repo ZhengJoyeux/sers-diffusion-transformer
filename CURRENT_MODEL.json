@@ -1,4 +1,5 @@
 {
+  "description": "记录当前生成模型与推荐识别模型版本、权重位置、参数及评价口径。",
   "branch": "DiT+transformer",
   "archive_date": "2026-10-14",
   "source_archive": "DiT_transformer_source.tar.gz",
