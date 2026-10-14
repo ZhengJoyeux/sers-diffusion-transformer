@@ -1,31 +1,37 @@
 {
   "schema": "dit_transformer_archive_v2",
-  "scope": "all tracked files after cleanup except this manifest itself",
-  "base_commit": "4c4161c5a7894a8370aa6bd40b53794888f56066",
+  "description": "保存当前源码、配置与文档的 SHA256 校验清单，便于核对文件内容。",
+  "scope": "all tracked files after documentation update except this manifest itself",
+  "base_commit": "b451e485fe0db4b18a672e49fca84e22ef1ba8f1",
   "files": {
     ".gitignore": {
-      "sha256": "f2ec0287da642db238b9926e80a62de296c48be0ff094f139d19360077575a77",
-      "bytes": 130,
+      "sha256": "7b79a53077bc3590a32d5149c6679abc582ae77152dc790eabeba8d45b0309ef",
+      "bytes": 220,
       "origin": "documentation_or_report_config_snapshot"
     },
     "ARCHIVE_VERIFICATION.json": {
-      "sha256": "20e996e9bbe601f9735b2872af52c00dbeaa0f6c06a6caece7158370bd144161",
-      "bytes": 498,
+      "sha256": "4842a0e61f5b4a248868786e6def7a7f79b612b465fc251fcce23c88d40d9e1a",
+      "bytes": 585,
       "origin": "documentation_or_report_config_snapshot"
     },
     "CLEANUP_REPORT.json": {
-      "sha256": "3422df0ec9c9a56eb55ab5f6a1ae09252e72469a01cb44055fce57cded115222",
-      "bytes": 41783,
+      "sha256": "167f20a76b3c522b57acfc73795b9840bc69e52e4317a35fe3b004ac3bd155e1",
+      "bytes": 41879,
       "origin": "cleanup_documentation"
     },
     "CURRENT_MODEL.json": {
-      "sha256": "4957bbd23e4a240f8e2b5f91cff11a926d0676f9829e8ddf69899c6bd156d2f2",
-      "bytes": 5877,
+      "sha256": "ab6d1a194a5420ab5952d93b9131d0499a502943021a2003401950817f20de09",
+      "bytes": 5991,
       "origin": "documentation_or_report_config_snapshot"
     },
+    "FILE_GUIDE.md": {
+      "sha256": "58ea20d51bc56814f2cdc395a9a51358c934ce580598ee97603dbd951f305425",
+      "bytes": 61396,
+      "origin": "file_and_folder_documentation"
+    },
     "README.md": {
-      "sha256": "c6dbff3b8047c2b571d278979e8aa7c5cc0d1d81bfa8e1e69812eeaa46b2af1a",
-      "bytes": 26078,
+      "sha256": "5de07459632a8a21255e65196a00243184e1d2825719703c277fd83a6bf5768c",
+      "bytes": 17864,
       "origin": "cleanup_documentation"
     },
     "current_configs/D4.26/cross/runtime_config.yaml": {
@@ -42,6 +48,11 @@
       "sha256": "ee0b355c146ca0821fa8a91240b5902abf073da43da9a82b8868608bb0deb4a1",
       "bytes": 19772,
       "origin": "documentation_or_report_config_snapshot"
+    },
+    "current_configs/README.md": {
+      "sha256": "cb472ef22fb5cf82b12c00f9a458d8e737a6d476dcde3bbcfc6cf375f9bf5d2a",
+      "bytes": 578,
+      "origin": "file_and_folder_documentation"
     },
     "current_configs/T3.30/parent_model_config.json": {
       "sha256": "ccf84e4e9b227270eda5b0f83fc6b855bd42cf1348bb491aa6c772ec8db21ac4",
@@ -64,8 +75,8 @@
       "origin": "uploaded_source_archive"
     },
     "diffusion/README.md": {
-      "sha256": "b69838e5162d4cb15d49440b332db1ba271debea1e96a1784f855dbcb484a6e5",
-      "bytes": 6462,
+      "sha256": "64274e2bbbe1dfe675a40fceda10511977882375d297e858d0c48f701fbd51fd",
+      "bytes": 1076,
       "origin": "uploaded_source_archive"
     },
     "diffusion/analyze_peak_free_background.py": {
@@ -918,6 +929,11 @@
       "bytes": 2267,
       "origin": "uploaded_source_archive"
     },
+    "packages/README.md": {
+      "sha256": "52b36e64cb77be5aa9947cdea4eed8103c5faf6c36d66a75c7aa38cd31186b7b",
+      "bytes": 834,
+      "origin": "file_and_folder_documentation"
+    },
     "packages/d4_27_dit_ablation/DiT_LICENSE.txt": {
       "sha256": "5597bb25219e348387edfbf34cfed051cb7f9be29b6488731b9b48db75dcc8eb",
       "bytes": 19335,
@@ -1399,8 +1415,8 @@
       "origin": "uploaded_source_archive"
     },
     "transformer/README.md": {
-      "sha256": "425354282b2a84a853eeec570c1fe09c9dc7cfcbe4af47f8594cc016e20a4e56",
-      "bytes": 2138,
+      "sha256": "34f05594c9a94da4189b98f37697a17b940107422ae79d433bda2d6e9c40a44d",
+      "bytes": 1504,
       "origin": "uploaded_source_archive"
     },
     "transformer/SERSFormer_Training.py": {
