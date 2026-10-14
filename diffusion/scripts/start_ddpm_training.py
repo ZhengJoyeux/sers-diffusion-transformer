@@ -588,6 +588,11 @@ def validate_resume_stage(
             "resume检查点缺少有效configuration。"
         )
 
+    from src.dit_configuration import validate_dit_context
+    if (configuration.get('model', {}).get('architecture', 'unet') !=
+            checkpoint_configuration.get('model', {}).get('architecture', 'unet') or
+            validate_dit_context(configuration) != validate_dit_context(checkpoint_configuration)):
+        raise ValueError('DiT architecture differs from resume checkpoint; train from scratch.')
     from src.hybrid_unet_configuration import validate_hybrid_context
     if validate_hybrid_context(configuration) != validate_hybrid_context(checkpoint_configuration):
         raise ValueError("瓶颈Transformer架构与resume检查点不一致；请为新架构从头训练。")
@@ -3706,29 +3711,35 @@ def main() -> None:
                 "=============================================="
             )
 
-        film_gradients = [
-            parameter.grad
-            for name, parameter in diffusion.named_parameters()
-            if "condition_film" in name and parameter.grad is not None
-        ]
-        if not film_gradients or not any(
-            bool(torch.isfinite(gradient).all())
-            and float(gradient.detach().abs().sum().cpu()) > 0.0
-            for gradient in film_gradients
-        ):
-            raise RuntimeError("条件FiLM层没有获得有限非零梯度。")
+        is_dit = model_config.get('architecture', 'unet') == 'dit'
+        if is_dit:
+            from src.dit_pipeline_check import check_dit_gradient_flow
+            check_dit_gradient_flow(diffusion.model, spectrum, valid_mask, condition, prior_conditioning)
+        else:
+            film_gradients = [
+                parameter.grad
+                for name, parameter in diffusion.named_parameters()
+                if "condition_film" in name and parameter.grad is not None
+            ]
+            if not film_gradients or not any(
+                bool(torch.isfinite(gradient).all())
+                and float(gradient.detach().abs().sum().cpu()) > 0.0
+                for gradient in film_gradients
+            ):
+                raise RuntimeError("条件FiLM层没有获得有限非零梯度。")
         print("===== D4.2 管线自检通过 =====")
         print(f"真实batch：{spectrum.shape[0]}条；loss={float(loss.detach().cpu()):.8g}")
-        print("掩码损失：已激活；14维条件：已激活；全层FiLM梯度：非零")
+        print("掩码损失：已激活；14维条件：已激活；DiT adaLN-Zero延迟梯度：已验证" if is_dit else
+              "掩码损失：已激活；14维条件：已激活；全层FiLM梯度：非零")
         if prior_conditioning_enabled:
-            print("本次抽取的先验谱输入通道：已激活；先验与局部残差：逐样本配对")
+            print("本次抽取的先验谱输入通道：已激活；重建底谱与学习残差：逐样本配对")
         if conditional_prior_residual_bank is not None:
             summary = conditional_prior_residual_bank.summary()
             print(
                 f"条件先验：{summary['number_of_conditions']}套；"
                 f"联合训练光谱：{summary['total_training_spectra']}条"
             )
-        print("未执行optimizer.step，未开始正式训练，未保存checkpoint。")
+        print("正式模型未执行optimizer.step，未开始正式训练，未保存checkpoint。")
         return
 
     # ------------------------------------------------------------------
@@ -4653,8 +4664,8 @@ def main() -> None:
         )
 
     if conditional_prior_residual_bank is not None:
-        print("D4.2 条件PCA+broad-local residual：已启用")
-        print("D4.2 DDPM数量：1（全部训练光谱联合训练）")
+        print("D4.2 条件PCA残差：已启用；学习域=" + broad_local_config.get("residual_mode", "broad_local"))
+        print("D4.2 共享条件扩散模型数量：1（全部训练光谱联合训练）")
         print(
             "D4.2 条件先验状态数量："
             f"{len(conditional_prior_residual_bank.entries)}"

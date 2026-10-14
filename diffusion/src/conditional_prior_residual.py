@@ -717,6 +717,8 @@ class ConditionalPriorResidualBank:
         from src.generation_stage_trace import training_components
         from src.joint_prior_sampling import JointPriorSampler
         parts = training_components(self, condition_id, normalized_training, axis)
+        if self._entry(condition_id).broad_local.residual_mode == 'full_residual':
+            raise ValueError('full_residual does not have a broad prior for joint sampling')
         sampler = JointPriorSampler(self._entry(condition_id), parts['outer'], parts['broad'], configuration)
         if not hasattr(self, '_generation_joint_prior_samplers'):
             self._generation_joint_prior_samplers = {}
@@ -1152,6 +1154,7 @@ class ConditionalPriorResidualBank:
         }
         return {
             "number_of_conditions": len(self.entries),
+            "residual_modes": sorted({entry.broad_local.residual_mode for entry in self.entries.values()}),
             "training_cross_fit": self.training_cross_fit_metadata(),
             "raman_variance_equalization": variance_summary,
             "valid_lengths": {

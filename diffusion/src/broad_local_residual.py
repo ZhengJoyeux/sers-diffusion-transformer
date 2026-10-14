@@ -190,6 +190,7 @@ class BroadLocalResidualDecomposer:
     local_target_abs_max: float = 1.0
 
     epsilon: float = 1.0e-8
+    residual_mode: str = "broad_local"
 
     # fitted state
     raman_shift: np.ndarray | None = None
@@ -217,6 +218,8 @@ class BroadLocalResidualDecomposer:
     training_local_rms_median: float | None = None
 
     def __post_init__(self) -> None:
+        if self.residual_mode not in {"broad_local", "full_residual"}:
+            raise ValueError("invalid residual_mode")
         self.broad_sigma_cm1 = _positive_float(
             self.broad_sigma_cm1,
             "broad_sigma_cm1",
@@ -406,6 +409,7 @@ class BroadLocalResidualDecomposer:
             )
 
         return cls(
+            residual_mode=str(configuration.get("residual_mode", "broad_local")),
             broad_sigma_cm1=float(
                 broad_filter.get(
                     "sigma_cm1",
@@ -661,9 +665,11 @@ class BroadLocalResidualDecomposer:
 
         self._check_fitted()
 
-        count = int(
-            number_of_spectra
-        )
+        count = int(number_of_spectra)
+        if self.residual_mode == "full_residual":
+            if count <= 0:
+                raise ValueError("number_of_spectra must be positive")
+            return np.zeros((count, self.raman_shift.size), dtype=np.float32)
 
         if count <= 0:
             raise ValueError(
@@ -747,6 +753,7 @@ class BroadLocalResidualDecomposer:
 
         return {
             "schema_version": _SCHEMA_VERSION,
+            "residual_mode": self.residual_mode,
             "enabled": True,
             "domain": _DOMAIN,
             "number_of_training_spectra": int(
@@ -926,6 +933,7 @@ class BroadLocalResidualDecomposer:
             )
 
         instance = cls(
+            residual_mode=str(state.get("residual_mode", "broad_local")),
             broad_sigma_cm1=float(
                 broad_filter["sigma_cm1"]
             ),
@@ -1124,12 +1132,12 @@ class BroadLocalResidualDecomposer:
 
         return {
             "enabled": True,
+            "residual_mode": self.residual_mode,
+            "broad_prior_active": self.residual_mode == "broad_local",
             "broad_sigma_cm1": float(
                 self.broad_sigma_cm1
             ),
-            "broad_pca_components": int(
-                self.broad_pca_components.shape[0]
-            ),
+            "broad_pca_components": (0 if self.residual_mode == "full_residual" else int(self.broad_pca_components.shape[0])),
             "broad_pca_cumulative_explained_variance": float(
                 np.sum(
                     self.broad_explained_variance_ratio_
@@ -1163,6 +1171,10 @@ class BroadLocalResidualDecomposer:
         values: np.ndarray,
         axis: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
+        if self.residual_mode == "full_residual":
+            self.uniform_spacing_cm1 = float((axis[-1] - axis[0]) / (axis.size - 1))
+            self.broad_sigma_points = self.broad_sigma_cm1 / self.uniform_spacing_cm1
+            return np.zeros_like(values), values.copy()
         uniform_axis = np.linspace(
             float(axis[0]),
             float(axis[-1]),
@@ -1294,6 +1306,14 @@ class BroadLocalResidualDecomposer:
         self,
         broad: np.ndarray,
     ) -> None:
+        if self.residual_mode == "full_residual":
+            # Compatibility slots only: no filter, SVD, fitted broad prior, or RNG draw.
+            self.broad_pca_mean = np.zeros(broad.shape[1], dtype=np.float64)
+            self.broad_pca_components = np.zeros((1, broad.shape[1]), dtype=np.float64)
+            for name in ("broad_training_score_mean", "broad_score_standard_deviation",
+                         "broad_explained_variance", "broad_explained_variance_ratio_"):
+                setattr(self, name, np.zeros(1, dtype=np.float64))
+            return
         mean = np.mean(
             broad,
             axis=0,

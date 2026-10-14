@@ -1,0 +1,27 @@
+{
+  "status": "PASS",
+  "tests": 8,
+  "actual_baseline_sha256": "7819ca86c16ee302cf00ca89021da3489fd93b62c3ffda5e192e648a0a5201fb",
+  "validation_reference": "Actual archived 504 prediction rows; does not substitute new real-spectrum inference",
+  "local_spectra": "Synthetic 1901-point spectra only",
+  "parameters": {
+    "total_each": 3100203,
+    "concentration_trainable": 148807,
+    "last_encoder_trainable": 285783
+  },
+  "checks": [
+    "Zero-update equality for all modes against actual baseline weights",
+    "Actual gradients reach concentration features and last Encoder only in that arm",
+    "Frozen parameters and all normalization buffers unchanged after optimizer update",
+    "True-label joint CE and conditional TEB CORN task masks including empty batch",
+    "Class/CHL/non-route and inactive-pesticide prediction protection",
+    "Standalone checkpoint loading and stored deployment mode",
+    "Optimizer/schedule/RNG resume bit-identical update",
+    "Archived real prediction metrics and strict adoption guards",
+    "Synthetic complete check/smoke/train/source-audit/compare/pack and completed-epoch recovery",
+    "Protected reference tampering rejected before resume"
+  ],
+  "server_dataset_available_locally": false,
+  "new_real_spectrum_performance_assessed": false,
+  "test_predictions": 0
+}

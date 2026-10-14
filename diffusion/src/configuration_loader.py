@@ -1503,6 +1503,8 @@ def validate_config(
     ]
     from src.hybrid_unet_configuration import validate_hybrid_context
     validate_hybrid_context(configuration)
+    from src.dit_configuration import validate_dit_context
+    validate_dit_context(configuration)
 
     normalization = configuration[
         "normalization"

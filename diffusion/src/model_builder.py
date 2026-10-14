@@ -240,8 +240,18 @@ def build_diffusion_model(
     self_condition = bool(
         architecture.get("self_condition", False)
     )
+    from src.dit_configuration import validate_dit_context
+    dit_configuration = validate_dit_context(model_configuration)
     hybrid_configuration = validate_hybrid_context(model_configuration)
-    if mask_enabled:
+    if dit_configuration is not None:
+        from src.dit_1d import SpectrumDiT1D
+        unet = SpectrumDiT1D(channels=channels, condition_dimension=condition_dimension,
+                             prior_conditioning_enabled=prior_conditioning_enabled,
+                             dropout=dropout, **dit_configuration)
+        print(f"Pure DiT: parameters={sum(p.numel() for p in unet.parameters())}; "
+              f"depth={dit_configuration['depth']}; hidden={dit_configuration['hidden_size']}; "
+              f"heads={dit_configuration['num_heads']}; patch={dit_configuration['patch_size']}")
+    elif mask_enabled:
         if self_condition:
             raise ValueError(
                 "D4.0-B掩码条件U-Net当前要求self_condition=false。"

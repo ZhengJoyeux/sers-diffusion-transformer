@@ -1,0 +1,15 @@
+{
+  "parameters": 57922056,
+  "depth": 12,
+  "hidden_size": 512,
+  "num_heads": 8,
+  "patch_size": 8,
+  "tokens_for_1904_points": 238,
+  "output_shape": [
+    2,
+    1,
+    1904
+  ],
+  "finite": true,
+  "Conv1d_count": 0
+}

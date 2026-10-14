@@ -1,0 +1,11 @@
+{
+  "generation_report_source_hashes_matched": 74,
+  "recognition_core_source_hashes_matched": 5,
+  "T331_report_package_hashes_matched": 34,
+  "T330_standalone_matches_T331_vendor": true,
+  "python_syntax": "PASS",
+  "archive_operation": "source and documentation only; no retraining or algorithm edits",
+  "local_forward_tests": "not run: PyTorch is not installed in archive workspace",
+  "comparison_scope": "validation; D4.27 common approved condition subset",
+  "source_content_changes": []
+}

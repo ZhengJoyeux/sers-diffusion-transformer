@@ -1,17 +1,202 @@
 {
-  "branch": "D26+T24",
-  "commit_message": "D26+T24",
-  "weights_uploaded": false,
-  "T3.24_selection": "accepted_residual_control",
-  "T3.24_epoch": 2,
-  "checkpoints": {
-    "D4.26": {
-      "server_path": "/home/wqzheng/project/outputs/experiments/d4_26_hybrid_e50_b16_seed2026_20261005_153523_720760/cross/checkpoints/best.pt",
-      "sha256": "30ac9150ac3f1e593b8bc3e976d762522331bf8277e49037eebfbeeca3b8f4ac"
+  "branch": "DiT+transformer",
+  "archive_date": "2026-10-14",
+  "source_archive": "DiT_transformer_source.tar.gz",
+  "base_branch": "D26+T24",
+  "base_commit": "5a4e2159d18d56e60ef0e7411b30e60416172f8f",
+  "generation": {
+    "version": "D4.27",
+    "architecture": "SpectrumDiT1D",
+    "residual_modes": [
+      "broad_local",
+      "full_residual"
+    ],
+    "parameters": 57922056,
+    "epochs": 50,
+    "batch_size": 16,
+    "seed": 2026,
+    "target_spectra_per_condition": 100,
+    "delivery_approved_conditions": {
+      "broad_local": 125,
+      "full_residual": 116,
+      "common": 116
     },
-    "T3.24": {
-      "server_path": "/home/wqzheng/project_transformer/outputs/t3_24_concentration_update_train_20261009_203833_2694678/residual_control/checkpoints/recommended.pt",
-      "sha256": "bf1e2be7b2ffa46bd1adb7e2e80e48db1af8b70e8025a6c45ad56fbda57da1bd"
-    }
-  }
+    "runtime_configs": [
+      "current_configs/D4.27/broad_local_runtime_config.yaml",
+      "current_configs/D4.27/full_residual_runtime_config.yaml"
+    ],
+    "downstream_gain_of_D427_not_evaluated": true
+  },
+  "recognition": {
+    "recommended_version": "T3.30",
+    "arm": "concentration",
+    "deployment_mode": "TEB_only",
+    "accepted_epoch": 17,
+    "parameters_total": 3100203,
+    "parameters_trainable": 148807,
+    "loader": "packages/sers_t330_feature_finetune/feature_model.py::load_checkpoint",
+    "server_checkpoint": "/home/wqzheng/project_transformer/outputs/t3_30_feature_finetune_combined_seed2026/train/concentration/checkpoints/TEB_only/best_accepted.pt",
+    "checkpoint_sha256": "d77bde131075c77e5797a9549fdfb6a47f5371922a0a0ea70cd9e9312b535589",
+    "evaluation_split": "validation",
+    "metrics": {
+      "samples": 504,
+      "present_n": 1152,
+      "present_correct": 985,
+      "present_accuracy": 0.8550347222222222,
+      "present_mae": 0.14930555555555555,
+      "full_profile_correct": 380,
+      "classification_exact_correct": 503,
+      "classification_macro_f1": 0.9995654063450674,
+      "ternary_n": 216,
+      "ternary_all_grade_correct": 125,
+      "by_matrix": {
+        "soil": {
+          "n": 252,
+          "full_profile_correct": 188,
+          "ternary_n": 108,
+          "ternary_all_grade_correct": 61
+        },
+        "water": {
+          "n": 252,
+          "full_profile_correct": 192,
+          "ternary_n": 108,
+          "ternary_all_grade_correct": 64
+        }
+      },
+      "DEL_M_by_TEB": {
+        "soil_TEB_1": {
+          "n": 12,
+          "DEL_correct": 5
+        },
+        "soil_TEB_2": {
+          "n": 12,
+          "DEL_correct": 8
+        },
+        "soil_TEB_3": {
+          "n": 12,
+          "DEL_correct": 7
+        },
+        "water_TEB_1": {
+          "n": 12,
+          "DEL_correct": 9
+        },
+        "water_TEB_2": {
+          "n": 12,
+          "DEL_correct": 9
+        },
+        "water_TEB_3": {
+          "n": 12,
+          "DEL_correct": 9
+        }
+      },
+      "per_drug": {
+        "DEL": {
+          "present_n": 384,
+          "correct": 312,
+          "level_code_mae": 0.1953125,
+          "classification_f1": 0.9986962190352021
+        },
+        "CHL": {
+          "present_n": 384,
+          "correct": 351,
+          "level_code_mae": 0.0859375,
+          "classification_f1": 1.0
+        },
+        "TEB": {
+          "present_n": 384,
+          "correct": 322,
+          "level_code_mae": 0.16666666666666666,
+          "classification_f1": 1.0
+        }
+      },
+      "by_mixture": {
+        "1": {
+          "samples": 72,
+          "present_n": 72,
+          "classification_exact_correct": 72,
+          "present_correct": 69,
+          "full_profile_correct": 69,
+          "per_drug": {
+            "DEL": {
+              "present_n": 24,
+              "correct": 23,
+              "level_code_mae": 0.041666666666666664,
+              "classification_f1": 1.0
+            },
+            "CHL": {
+              "present_n": 24,
+              "correct": 23,
+              "level_code_mae": 0.041666666666666664,
+              "classification_f1": 1.0
+            },
+            "TEB": {
+              "present_n": 24,
+              "correct": 23,
+              "level_code_mae": 0.041666666666666664,
+              "classification_f1": 1.0
+            }
+          }
+        },
+        "2": {
+          "samples": 216,
+          "present_n": 432,
+          "classification_exact_correct": 215,
+          "present_correct": 400,
+          "full_profile_correct": 186,
+          "per_drug": {
+            "DEL": {
+              "present_n": 144,
+              "correct": 127,
+              "level_code_mae": 0.11805555555555555,
+              "classification_f1": 0.9965156794425087
+            },
+            "CHL": {
+              "present_n": 144,
+              "correct": 137,
+              "level_code_mae": 0.04861111111111111,
+              "classification_f1": 1.0
+            },
+            "TEB": {
+              "present_n": 144,
+              "correct": 136,
+              "level_code_mae": 0.05555555555555555,
+              "classification_f1": 1.0
+            }
+          }
+        },
+        "3": {
+          "samples": 216,
+          "present_n": 648,
+          "classification_exact_correct": 216,
+          "present_correct": 516,
+          "full_profile_correct": 125,
+          "per_drug": {
+            "DEL": {
+              "present_n": 216,
+              "correct": 162,
+              "level_code_mae": 0.2638888888888889,
+              "classification_f1": 1.0
+            },
+            "CHL": {
+              "present_n": 216,
+              "correct": 191,
+              "level_code_mae": 0.11574074074074074,
+              "classification_f1": 1.0
+            },
+            "TEB": {
+              "present_n": 216,
+              "correct": 163,
+              "level_code_mae": 0.25462962962962965,
+              "classification_f1": 1.0
+            }
+          }
+        }
+      }
+    },
+    "T331_replaces_recommended_checkpoint": false
+  },
+  "weights_and_spectra_included": false,
+  "models_jointly_trained": false,
+  "spectral_representation": "one-dimensional numerical spectrum",
+  "stft_or_cwt_implemented": false
 }
