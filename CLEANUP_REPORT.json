@@ -1,4 +1,5 @@
 {
+  "description": "记录旧补丁、备份和旧实验包清理清单及依赖验证结果。",
   "schema": "safe_repository_cleanup_v1",
   "base_commit": "4c4161c5a7894a8370aa6bd40b53794888f56066",
   "branch": "DiT+transformer",
