@@ -27,7 +27,9 @@
 | `CURRENT_MODEL.json` | 当前版本、推荐模型及来源信息 |
 | `SOURCE_SHA256.json` | 本次归档文件的 SHA256 与来源 |
 
-`transformer/Model_v2.py` 是基础实现。**当前完整识别模型必须通过 T3.30 扩展加载**，不能只实例化基础模型就认为已包含多峰、Adapter、联合头和最终解码策略。`diffusion/config/` 及 `current_configs/D4.26/`、`current_configs/T3.24/` 保留的旧配置仅用于历史参考；旧 U-Net 模型代码也保留兼容路径。
+`transformer/Model_v2.py` 是基础实现。**当前完整识别模型必须通过 T3.30 扩展加载**，不能只实例化基础模型就认为已包含多峰、Adapter、联合头和最终解码策略。`diffusion/config/` 保留可运行的历史对照配置，`current_configs/D4.26/` 保留 D4.27 所用基础配置；旧 U-Net 模型代码也保留兼容路径。
+
+2026-10-14 清理已应用补丁、一次性安装器、备份、旧源码转储和被当前扩展取代的独立实验包，共删除 185 个文件。旧版本仍可从 Git 历史恢复。当前模型代码、正式配置、训练/生成/识别入口均未修改；保留当前模型的 vendor 依赖及 D4.27 安装/测试所需 payload、fixtures。补齐 3 个被实验包 MANIFEST 强制校验的原始日志。详细清单与验证结果见 [CLEANUP_REPORT.json](CLEANUP_REPORT.json)。
 
 本分支保存源码、配置及必要实验参考文件。原始光谱、生成光谱、训练权重、服务器运行输出不在上传范围内。
 

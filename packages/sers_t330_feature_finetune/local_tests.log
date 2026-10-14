@@ -1,0 +1,13 @@
+test_actual_gradients_reach_selected_features_and_encoder_and_only_these_update (__main__.FeatureTests.test_actual_gradients_reach_selected_features_and_encoder_and_only_these_update) ... ok
+test_actual_weights_identity_all_modes_and_parameter_counts (__main__.FeatureTests.test_actual_weights_identity_all_modes_and_parameter_counts) ... ok
+test_fixture_full_cli_check_smoke_train_compare_pack_and_completion_resume (__main__.FeatureTests.test_fixture_full_cli_check_smoke_train_compare_pack_and_completion_resume) ... ok
+test_loss_true_labels_conditional_masks_smoothing_and_empty_batch (__main__.FeatureTests.test_loss_true_labels_conditional_masks_smoothing_and_empty_batch) ... ok
+test_optimizer_schedule_rng_resume_matches_uninterrupted_update (__main__.FeatureTests.test_optimizer_schedule_rng_resume_matches_uninterrupted_update) ... ok
+test_original_validation_reference_and_all_adoption_guards (__main__.FeatureTests.test_original_validation_reference_and_all_adoption_guards) ... ok
+test_prediction_protection_and_no_ground_truth_in_model_input (__main__.FeatureTests.test_prediction_protection_and_no_ground_truth_in_model_input) ... ok
+test_standalone_reload_preserves_deployment_mode_and_actual_predictions (__main__.FeatureTests.test_standalone_reload_preserves_deployment_mode_and_actual_predictions) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 9.570s
+
+OK

@@ -1,0 +1,14 @@
+test_DEL_group_max_argmax_equals_joint_MAP_and_true_label_CE (__main__.AlignedTests.test_DEL_group_max_argmax_equals_joint_MAP_and_true_label_CE) ... ok
+test_TEB_conditional_loss_ignores_other_grades_and_valid_tasks (__main__.AlignedTests.test_TEB_conditional_loss_ignores_other_grades_and_valid_tasks) ... ok
+test_current_reference_metrics_and_STRICT_125_guard (__main__.AlignedTests.test_current_reference_metrics_and_STRICT_125_guard) ... ok
+test_full_fixture_check_cache_smoke_train_sources_compare_pack_resume_and_tampering (__main__.AlignedTests.test_full_fixture_check_cache_smoke_train_sources_compare_pack_resume_and_tampering) ... ok
+test_initial_identity_parent_active_paths_and_compact_parameter_counts (__main__.AlignedTests.test_initial_identity_parent_active_paths_and_compact_parameter_counts) ... ok
+test_non_target_and_non_route_protection_and_no_truth_input (__main__.AlignedTests.test_non_target_and_non_route_protection_and_no_truth_input) ... ok
+test_real_gradients_selected_features_only_and_frozen_parent_unchanged (__main__.AlignedTests.test_real_gradients_selected_features_only_and_frozen_parent_unchanged) ... ok
+test_standalone_reload_and_optimizer_resume_bit_identical (__main__.AlignedTests.test_standalone_reload_and_optimizer_resume_bit_identical) ... ok
+test_wrong_parent_epoch_mode_and_original_teacher_weights_rejected (__main__.AlignedTests.test_wrong_parent_epoch_mode_and_original_teacher_weights_rejected) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 8.378s
+
+OK
