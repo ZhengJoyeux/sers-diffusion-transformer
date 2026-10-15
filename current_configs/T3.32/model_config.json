@@ -1,0 +1,12 @@
+{
+  "attention_dim": 128,
+  "heads": 8,
+  "layers": 6,
+  "dim_ff": 256,
+  "dropout": 0.1,
+  "tokens": 210,
+  "numeric_evidence": true,
+  "adapter_bottleneck": 16,
+  "adaptive_gate": false,
+  "peak_guidance": true
+}

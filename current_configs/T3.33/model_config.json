@@ -1,0 +1,20 @@
+{
+  "baseline_version": "T3.32",
+  "baseline_epoch": 16,
+  "correction_feature_dim": 371,
+  "hidden": 32,
+  "bound": 0.5,
+  "dropout": 0.1,
+  "correction_parameters": 23940,
+  "routing": "all three predicted presence probabilities >=0.5",
+  "updated_drugs": [
+    "DEL",
+    "TEB"
+  ],
+  "protected_outputs": [
+    "classification",
+    "CHL",
+    "non-routed"
+  ],
+  "accepted_epoch": 4
+}

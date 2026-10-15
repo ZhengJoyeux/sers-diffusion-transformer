@@ -1,0 +1,256 @@
+{
+  "baseline": {
+    "samples": 504,
+    "present_n": 1152,
+    "present_correct": 1026,
+    "present_accuracy": 0.890625,
+    "classification_exact_correct": 504,
+    "classification_exact_accuracy": 1.0,
+    "full_profile_correct": 406,
+    "full_profile_accuracy": 0.8055555555555556,
+    "ternary_n": 216,
+    "ternary_all_grade_correct": 131,
+    "ternary_full_profile_accuracy": 0.6064814814814815,
+    "present_level_code_mae": 0.109375,
+    "per_drug": {
+      "DEL": {
+        "present_n": 384,
+        "correct": 332,
+        "accuracy": 0.8645833333333334,
+        "classification_f1": 1.0,
+        "confusion_S_M_H": [
+          [
+            110,
+            18,
+            0
+          ],
+          [
+            15,
+            109,
+            4
+          ],
+          [
+            0,
+            15,
+            113
+          ]
+        ]
+      },
+      "CHL": {
+        "present_n": 384,
+        "correct": 363,
+        "accuracy": 0.9453125,
+        "classification_f1": 1.0,
+        "confusion_S_M_H": [
+          [
+            123,
+            5,
+            0
+          ],
+          [
+            3,
+            120,
+            5
+          ],
+          [
+            0,
+            8,
+            120
+          ]
+        ]
+      },
+      "TEB": {
+        "present_n": 384,
+        "correct": 331,
+        "accuracy": 0.8619791666666666,
+        "classification_f1": 1.0,
+        "confusion_S_M_H": [
+          [
+            111,
+            17,
+            0
+          ],
+          [
+            9,
+            102,
+            17
+          ],
+          [
+            0,
+            10,
+            118
+          ]
+        ]
+      }
+    },
+    "by_mixture": {
+      "1": {
+        "samples": 72,
+        "full_profile_correct": 72,
+        "full_profile_accuracy": 1.0
+      },
+      "2": {
+        "samples": 216,
+        "full_profile_correct": 203,
+        "full_profile_accuracy": 0.9398148148148148
+      },
+      "3": {
+        "samples": 216,
+        "full_profile_correct": 131,
+        "full_profile_accuracy": 0.6064814814814815
+      }
+    },
+    "by_matrix": {
+      "soil": {
+        "samples": 252,
+        "full_profile_correct": 204,
+        "full_profile_accuracy": 0.8095238095238095
+      },
+      "water": {
+        "samples": 252,
+        "full_profile_correct": 202,
+        "full_profile_accuracy": 0.8015873015873016
+      }
+    },
+    "classification_macro_f1": 1.0,
+    "loss_total": 0.07503665932675913,
+    "loss_class": 0.0002509936434307972,
+    "loss_corn": 0.14982232572658669,
+    "max_image_clipped_fraction": 0.003682272488164124,
+    "evaluation_split": "validation",
+    "ordinal_decoding": "median"
+  },
+  "accepted": {
+    "samples": 504,
+    "present_n": 1152,
+    "present_correct": 1027,
+    "present_accuracy": 0.8914930555555556,
+    "classification_exact_correct": 504,
+    "classification_exact_accuracy": 1.0,
+    "full_profile_correct": 408,
+    "full_profile_accuracy": 0.8095238095238095,
+    "ternary_n": 216,
+    "ternary_all_grade_correct": 133,
+    "ternary_full_profile_accuracy": 0.6157407407407407,
+    "present_level_code_mae": 0.10850694444444445,
+    "per_drug": {
+      "DEL": {
+        "present_n": 384,
+        "correct": 332,
+        "accuracy": 0.8645833333333334,
+        "classification_f1": 1.0,
+        "confusion_S_M_H": [
+          [
+            109,
+            19,
+            0
+          ],
+          [
+            14,
+            109,
+            5
+          ],
+          [
+            0,
+            14,
+            114
+          ]
+        ]
+      },
+      "CHL": {
+        "present_n": 384,
+        "correct": 363,
+        "accuracy": 0.9453125,
+        "classification_f1": 1.0,
+        "confusion_S_M_H": [
+          [
+            123,
+            5,
+            0
+          ],
+          [
+            3,
+            120,
+            5
+          ],
+          [
+            0,
+            8,
+            120
+          ]
+        ]
+      },
+      "TEB": {
+        "present_n": 384,
+        "correct": 332,
+        "accuracy": 0.8645833333333334,
+        "classification_f1": 1.0,
+        "confusion_S_M_H": [
+          [
+            111,
+            17,
+            0
+          ],
+          [
+            9,
+            103,
+            16
+          ],
+          [
+            0,
+            10,
+            118
+          ]
+        ]
+      }
+    },
+    "by_mixture": {
+      "1": {
+        "samples": 72,
+        "full_profile_correct": 72,
+        "full_profile_accuracy": 1.0
+      },
+      "2": {
+        "samples": 216,
+        "full_profile_correct": 203,
+        "full_profile_accuracy": 0.9398148148148148
+      },
+      "3": {
+        "samples": 216,
+        "full_profile_correct": 133,
+        "full_profile_accuracy": 0.6157407407407407
+      }
+    },
+    "by_matrix": {
+      "soil": {
+        "samples": 252,
+        "full_profile_correct": 204,
+        "full_profile_accuracy": 0.8095238095238095
+      },
+      "water": {
+        "samples": 252,
+        "full_profile_correct": 204,
+        "full_profile_accuracy": 0.8095238095238095
+      }
+    },
+    "classification_macro_f1": 1.0,
+    "loss_total": 0.08459961414337158,
+    "loss_class": 0.0002509939076844603,
+    "loss_corn": 0.168948233127594,
+    "evaluation_split": "validation",
+    "ordinal_decoding": "median",
+    "max_image_clipped_fraction": 0.003682272488164124,
+    "loss_definition": "0.5 presence BCE + 0.5 all-drug conditional CORN; correction training has additional regularization",
+    "output_protection": "PASS"
+  },
+  "delta": {
+    "present_correct": 1,
+    "full_profile_correct": 2,
+    "ternary_all_grade_correct": 2,
+    "classification_exact_correct": 0
+  },
+  "accepted_epoch": 4,
+  "status": "improved",
+  "split": "validation",
+  "test_predictions": 0
+}

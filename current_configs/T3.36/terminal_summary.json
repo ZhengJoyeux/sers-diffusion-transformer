@@ -1,0 +1,24 @@
+{
+  "source": "user_terminal_log_2026-10-15",
+  "formal_report_zip_received": false,
+  "status": "completed_without_accepted_improvement",
+  "epochs_completed": 8,
+  "accepted_epoch": 0,
+  "retained_model": "T3.33 epoch 4",
+  "final_candidate_validation": {
+    "samples": 504,
+    "present_n": 1152,
+    "present_correct": 1025,
+    "full_profile_correct": 408,
+    "ternary_n": 216,
+    "ternary_all_grade_correct": 133,
+    "DEL_correct": 330,
+    "TEB_correct": 332,
+    "classification_exact_correct": 504
+  },
+  "max_real_train_ternary_accuracy": 0.8024691358024691,
+  "max_validation_ternary_accuracy": 0.6157407407407407,
+  "cuda_initialization_fix_integrated": true,
+  "server_initialization_identity_check": "PASS",
+  "test_predictions": 0
+}

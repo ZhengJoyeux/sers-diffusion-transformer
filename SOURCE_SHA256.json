@@ -1,13 +1,13 @@
 {
-  "schema": "dit_transformer_archive_v2",
-  "description": "保存当前源码、配置与文档的 SHA256 校验清单，便于核对文件内容。",
-  "scope": "all tracked files after documentation update except this manifest itself",
-  "base_commit": "b451e485fe0db4b18a672e49fca84e22ef1ba8f1",
+  "schema": "dit_transformer_recognition_update_v3",
+  "description": "当前源码、说明和配置快照的SHA256清单；识别端更新，生成代码保持原样。",
+  "scope": "all tracked files except this manifest; excludes runtime Python caches",
+  "base_commit": "5b68b15dc4430ff209123bac922f29a384dd5ece",
   "files": {
     ".gitignore": {
-      "sha256": "7b79a53077bc3590a32d5149c6679abc582ae77152dc790eabeba8d45b0309ef",
-      "bytes": 220,
-      "origin": "documentation_or_report_config_snapshot"
+      "sha256": "30b16789c5f11e1420502f950e1f8d4fb9d30ee711797ef8c621c0fb2144c9b6",
+      "bytes": 300,
+      "origin": "recognition_update_2026-10-15"
     },
     "ARCHIVE_VERIFICATION.json": {
       "sha256": "4842a0e61f5b4a248868786e6def7a7f79b612b465fc251fcce23c88d40d9e1a",
@@ -20,19 +20,19 @@
       "origin": "cleanup_documentation"
     },
     "CURRENT_MODEL.json": {
-      "sha256": "ab6d1a194a5420ab5952d93b9131d0499a502943021a2003401950817f20de09",
-      "bytes": 5991,
-      "origin": "documentation_or_report_config_snapshot"
+      "sha256": "c379a8bf2c0f355c992183c0d2809e6fd82c6d0332b8bfb8c4128548fd768b17",
+      "bytes": 11565,
+      "origin": "recognition_update_2026-10-15"
     },
     "FILE_GUIDE.md": {
-      "sha256": "58ea20d51bc56814f2cdc395a9a51358c934ce580598ee97603dbd951f305425",
-      "bytes": 61396,
-      "origin": "file_and_folder_documentation"
+      "sha256": "13767fb51a6cb1b82b15c4460a177eef1267cff4849eb56f4f6fd9356b04dfe9",
+      "bytes": 75805,
+      "origin": "recognition_update_2026-10-15"
     },
     "README.md": {
-      "sha256": "5de07459632a8a21255e65196a00243184e1d2825719703c277fd83a6bf5768c",
-      "bytes": 17864,
-      "origin": "cleanup_documentation"
+      "sha256": "e9a055ad796f66d72ada16961ab7b923a9f465cc3a8d0143b9adb289e74ed78d",
+      "bytes": 18045,
+      "origin": "recognition_update_2026-10-15"
     },
     "current_configs/D4.26/cross/runtime_config.yaml": {
       "sha256": "38ab0bd7e69cf987b7647817bf2f1ef960d063d2271c78902c86214972e8e56d",
@@ -50,9 +50,9 @@
       "origin": "documentation_or_report_config_snapshot"
     },
     "current_configs/README.md": {
-      "sha256": "cb472ef22fb5cf82b12c00f9a458d8e737a6d476dcde3bbcfc6cf375f9bf5d2a",
-      "bytes": 578,
-      "origin": "file_and_folder_documentation"
+      "sha256": "c549d01e84a20fcf21ce1fb5b1a35a40c5b8bed03bf620da13c85a0ebbbb5859",
+      "bytes": 948,
+      "origin": "recognition_update_2026-10-15"
     },
     "current_configs/T3.30/parent_model_config.json": {
       "sha256": "ccf84e4e9b227270eda5b0f83fc6b855bd42cf1348bb491aa6c772ec8db21ac4",
@@ -63,6 +63,56 @@
       "sha256": "f5d205fb13a78e29e3d8b2f3e99ff42e46c721f7551dec29a3709db970ce2585",
       "bytes": 4761,
       "origin": "documentation_or_report_config_snapshot"
+    },
+    "current_configs/T3.32/model_config.json": {
+      "sha256": "b83444d8c96647099a6d1aa3568c578afa2c33623a5a609783e8debd66478bf1",
+      "bytes": 215,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "current_configs/T3.32/plot_scale.json": {
+      "sha256": "1052385dc31f35d1fd7f5123cfb20f80a8d4c47368e2ff79e1ea3bdc4e9c4145",
+      "bytes": 260,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "current_configs/T3.32/validation_metrics.json": {
+      "sha256": "623a75630c27b5e9e8b4c17043e9bb9541e41b690ebda568b71ab7c4312c9a30",
+      "bytes": 2409,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "current_configs/T3.33/comparison.json": {
+      "sha256": "a0e3b06b0b64e2050278c217ac6173d12d6558365c411b87f2f975dd38d51293",
+      "bytes": 5755,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "current_configs/T3.33/model_config.json": {
+      "sha256": "4ebf24921bcf262b1b036b7ebf04f4c94626be5bf3b3f4cdec59641822eee56d",
+      "bytes": 390,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "current_configs/T3.33/validation_metrics.json": {
+      "sha256": "4c69ccf6332e48d193e7fc1befbbb8a79f9a490edafbfddbee1896d7d8089239",
+      "bytes": 2583,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "current_configs/T3.35/comparison.json": {
+      "sha256": "3cda9a78b011c02f68985a414b79415b35363502e934b747433b4b86658581e7",
+      "bytes": 5941,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "current_configs/T3.35/run_summary.json": {
+      "sha256": "7e38d6a978c2555dd07f2357373a524605991bebe84e7cb1cddcdfc32de1d492",
+      "bytes": 317,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "current_configs/T3.35/training_history.csv": {
+      "sha256": "148627cf00aaa84c867d4b0856e4ab5ecf439ac51f33c97fa6b1ea829434c240",
+      "bytes": 1265,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "current_configs/T3.36/terminal_summary.json": {
+      "sha256": "80e1f53f7e8fb89fdcc2f9a797b68fce3a2ecd44d408b5c6c8018f7d480c3011",
+      "bytes": 752,
+      "origin": "recognition_update_2026-10-15"
     },
     "diffusion/.gitignore": {
       "sha256": "4ed9233c59fc94ac383a2553789fe1e350426988586bd73c4503171c239aa2f4",
@@ -930,9 +980,9 @@
       "origin": "uploaded_source_archive"
     },
     "packages/README.md": {
-      "sha256": "52b36e64cb77be5aa9947cdea4eed8103c5faf6c36d66a75c7aa38cd31186b7b",
-      "bytes": 834,
-      "origin": "file_and_folder_documentation"
+      "sha256": "6bd4870e917fd971dd1beab5f1a44f06e2f308382bd9ba8ae6348f420582df8e",
+      "bytes": 947,
+      "origin": "recognition_update_2026-10-15"
     },
     "packages/d4_27_dit_ablation/DiT_LICENSE.txt": {
       "sha256": "5597bb25219e348387edfbf34cfed051cb7f9be29b6488731b9b48db75dcc8eb",
@@ -1415,9 +1465,14 @@
       "origin": "uploaded_source_archive"
     },
     "transformer/README.md": {
-      "sha256": "34f05594c9a94da4189b98f37697a17b940107422ae79d433bda2d6e9c40a44d",
-      "bytes": 1504,
-      "origin": "uploaded_source_archive"
+      "sha256": "67eb803e1dfebc2ebacc5f61c1bb0f93f838c8ae472a781d2989b83aae4a7c58",
+      "bytes": 7025,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/REPOSITORY_VALIDATION.json": {
+      "sha256": "186e03a71a60e7393d85b259c41e23d6168051151904cdc560515ea71bc25c45",
+      "bytes": 903,
+      "origin": "recognition_update_2026-10-15"
     },
     "transformer/SERSFormer_Training.py": {
       "sha256": "e7b9389cd6e6bd474434f60c4cff0e7b56e4bd7740b2ae5ada9f107ff04ca90e",
@@ -1439,10 +1494,310 @@
       "bytes": 20327,
       "origin": "uploaded_source_archive"
     },
+    "transformer/current_recognition.py": {
+      "sha256": "9b85fcb7a14ed932892016be1e742fe57b19516ead8f02cb0100fad278d0409e",
+      "bytes": 1017,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/README.md": {
+      "sha256": "71934b523488a814492749b9c0257e962ff59501cd53723e02f158d97d81f9a1",
+      "bytes": 975,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_32_Image_Recognition/README_CN.md": {
+      "sha256": "68313f65e85738de83eef1bf30c07c9bb275b14d094a91539c452a7b15f52457",
+      "bytes": 8901,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_32_Image_Recognition/adapter.py": {
+      "sha256": "e604dddf9f515ebb1dcfc030089236081891ff48708e07d8e5644a4e13539540",
+      "bytes": 726,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_32_Image_Recognition/bridge.py": {
+      "sha256": "3b83efdc3e6876b43bb77ba956158e41dc351d345cc2c4c1efe0bc74690fed63",
+      "bytes": 3308,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_32_Image_Recognition/checksums.json": {
+      "sha256": "78c8ab4190216cb62657b819d5e03ad4da10abc11faf22de66785daa50a09d5f",
+      "bytes": 1247,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_32_Image_Recognition/image_data.py": {
+      "sha256": "54793deac6c448d4ee544c346d566f2296a0e78084b3acb71a81f9e6559635cf",
+      "bytes": 8659,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_32_Image_Recognition/image_model.py": {
+      "sha256": "8c4a2a177bd4fd47039790c1c949e10fbf7b7325697841f58e3f414bca4d04ec",
+      "bytes": 10942,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_32_Image_Recognition/intensity_evidence.py": {
+      "sha256": "8a72a61abda568966ed0b570fe74f6fd1012e00f25e8b50ce0abc4c8c01f3325",
+      "bytes": 7788,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_32_Image_Recognition/relations.py": {
+      "sha256": "6b7cd1ee5c043bd13fbf0be4b7d3d1366b4008292d31cb75a98f71b5dfdee168",
+      "bytes": 5883,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_32_Image_Recognition/requirements.txt": {
+      "sha256": "02b92776ba79212064c1bb6a66b4f3b2f1b392c99682c7f9590edae1809fbdee",
+      "bytes": 51,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_32_Image_Recognition/run_image.py": {
+      "sha256": "391cd4887231f2afd2f631d220f72b61c482f31ba9c92e551e0dcfeacf84a085",
+      "bytes": 26487,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_32_Image_Recognition/source_provenance.json": {
+      "sha256": "41b8fa82b7c801a24b07d0bbe94f8fff477211b91fdb25236c67cac2483be3bf",
+      "bytes": 997,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_32_Image_Recognition/spectral_core.py": {
+      "sha256": "9a23dc02e636df3c6858ad01cdbe754acdd5a334e80acdc06e67041fe956a026",
+      "bytes": 24724,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_32_Image_Recognition/test_image.py": {
+      "sha256": "fb3de562d96cb3240549c7b02a78061deefee85bda562857b401939a32d3da67",
+      "bytes": 10539,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_32_Image_Recognition/validation_report.json": {
+      "sha256": "b29a6c3ba01e8433cbf4814a89eb0eb47cd708daa0c4e08746a71816692dacfd",
+      "bytes": 1445,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_32_Image_Recognition/verify_package.py": {
+      "sha256": "7a0363a86eaecea5cb786fa5b3536002c8f932bdb46abddfa3bd0cff8507fb3b",
+      "bytes": 781,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_33_Ternary_Correction/README_CN.md": {
+      "sha256": "b56074d8acd69c1dbe7a9216bd75750f0c31635b85fdd09e7ff681db3733303a",
+      "bytes": 7753,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_33_Ternary_Correction/baseline_bridge.py": {
+      "sha256": "07e71602e6e3348f4e860440149a42c547c424e35f6aa709c440cb2dbd99d50c",
+      "bytes": 3259,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_33_Ternary_Correction/checksums.json": {
+      "sha256": "5e015be2a3c5e1c6f166b8e1421d2ae6e358eb0427ca1663e65c75b9a4de12f1",
+      "bytes": 824,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_33_Ternary_Correction/correction_model.py": {
+      "sha256": "20a1add6ada0931d2ae4e3345b68ae7b8055354e0cc66acd32cfc7d0069d4d17",
+      "bytes": 8221,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_33_Ternary_Correction/feature_cache.py": {
+      "sha256": "98f73ba1d66e47bbf7fc227379bf5846ac9d9d395517e3abe8c68ef5ab28f864",
+      "bytes": 5490,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_33_Ternary_Correction/run_correction.py": {
+      "sha256": "2ffe5a86c2bb34e1c8317d62e2d7deab4b952df1e7fcdc163abe160cd7aacf1d",
+      "bytes": 19211,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_33_Ternary_Correction/t332_sources.json": {
+      "sha256": "aef740d5cbb72180e95768637a24610b7373464523a148074526628c539beef4",
+      "bytes": 701,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_33_Ternary_Correction/test_correction.py": {
+      "sha256": "3de9f720633c1a3f33cc37dbe135ccda66d7c39c2bdcacfe4c0f377a10645fa0",
+      "bytes": 9495,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_33_Ternary_Correction/validation_report.json": {
+      "sha256": "f043cbb159d41c0665978495f44eed5487a00b15a99ae97bebbd13f97697c152",
+      "bytes": 1382,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_33_Ternary_Correction/verify_package.py": {
+      "sha256": "42b4a95c2f7563a2bf26eb1f1cb8974426baf8c464947daf4bf79ef7abcfcfd7",
+      "bytes": 732,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_34_Frozen_Diagnosis/INITIAL_FINDINGS_CN.md": {
+      "sha256": "3606e02e30f47b1053527cef2e0d1f56685763e82cfc9ff217997807523792e7",
+      "bytes": 866,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_34_Frozen_Diagnosis/LOCAL_VALIDATION.json": {
+      "sha256": "6313eaf5c5fc3d5c04fdc2ed6a4b77afb048c55df9bd876b47b49676614cd26d",
+      "bytes": 569,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_34_Frozen_Diagnosis/README_CN.md": {
+      "sha256": "d74f9a917f8f3e7a26a4cbeb70d858c7e057faba2546a8537ffbbb1960bfad81",
+      "bytes": 2887,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_34_Frozen_Diagnosis/checksums.json": {
+      "sha256": "3221f4f920527e8670d9d1731d147bdc47fa878404ccf788d5c6eb6d607a2e71",
+      "bytes": 370,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_34_Frozen_Diagnosis/run_diagnosis.py": {
+      "sha256": "6a49b1d4637e33c50ed07864eee31a2ace700f2709c5303ce6d96c174fe9f703",
+      "bytes": 14057,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_35_Ternary_Head_Finetune/README_CN.md": {
+      "sha256": "3eff1d9802da93733afcd7bf658252e942aa5585fbb540025de94bcaed31eca2",
+      "bytes": 7011,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_35_Ternary_Head_Finetune/SOURCE_PROVENANCE.json": {
+      "sha256": "32fa9d1c590622540bb63b522a78d73f7c92bc1501a370457a9a292be75d0b2b",
+      "bytes": 512,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_35_Ternary_Head_Finetune/cache_audit.py": {
+      "sha256": "d25acc737eee85edeb508da3ba0a1060fa966ffd6312a1b95abb475ef2eaa66c",
+      "bytes": 1343,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_35_Ternary_Head_Finetune/cached_evaluation.py": {
+      "sha256": "e999fd7fb136eb68b8d56c3557ded777c6ad143b9c6d125525827d6a28df150d",
+      "bytes": 2305,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_35_Ternary_Head_Finetune/checksums.json": {
+      "sha256": "558e9ed31ba5d49c82c8efd3bc75b6c3b88814e9725e045af5cb8607347e0634",
+      "bytes": 1082,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_35_Ternary_Head_Finetune/head_model.py": {
+      "sha256": "805f715424c2e2b6796254b07b11eb4515f334615a034e16b62c496dbbcfac1a",
+      "bytes": 4564,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_35_Ternary_Head_Finetune/metrics_core.py": {
+      "sha256": "7e0e83cba45e6e3bc52dbfcfc0fd3ef87c73e1694cda494a7e2ac2ffcfdaf3a3",
+      "bytes": 4485,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_35_Ternary_Head_Finetune/ordinal_core.py": {
+      "sha256": "b9da8935ef5c12931fb20470edcf24302f0de35a79ba049460f23f8fd73622ff",
+      "bytes": 4415,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_35_Ternary_Head_Finetune/requirements.txt": {
+      "sha256": "c94e34657e3139008dc5bee8f239c043a3491a41a6bc87cfb1317f115825d670",
+      "bytes": 19,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_35_Ternary_Head_Finetune/run_heads.py": {
+      "sha256": "e0b1bb3f97955fd6fd3242009d5d4ae73f4a02b15a3d14cdbcc31c74a9327286",
+      "bytes": 22637,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_35_Ternary_Head_Finetune/test_heads.py": {
+      "sha256": "ec3fea45d3544adf5ef08f8945a3361228bb18b129c8e66e707fd3edd213e9e3",
+      "bytes": 6144,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_35_Ternary_Head_Finetune/validation_report.json": {
+      "sha256": "20672ce3d823549b13bc839950c2ad014fd882462be56ac66f031db68e6d9d2d",
+      "bytes": 955,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_35_Ternary_Head_Finetune/verify_package.py": {
+      "sha256": "76ae9d0c817b4add3560ad6a32e139621796aaaff54713c3231f823d9cc05272",
+      "bytes": 475,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_36_Ternary_Fusion_Finetune/README_CN.md": {
+      "sha256": "45fd71971629a7a74d5f0cecf7a5f10fbbb80e6dbe7445c35f4513c343e92b95",
+      "bytes": 7228,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_36_Ternary_Fusion_Finetune/SOURCE_PROVENANCE.json": {
+      "sha256": "da989df39738f125ccb96a9a2f9edc5c4f894a921de037b95c62010be9d5f6a2",
+      "bytes": 1034,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_36_Ternary_Fusion_Finetune/cache_audit.py": {
+      "sha256": "d25acc737eee85edeb508da3ba0a1060fa966ffd6312a1b95abb475ef2eaa66c",
+      "bytes": 1343,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_36_Ternary_Fusion_Finetune/cached_evaluation.py": {
+      "sha256": "86cbeac81951a1a5e4ac8617c6e9d63cfcb30ae0f458ed63c0868d88eee70766",
+      "bytes": 2315,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_36_Ternary_Fusion_Finetune/checksums.json": {
+      "sha256": "854cf2d488d06fda40e68f0bfdbaa0b59801a70da3a31da3930d2246e00810b3",
+      "bytes": 1174,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_36_Ternary_Fusion_Finetune/fusion_model.py": {
+      "sha256": "e359a5e110c5f222b48dfb05166b3f176fd3dfd0a5abc77d0d8bab116c3c7590",
+      "bytes": 5607,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_36_Ternary_Fusion_Finetune/metrics_core.py": {
+      "sha256": "7e0e83cba45e6e3bc52dbfcfc0fd3ef87c73e1694cda494a7e2ac2ffcfdaf3a3",
+      "bytes": 4485,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_36_Ternary_Fusion_Finetune/ordinal_core.py": {
+      "sha256": "b9da8935ef5c12931fb20470edcf24302f0de35a79ba049460f23f8fd73622ff",
+      "bytes": 4415,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_36_Ternary_Fusion_Finetune/query_cache.py": {
+      "sha256": "6d9982d3343c72a7542a02a88a2dd277eb6608a3d8b68cdcec9613ddefa215c6",
+      "bytes": 4840,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_36_Ternary_Fusion_Finetune/requirements.txt": {
+      "sha256": "02b92776ba79212064c1bb6a66b4f3b2f1b392c99682c7f9590edae1809fbdee",
+      "bytes": 51,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_36_Ternary_Fusion_Finetune/run_fusion.py": {
+      "sha256": "ea0c4748cc37b405f2d872d76e5f4e337c172e9220a7a76d3db9a99cda0328ae",
+      "bytes": 29250,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_36_Ternary_Fusion_Finetune/test_fusion.py": {
+      "sha256": "abe5d5e53467965573cc8e61816f6d54f5f72f07447b347efd7d9dc13b897654",
+      "bytes": 8192,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_36_Ternary_Fusion_Finetune/validation_report.json": {
+      "sha256": "004b92156cd3d2125877840b84c92deba47e6ea3718ee3f2878bdf9cc62cea0d",
+      "bytes": 1673,
+      "origin": "recognition_update_2026-10-15"
+    },
+    "transformer/extensions/T3_36_Ternary_Fusion_Finetune/verify_package.py": {
+      "sha256": "76ae9d0c817b4add3560ad6a32e139621796aaaff54713c3231f823d9cc05272",
+      "bytes": 475,
+      "origin": "recognition_update_2026-10-15"
+    },
     "transformer/required_packges.txt": {
       "sha256": "7025a55f31bdf4e84193e0b8b7235fb55dfbf1de1f0f1504aafd9babf51af30d",
       "bytes": 146,
       "origin": "uploaded_source_archive"
+    },
+    "transformer/run_recognition.py": {
+      "sha256": "a1aa5aecfd3b0a7d4b5f6d7c9a290d3e20720e25e26bdf81f1522e14f19a816d",
+      "bytes": 3482,
+      "origin": "recognition_update_2026-10-15"
     },
     "transformer/setup.sh": {
       "sha256": "aee5b773194c436aa269db4f78cbf32178c5eb13a840f2a704591807709ef303",
@@ -1484,6 +1839,11 @@
       "bytes": 3227,
       "origin": "uploaded_source_archive"
     },
+    "transformer/tests/test_fusion_cuda_identity.py": {
+      "sha256": "c5b40699dd0e01f38bc04ef00545b27a28a8969baec7e58f6a5077eaa6401dc5",
+      "bytes": 3553,
+      "origin": "recognition_update_2026-10-15"
+    },
     "transformer/tests/test_matched_condition_peak_prior.py": {
       "sha256": "5ec5a8bfbef2396684e0cba1353a0187105d1710028c7125e3dc37be8cdeb35f",
       "bytes": 3777,
@@ -1513,6 +1873,11 @@
       "sha256": "ae50d7cb00fc4b71e21ae3613506de27949c42569ab0d85a16602a091098ad60",
       "bytes": 2173,
       "origin": "uploaded_source_archive"
+    },
+    "transformer/tests/test_recognition_entry.py": {
+      "sha256": "8187141e3fbc85486ce287e0ee6418efe036976a7c3a5fd95800d27e284f639e",
+      "bytes": 1732,
+      "origin": "recognition_update_2026-10-15"
     },
     "transformer/tests/test_runtime_tail_to_2500.py": {
       "sha256": "cbe51a3a419a6da168e0dae6df8c13da03429d5a307554788cec97be966286d4",

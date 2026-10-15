@@ -2,7 +2,7 @@
 
 本项目研究水、土壤基质中 DEL（溴氰菊酯）、CHL（百菌清）和 TEB（戊唑醇）的单药、双药、三药组合。系统包含两个独立训练的模型：**条件先验残差 DiT 生成一维光谱，SERSFormer 识别农药类别并预测 S/M/H 浓度等级**。
 
-当前分支：`DiT+transformer`。生成端版本为 **D4.27**；当前推荐识别模型为 **T3.30 / concentration / TEB_only / epoch 17**。T3.31 是保留的最新对照实验，未取代推荐模型。
+当前分支：`DiT+transformer`。本次更新识别端：**T3.32二维折线谱图CNN＋Transformer，叠加T3.33第4轮三元DEL/TEB修正**。T3.35、T3.36是未超过当前模型的微调对照；T3.36已整合CUDA初始化一致性修复。生成端D4.27代码保持原样。
 
 ## 1. 先从哪里看
 
@@ -11,18 +11,18 @@
 | 理解两个模型的组成和数据流 | 本 README 第 3、4 节 |
 | 查询每个文件、文件夹的简要功能 | [完整功能索引](FILE_GUIDE.md) |
 | 查看生成模型的核心实现 | [dit_1d.py](diffusion/src/dit_1d.py)、[model_builder.py](diffusion/src/model_builder.py) |
-| 查看当前完整识别模型 | [feature_model.py](packages/sers_t330_feature_finetune/feature_model.py) 及其 `vendor/` 依赖 |
-| 查看正式参数 | [D4.27 配置](current_configs/D4.27)、[T3.30 结构](current_configs/T3.30/parent_model_config.json) |
+| 查看当前完整识别模型 | [统一入口](transformer/run_recognition.py)、[加载接口](transformer/current_recognition.py)、[二维主干](transformer/extensions/T3_32_Image_Recognition/image_model.py)、[三元修正](transformer/extensions/T3_33_Ternary_Correction/correction_model.py) |
+| 查看正式参数 | [D4.27 配置](current_configs/D4.27)、[T3.32结构](current_configs/T3.32/model_config.json)、[T3.33验证指标](current_configs/T3.33/validation_metrics.json) |
 | 查找训练、生成、评价入口 | [生成端说明](diffusion/README.md)、[识别端说明](transformer/README.md)、[实验扩展说明](packages/README.md) |
 
-**`transformer/Model_v2.py` 是基础实现。完整 T3.30 模型必须通过 `feature_model.load_checkpoint` 加载**，才能恢复 Adapter、多峰证据、冻结基线、微调副本与最终路由解码。
+**当前推荐模型从 `transformer/current_recognition.py::load_checkpoint` 加载T3.33权重**，其中嵌入T3.32完整二维主干与原图像尺度。`transformer/Model_v2.py`和T3.30扩展保留为历史基础及迁移来源，不代表当前二维模型。仓库不包含服务器上的数据和已训练权重。
 
 ## 2. 文件夹和根目录文件
 
 | 名称 | 简要功能 |
 |---|---|
 | [diffusion/](diffusion) | 生成端：条件先验、残差处理、DiT、扩散采样、保护与评价 |
-| [transformer/](transformer) | 识别基础：光谱预处理、SERSFormer、训练与分层评价 |
+| [transformer/](transformer) | 当前二维识别入口、T3.32～T3.36扩展、历史基础及分层评价 |
 | [packages/](packages) | 配对实验调度、完整识别扩展及固定路径依赖 |
 | [current_configs/](current_configs) | 正式生成配置、推荐识别结构和验证摘要 |
 | [README.md](README.md) | 项目总说明、模块作用、流程图、参数和使用入口 |
@@ -114,92 +114,74 @@ flowchart TD
 
 最终生成依次经过 PCA spread、QQ 尾部与多样性保护、均值、包络及完整支持保护。终端交付检查最多允许修改 5% 的点，超预算时拒绝导出，不能自动放宽阈值。
 
-## 4. 模型二：SERSFormer 识别与等级预测
+## 4. 模型二：二维折线谱图 CNN＋Transformer 识别
 
 ### 功能
 
-输入单条光谱，输出 DEL/CHL/TEB 的存在概率与 S/M/H 等级。完整模型由冻结基线和微调副本组成，两条网络拥有独立权重并分别前向计算。基线保留稳定预测，副本用于受控调整浓度特征。
+输入单条数值光谱，按保存的共享强度尺度绘制2048×512灰度折线谱图，输出DEL/CHL/TEB存在概率及S/M/H浓度等级。默认保留17峰窗口数值证据，是**图像＋数值辅助**模型。图中没有标题、坐标文字、类别、浓度标签或基质标签。
 
-| 模块 | 实现位置 | 作用 |
+| 模块 | 主要文件 | 作用 |
 |---|---|---|
-| 光谱预处理与掩码 | `transformer/Dataset.py` | 构造 raw、smoothed、四通道 percentile、raw_intensity、valid_mask 和 measured_mask |
-| 三分支 1D CNN | 归档 `Model_T3_26.py` | 分别提取原始、平滑和不同百分位强度层次的局部特征 |
-| 融合、扩维与位置编码 | `Model_T3_26.py` | 按位置融合为 64 维，扩到 128 维注意力空间，保留 210 token 路径 |
-| Encoder-Only Transformer | `Model_T3_26.py` | 六层、八头全局注意力，建模远距离峰段关系 |
-| Residual Adapter | `peft.py` | 每层 Encoder 的 128→16→128 残差适配器；当前继承已有权重 |
-| 峰引导 Query Attention | `Model_T3_26.py` | 三药各一个 Query；化学与训练峰先验作为软偏置，不屏蔽其他有效波段 |
-| 多峰证据 | `MultiPeak_T3_25.py` | 17 个实测峰窗的曲线 CNN、9 个统计量、窗口 Encoder 与 Query 交叉注意力 |
-| 多标签类别头 | `Model_T3_26.py` | 分别输出三药的 Sigmoid 存在概率 |
-| 混合感知 Query 融合 | `MixtureAwareQueryFusion` | 浓度路径利用跨药证据及预测存在概率进行融合 |
-| CORN 有序等级头 | `Model_T3_26.py` | 预测“≥M”和“≥H”的单调概率，恢复 S/M/H 等级 |
-| 三元联合头 | `ternary_model.py` | 对三药等级的 27 种组合进行联合评分 |
-| 冻结组合基线 | `combined_model.py` | 三元路由内保留 DEL 的联合 MAP 解码，其他输出保持基线策略 |
-| 当前微调与解码 | `feature_model.py` | TEB_only 模式只替换预测三药均存在时的 TEB 等级 |
-| 调度与候选保护 | `run_feature.py`、`schedule.py` | 分组学习率、预热余弦、参数锚定及分组表现保护 |
+| 固定尺度折线谱图 | T3.32 `image_data.py` | 600–2500 cm⁻¹横轴；真实训练集共享asinh纵轴，保留峰高、负值和强度差异 |
+| 二维CNN | T3.32 `image_model.py` | 提取曲线局部形态；坐标通道、8个纵向位置带与曲线矩保留峰高信息 |
+| Encoder＋Adapter | `image_model.py`、`adapter.py` | 210个位置token，128维，6层8头全局注意力，保留128→16→128残差Adapter |
+| 峰引导Query | `ImageQueryAttention` | 三药独立Query，结合化学和训练峰先验聚合波段信息 |
+| 多峰数值辅助 | `intensity_evidence.py` | 17峰窗口曲线与统计量作为浓度证据，实测掩码排除未测尾部 |
+| 分类与浓度融合 | `ImageSERSFormer` | Sigmoid分类；浓度分支融合跨药信息及预测存在概率 |
+| 有序等级头 | `spectral_core.py` | 条件CORN监督；累计概率median解码为S/M/H，而非连续浓度回归 |
+| T3.33冻结三元修正 | `correction_model.py` | 冻结第16轮二维模型，371维谱源特征驱动23,940参数修正头，仅调预测三元的DEL/TEB |
+| T3.34只读诊断 | `run_diagnosis.py` | 比较真实/生成训练及验证错误，检查有限修正幅度的约束 |
+| T3.35等级头对照 | `run_heads.py` | 仅训练复制的DEL/TEB等级头；没有合格提升，未替代T3.33 |
+| T3.36浓度分支对照 | `run_fusion.py` | 复制融合/投影/等级头，分层低学习率；没有合格提升，未替代T3.33 |
 
-多峰分支用 `measured_mask` 排除未完整实测的峰窗。它利用重叠峰以外的联合线索和窗口统计，不输出解混后的纯农药光谱，也不能据此声称已彻底解决重叠峰判级。
+所有图共用同一训练集拟合尺度，不按单条光谱拉伸峰高。原1401点谱的未实测尾部不绘制，数值证据也保留实测掩码。T3.33特征包括三药浓度投影、原logits/分类概率、多峰统计量及可用性；推理不输入标签、文件名或条件ID。
 
 ### 机理流程图
 
 ```mermaid
 flowchart TD
-    X["单条SERS光谱"] --> PRE["轴适配与特征预处理；valid_mask、measured_mask"]
-    PRE --> RAW["raw分支：1D CNN"]
-    PRE --> SMOOTH["smoothed分支：1D CNN"]
-    PRE --> PCT["四通道percentile分支：1D CNN"]
-    RAW --> FUSE["按位置融合：64维；扩展到128维 + 位置编码"]
-    SMOOTH --> FUSE
-    PCT --> FUSE
-    FUSE --> ENC["冻结基线：6层Encoder、8头注意力、已有Adapter"]
+    X["单条光谱＋实测掩码"] --> DRAW["共享asinh尺度：2048×512灰度折线图"]
+    DRAW --> CNN["二维CNN：坐标、纵向位置带、曲线矩"]
+    CNN --> ENC["210 token：6层8头Transformer＋Adapter"]
     ENC --> QUERY["DEL、CHL、TEB峰引导Query"]
-    CHEM["化学核心与训练辅助峰先验"] --> QUERY
-    PRE --> PEAK["实测峰窗：曲线CNN + 统计量 + 窗口Encoder"]
-    QUERY --> EVID["Query与多峰窗口交叉注意力；加入证据修正"]
-    PEAK --> EVID
-    EVID --> CP["分类投影与三药Sigmoid：存在概率"]
-    EVID --> MIX["混合感知Query融合；浓度投影"]
-    CP -->|"预测概率，梯度分离"| MIX
-    MIX --> CORN["基线三药CORN头：S/M/H概率与等级"]
-    MIX --> JOINT["基线27状态联合头：DEL取联合MAP坐标"]
-    CP --> JOINT
-    CORN --> JOINT
-    PRE --> STUDENT["微调副本：相同完整结构；更新浓度模块"]
-    STUDENT --> TEB["副本TEB有序头：median等级"]
-    CP --> ROUTE{"预测三药均存在？阈值0.5"}
-    ROUTE -->|"是"| THREE["DEL：基线联合头；CHL：基线；TEB：副本"]
-    JOINT --> THREE
-    CORN --> THREE
-    TEB --> THREE
-    ROUTE -->|"否"| BASE["全部采用冻结基线等级"]
+    X --> NUM["17峰窗数值证据"]
+    NUM --> QUERY
+    QUERY --> CP["三药Sigmoid存在概率"]
+    QUERY --> FUSE["跨药浓度融合＋投影"]
+    CP --> FUSE
+    FUSE --> CORN["三药CORN等级概率"]
+    CP --> ROUTE{"预测三药均存在？"}
+    FUSE --> FIX["T3.33冻结特征修正头"]
+    NUM --> FIX
+    CORN --> FIX
+    ROUTE -->|"是"| UPDATED["仅修正DEL、TEB；CHL保持原输出"]
+    FIX --> UPDATED
+    ROUTE -->|"否"| BASE["保持原二维模型输出"]
     CORN --> BASE
-    THREE --> OUT["三药存在概率 + 条件等级；评估时按存在判定置0"]
+    UPDATED --> OUT["存在概率＋S/M/H等级"]
     BASE --> OUT
-    CP --> OUT
 ```
 
-当前 `TEB_only` 表示浓度更新方式，仍识别三种农药。预测三药均存在时：DEL 取冻结基线联合头，CHL 取冻结基线有序头，TEB 取微调副本有序头；其他样本回到冻结基线。路由只看模型预测，不用真实标签、文件名或基质标签。
-
-调用完整模型 `predict()` 后直接使用返回等级；不能把 DEL 的边缘概率再次 median 解码来替代联合 MAP 结果。
+这里的二维CNN、Transformer和峰证据属于T3.32；当前T3.33只训练三元修正头。T3.35/36继续冻结图像主干，其最新权重只供对照，不能当成当前最优模型。混合峰通过多波段和跨药信息辅助判级，模型不输出解混后的纯农药光谱。
 
 ## 5. 正式参数与数据约定
 
-| 项目 | 生成端 D4.27 | 推荐识别端 T3.30 |
+| 项目 | 生成端 D4.27 | 当前识别端 T3.32＋T3.33 |
 |---|---|---|
-| 输入空间 | 一维光谱残差与底谱 | 一维完整光谱及派生特征 |
-| 网络参数量 | 57,922,056 | 3,100,203，含冻结基线和副本 |
-| 主干 | 12 层 DiT，hidden 512，8 头，patch 8 | 三分支 CNN，128 维注意力，6 层 Encoder，8 头 |
-| token | 长轴补至 1904 点，238 patch | 1901 点，210 token |
-| 正式训练预算 | 50 epoch，batch 16，seed 2026 | 50 epoch，batch 16，seed 2026；接受 epoch 17 |
-| 学习率 | 2e−4，warmup + cosine，最低 1e−6 | 浓度特征 5e−6，等级头 1e−5，3 epoch warmup + cosine |
-| 主要补充 | 条件 PCA、先验残差、EMA 0.995、采样校准 | 多峰证据、已有 Adapter、联合头、L2-SP |
-| 当前更新参数 | DiT 训练参数 | concentration 组 148,807 |
-| 采样或输出 | 扩散 200 步，DDIM 100 步，eta 0，`pred_x0` | 三药存在概率与 S/M/H 等级 |
+| 输入空间 | 一维光谱残差与底谱 | 2048×512灰度折线谱图＋多峰数值证据 |
+| 网络参数 | 57,922,056 | T3.32主干1,399,975；T3.33合计1,423,915 |
+| 主干 | 12层DiT，hidden512，8头，patch8 | 二维CNN，128维，6层Encoder，8头，210 token |
+| 图像强度尺度 | 不适用 | 真实训练集拟合共享asinh映射，保存尺度用于部署 |
+| 基础训练 | 50 epoch，batch16，seed2026 | T3.32最多50轮，第28轮早停，保留第16轮 |
+| 当前微调 | DiT训练 | T3.33仅23,940参数修正头，保留第4轮 |
+| 学习率与调度 | 2e−4，warmup＋cosine | T3.33 1e−4→1e−6，3轮warmup＋cosine |
+| 输出 | Raman轴与强度数值 | 三药存在概率与S/M/H浓度等级 |
 
 真实数据固定为 126 源文件 × 20 条，共 2520 条。每源文件 1–12 条训练、13–16 条验证、17–20 条测试，对应 **1512/504/504**。这是同源文件内部划分，不是独立样品或独立批次验证。
 
 原始轴为 1901 点（600–2500 cm⁻¹）或 1401 点（600–2000 cm⁻¹）。生成端对未实测区使用有效区掩码；识别端在内存中按既定背景策略补齐短轴，同时保留实测掩码，不写回原始数据。
 
-PCA、残差状态、训练峰先验与多峰归一化使用对应训练数据拟合。当前 T3.30 训练使用真实 1512 条 + 既有生成 6048 条（每条件 48 条），验证为真实 504 条；这不是 D4.27 新生成谱的下游增益实验。
+PCA、残差状态、训练峰先验与多峰归一化使用对应训练数据拟合。当前 T3.32基础训练使用真实1512条＋既有生成6048条（每条件 48 条），验证为真实 504 条；这不是 D4.27 新生成谱的下游增益实验。
 
 ## 6. 当前结果及报告口径
 
@@ -218,17 +200,20 @@ PCA、残差状态、训练峰先验与多峰归一化使用对应训练数据�
 
 ### 识别端
 
-推荐 T3.30 checkpoint 在 T3.31 中进行只读复核，以下为 504 条真实**验证集**结果：
+当前保留T3.33第4轮。以下均为504条真实**验证集**结果：
 
-| 指标 | 正确数 / 总数 | 比例 |
-|---|---:|---:|
-| 三药类别组合全部正确 | 503 / 504 | 99.80% |
-| 存在药物浓度等级正确 | 985 / 1152 | 85.50% |
-| 类别与全部等级完整正确 | 380 / 504 | 75.40% |
-| 三元三药等级全部正确 | 125 / 216 | 57.87% |
-| DEL / CHL / TEB 等级正确 | 312 / 351 / 322，各 384 | 81.25% / 91.41% / 83.85% |
+| 指标 | 旧T3.30 | T3.32第16轮 | 当前T3.33第4轮 |
+|---|---:|---:|---:|
+| 成分组合全部正确 | 503/504，99.80% | 504/504，100% | 504/504，100% |
+| 已存在成分等级正确 | 985/1152，85.50% | 1026/1152，89.06% | 1027/1152，89.15% |
+| 类别与全部等级完整正确 | 380/504，75.40% | 406/504，80.56% | 408/504，80.95% |
+| 三元三药等级全部正确 | 125/216，57.87% | 131/216，60.65% | 133/216，61.57% |
 
-主要剩余误差是三元混合浓度判级。本轮 T3.30/T3.31 未预测测试集，验证集已用于多次候选选择，不能把上述结果改称独立测试准确率。S/M/H 是既定浓度等级，等级码 MAE/RMSE 不是物理单位的连续浓度误差。
+当前DEL/CHL/TEB等级正确数分别为332/363/332，各384个。单药完整72/72，双药203/216，三药133/216。
+
+T3.35、T3.36均未通过超过当前模型的验收，最终回退T3.33。T3.36真实训练三元最高80.25%，验证最高61.57%，仍有明显训练—验证差距。其最新候选与保留模型分别导出报告，避免混淆。
+
+这些版本同时涉及前端、迁移和优化配置变化，不是只改变“是否转图”的受控消融，不能将全部增益归因于图像。验证集已多次用于模型选择，未提供本轮测试成绩；S/M/H是等级，不能写成连续浓度预测精度。T3.36目前仅有用户终端记录摘要，正式报告ZIP尚未纳入。
 
 ## 7. 训练、生成、评价与加载
 
@@ -239,20 +224,20 @@ PCA、残差状态、训练峰先验与多峰归一化使用对应训练数据�
 | 逐条件生成与交付 | `diffusion/scripts/generate_conditional_spectra.py` |
 | 两组串行/并行调度 | `run_experiment.py` / `run_parallel.py`，位于 D4.27 实验包 |
 | 生成分层评价 | `diffusion/scripts/evaluate_d4_2_generation.py` |
-| 完整推荐识别模型加载 | `packages/sers_t330_feature_finetune/feature_model.py::load_checkpoint` |
-| 识别复核、微调与比较 | `packages/sers_t330_feature_finetune/run_feature.py` |
+| 当前推荐识别模型加载 | `transformer/current_recognition.py::load_checkpoint`，读取T3.33 checkpoint |
+| 当前识别检查、训练、诊断与微调对照 | `transformer/run_recognition.py --stage correction/image/diagnosis/heads/fusion` |
 | T3.31 对照追溯 | `packages/sers_t331_target_aligned/run_aligned.py` |
 
-具体命令见实验包原操作说明。一般生成使用 GPU 1，识别使用 GPU 0；两组 DiT 并行另有双卡分配。推荐继续使用已验证的 `sers_ddpm` 环境。
+二维识别的仓库相对路径命令、现有服务器项目复用与部署示例见[transformer/README.md](transformer/README.md)。各扩展包README保留最初的独立补丁路径说明。一般生成使用 GPU 1，识别使用 GPU 0；两组 DiT 并行另有双卡分配。推荐继续使用已验证的 `sers_ddpm` 环境。
 
 运行时须指定正确配置、数据与权重路径。配置快照保留原服务器绝对路径；换环境需显式调整。`diffusion/` 和 `transformer/` 分别对应原服务器 `/home/wqzheng/project` 与 `/home/wqzheng/project_transformer`。
 
-旧 U-Net checkpoint 不能加载到 DiT，两种残差模式的尺度与 checkpoint 不可互换。仓库没有原始光谱、生成光谱或已训练权重；推荐权重位置与 SHA256 见 `CURRENT_MODEL.json`。生成和识别通过数值光谱衔接，没有联合反向传播；当前没有实现 STFT/CWT 二维图像模型。
+旧 U-Net checkpoint 不能加载到 DiT，两种残差模式的尺度与 checkpoint 不可互换。仓库没有原始光谱、生成光谱或已训练权重；推荐权重位置与 SHA256 见 `CURRENT_MODEL.json`。生成输出数值光谱，识别端将其绘制成二维折线谱图；两模型独立训练，没有联合反向传播。当前没有实现STFT/CWT转图。
 
 ## 8. 校验、清理与来源
 
 清理删除了 185 个无当前依赖的旧文件，保留了完整模型与测试所需副本，并补齐 3 个实验清单必需日志。清单、源码语法、D4.27 安装器和调度检查结果见 `CLEANUP_REPORT.json`。历史版本可从 Git 历史恢复。
 
-本次文档更新不修改模型 Python、训练 Shell、YAML 配置、权重或预测逻辑；实验包原 MANIFEST 内文件保持原哈希。目录和逐文件功能可通过 `FILE_GUIDE.md` 查找。
+本次识别更新新增统一入口、T3.32～T3.36源码及模型/验证快照，整合T3.36初始化零更新修复。既有生成端、历史识别基础与vendor运行依赖保持原样；旧清理报告和归档验证是历史记录。当前内容校验以更新后的`SOURCE_SHA256.json`及扩展包校验文件为准。
 
 DiT 适配参考 [官方 DiT 实现](https://github.com/facebookresearch/DiT)，具体许可与来源见 D4.27 包内 `DiT_LICENSE.txt`、`THIRD_PARTY_NOTICES.md`。基础识别上游来源及许可见 `transformer/README.md` 和 `transformer/LICENSE`。

@@ -1,0 +1,10 @@
+{
+  "adapter.py": "e604dddf9f515ebb1dcfc030089236081891ff48708e07d8e5644a4e13539540",
+  "bridge.py": "3b83efdc3e6876b43bb77ba956158e41dc351d345cc2c4c1efe0bc74690fed63",
+  "image_data.py": "54793deac6c448d4ee544c346d566f2296a0e78084b3acb71a81f9e6559635cf",
+  "image_model.py": "8c4a2a177bd4fd47039790c1c949e10fbf7b7325697841f58e3f414bca4d04ec",
+  "intensity_evidence.py": "8a72a61abda568966ed0b570fe74f6fd1012e00f25e8b50ce0abc4c8c01f3325",
+  "relations.py": "6b7cd1ee5c043bd13fbf0be4b7d3d1366b4008292d31cb75a98f71b5dfdee168",
+  "run_image.py": "391cd4887231f2afd2f631d220f72b61c482f31ba9c92e551e0dcfeacf84a085",
+  "spectral_core.py": "9a23dc02e636df3c6858ad01cdbe754acdd5a334e80acdc06e67041fe956a026"
+}

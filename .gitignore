@@ -11,3 +11,7 @@
 *.ckpt
 .env
 .env.*
+**/image_cache/
+**/feature_cache/
+**/query_cache/
+**/_backup_cuda_identity_fix/

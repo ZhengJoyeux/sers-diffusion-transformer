@@ -1,0 +1,12 @@
+{
+  "width": 2048,
+  "height": 512,
+  "amplitude_scale": 151.376953125,
+  "lower": -0.8164195448160172,
+  "upper": 2.5470575124025343,
+  "axis_start": 600.0,
+  "axis_end": 2500.0,
+  "line_width": 1.5,
+  "supersampling": 2,
+  "version": "T3.32_line_asinh_v1"
+}

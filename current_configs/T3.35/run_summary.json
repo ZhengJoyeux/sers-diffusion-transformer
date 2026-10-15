@@ -1,0 +1,10 @@
+{
+  "status": "completed",
+  "smoke": false,
+  "completed_updates": 328,
+  "accepted_epoch": 0,
+  "frozen_state_unchanged": true,
+  "input_hashes_unchanged": true,
+  "best_accepted": "/home/wqzheng/project_transformer/outputs/t3_35_ternary_heads_seed2026/train/checkpoints/best_accepted.pt",
+  "test_predictions": 0
+}

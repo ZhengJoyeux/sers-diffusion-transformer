@@ -1,0 +1,10 @@
+{
+  "head_patch/T3_35_Ternary_Head_Finetune/run_heads.py": "e0b1bb3f97955fd6fd3242009d5d4ae73f4a02b15a3d14cdbcc31c74a9327286",
+  "head_patch/T3_35_Ternary_Head_Finetune/head_model.py": "805f715424c2e2b6796254b07b11eb4515f334615a034e16b62c496dbbcfac1a",
+  "head_patch/T3_35_Ternary_Head_Finetune/metrics_core.py": "7e0e83cba45e6e3bc52dbfcfc0fd3ef87c73e1694cda494a7e2ac2ffcfdaf3a3",
+  "head_patch/T3_35_Ternary_Head_Finetune/cached_evaluation.py": "e999fd7fb136eb68b8d56c3557ded777c6ad143b9c6d125525827d6a28df150d",
+  "image_patch/T3_32_Image_Recognition/image_model.py": "8c4a2a177bd4fd47039790c1c949e10fbf7b7325697841f58e3f414bca4d04ec",
+  "image_patch/T3_32_Image_Recognition/spectral_core.py": "9a23dc02e636df3c6858ad01cdbe754acdd5a334e80acdc06e67041fe956a026",
+  "correction_patch/T3_33_Ternary_Correction/correction_model.py": "20a1add6ada0931d2ae4e3345b68ae7b8055354e0cc66acd32cfc7d0069d4d17",
+  "correction_patch/T3_33_Ternary_Correction/baseline_bridge.py": "07e71602e6e3348f4e860440149a42c547c424e35f6aa709c440cb2dbd99d50c"
+}

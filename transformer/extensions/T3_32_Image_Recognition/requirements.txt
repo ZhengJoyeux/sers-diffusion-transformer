@@ -1,0 +1,6 @@
+torch>=2.1
+numpy
+pandas
+scipy
+Pillow>=9.1
+openpyxl

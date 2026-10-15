@@ -1,0 +1,28 @@
+{
+  "status": "PASS",
+  "environment": {
+    "python": "3.12",
+    "torch": "2.14.1+cpu"
+  },
+  "unit_tests": 12,
+  "synthetic_integration": {
+    "train_rows": 1764,
+    "validation_rows": 504,
+    "selected_real_ternary": 648,
+    "selected_generated_ternary": 108,
+    "smoke_optimizer_steps": 2,
+    "training_epochs": 4,
+    "training_optimizer_steps": 164,
+    "copied_head_initial_identity": "PASS",
+    "frozen_state_and_input_hashes": "PASS",
+    "teacher_fallback": "PASS",
+    "checkpoint_reload": "PASS",
+    "trained_nonzero_head_direct_image_vs_cached_exact": "PASS",
+    "output_protection": "PASS",
+    "report_pack_excludes_weights_and_cache": "PASS"
+  },
+  "real_user_checkpoint_available_locally": false,
+  "real_accuracy_improvement_verified": false,
+  "target_server": "Python 3.11 / PyTorch 2.11; real checkpoint reproduction is performed by --phase check",
+  "scope": "Synthetic metrics are not claims about user model accuracy."
+}

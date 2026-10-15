@@ -1,6 +1,6 @@
 # 文件与文件夹功能索引
 
-本索引覆盖当前分支的全部文件与目录。功能说明用于快速定位；模块是否启用以正式配置和完整加载器为准。
+本索引覆盖当前分支的全部文件与目录。当前推荐T3.33二维识别，T3.30/T3.31条目为历史依赖；本次新增内容见文末。功能说明用于快速定位；模块是否启用以正式配置和完整加载器为准。
 同名 vendor、payload、fixtures 文件有固定依赖用途，不按同名或版本号判定为冗余。
 
 ## 文件夹
@@ -11,7 +11,7 @@
 | [current_configs/D4.26](current_configs/D4.26) | 准备 D4.27 所用的旧基础配置快照。 |
 | [current_configs/D4.26/cross](current_configs/D4.26/cross) | D4.26 正式基础 runtime 配置。 |
 | [current_configs/D4.27](current_configs/D4.27) | broad/local 与完整残差两组正式 DiT 配置。 |
-| [current_configs/T3.30](current_configs/T3.30) | 当前已接受识别模型的结构与验证摘要。 |
+| [current_configs/T3.30](current_configs/T3.30) | 历史T3.30识别模型的结构与验证摘要。 |
 | [diffusion](diffusion) | 条件先验残差 DiT 的生成、训练、评价和兼容工具。 |
 | [diffusion/config](diffusion/config) | 基础与历史对照配置；当前正式配置另见 current_configs/D4.27。 |
 | [diffusion/scripts](diffusion/scripts) | 生成端训练、条件生成、评价与诊断入口。 |
@@ -28,7 +28,7 @@
 | [packages/d4_27_dit_ablation/test_fixtures/originals](packages/d4_27_dit_ablation/test_fixtures/originals) | 安装测试必需的更新前源码夹具，不是待删除备份。 |
 | [packages/d4_27_dit_ablation/test_fixtures/originals/scripts](packages/d4_27_dit_ablation/test_fixtures/originals/scripts) | 安装测试必需的更新前源码夹具，不是待删除备份。 |
 | [packages/d4_27_dit_ablation/test_fixtures/originals/src](packages/d4_27_dit_ablation/test_fixtures/originals/src) | 安装测试必需的更新前源码夹具，不是待删除备份。 |
-| [packages/sers_t330_feature_finetune](packages/sers_t330_feature_finetune) | 当前推荐识别模型的完整加载器与微调入口。 |
+| [packages/sers_t330_feature_finetune](packages/sers_t330_feature_finetune) | 历史T3.30完整加载器及二维模型迁移来源。 |
 | [packages/sers_t330_feature_finetune/reference](packages/sers_t330_feature_finetune/reference) | 保存实验复核所需的验证预测参考表。 |
 | [packages/sers_t330_feature_finetune/vendor](packages/sers_t330_feature_finetune/vendor) | 按原实验结构保存的运行依赖，避免加载错误版本。 |
 | [packages/sers_t330_feature_finetune/vendor/base](packages/sers_t330_feature_finetune/vendor/base) | 冻结 DEL-only 组合基线及其依赖。 |
@@ -37,7 +37,7 @@
 | [packages/sers_t330_feature_finetune/vendor/base/vendor/t328/vendor](packages/sers_t330_feature_finetune/vendor/base/vendor/t328/vendor) | 按原实验结构保存的运行依赖，避免加载错误版本。 |
 | [packages/sers_t330_feature_finetune/vendor/base/vendor/t328/vendor/t327](packages/sers_t330_feature_finetune/vendor/base/vendor/t328/vendor/t327) | 已接受 Adapter 结构、优化器和学习率调度依赖。 |
 | [packages/sers_t330_feature_finetune/vendor/base/vendor/t328/vendor/t327/archived](packages/sers_t330_feature_finetune/vendor/base/vendor/t328/vendor/t327/archived) | 保留当前模型及清单校验所需的兼容骨架、多峰和关系工具。 |
-| [packages/sers_t331_target_aligned](packages/sers_t331_target_aligned) | 最新目标对齐对照；当前仍推荐其 T3.30 父模型。 |
+| [packages/sers_t331_target_aligned](packages/sers_t331_target_aligned) | 历史一维目标对齐对照；当前保留T3.33二维修正模型。 |
 | [packages/sers_t331_target_aligned/reference](packages/sers_t331_target_aligned/reference) | 保存实验复核所需的验证预测参考表。 |
 | [packages/sers_t331_target_aligned/vendor](packages/sers_t331_target_aligned/vendor) | 按原实验结构保存的运行依赖，避免加载错误版本。 |
 | [packages/sers_t331_target_aligned/vendor/t330](packages/sers_t331_target_aligned/vendor/t330) | T3.31 内嵌的完整 T3.30 父模型和校验资源。 |
@@ -102,8 +102,8 @@
 
 | 文件 | 简要功能 |
 |---|---|
-| [parent_model_config.json](current_configs/T3.30/parent_model_config.json) | 记录当前已接受识别模型的主干、Adapter 与联合头参数。 |
-| [validation_summary.json](current_configs/T3.30/validation_summary.json) | 记录 T3.30 推荐模型在真实验证集上的复核结果。 |
+| [parent_model_config.json](current_configs/T3.30/parent_model_config.json) | 记录历史T3.30的主干、Adapter与联合头参数。 |
+| [validation_summary.json](current_configs/T3.30/validation_summary.json) | 记录历史T3.30模型在真实验证集上的复核结果。 |
 
 </details>
 
@@ -634,3 +634,83 @@
 
 </details>
 
+
+## 2026-10-15：二维识别及三元优化更新
+
+原一维基础与生成端代码保持原样。以下是新入口、模块、测试和结果快照的简要功能。
+
+| 文件 | 简要功能 |
+|---|---|
+| [current_configs/T3.32/model_config.json](current_configs/T3.32/model_config.json) | 记录该版本实际结构、修正参数和路由。 |
+| [current_configs/T3.32/plot_scale.json](current_configs/T3.32/plot_scale.json) | 保存二维图像训练集拟合的共享强度尺度。 |
+| [current_configs/T3.32/validation_metrics.json](current_configs/T3.32/validation_metrics.json) | 保存已报告的真实验证集指标，非测试成绩。 |
+| [current_configs/T3.33/comparison.json](current_configs/T3.33/comparison.json) | 保存候选与参考验证指标及最终回退/改善结论。 |
+| [current_configs/T3.33/model_config.json](current_configs/T3.33/model_config.json) | 记录该版本实际结构、修正参数和路由。 |
+| [current_configs/T3.33/validation_metrics.json](current_configs/T3.33/validation_metrics.json) | 保存已报告的真实验证集指标，非测试成绩。 |
+| [current_configs/T3.35/comparison.json](current_configs/T3.35/comparison.json) | 保存候选与参考验证指标及最终回退/改善结论。 |
+| [current_configs/T3.35/run_summary.json](current_configs/T3.35/run_summary.json) | 记录正式运行轮次、保留权重和零测试预测。 |
+| [current_configs/T3.35/training_history.csv](current_configs/T3.35/training_history.csv) | 记录正式微调的逐轮损失、正确数和验收状态。 |
+| [current_configs/T3.36/terminal_summary.json](current_configs/T3.36/terminal_summary.json) | 摘要用户提供的T3.36终端结果，明确尚无正式报告ZIP。 |
+| [transformer/current_recognition.py](transformer/current_recognition.py) | 加载当前T3.33权重、内嵌二维主干及保存的图像强度尺度。 |
+| [transformer/extensions/README.md](transformer/extensions/README.md) | 索引二维识别和优化包，区分当前模型与未提升对照。 |
+| [transformer/extensions/T3_32_Image_Recognition/README_CN.md](transformer/extensions/T3_32_Image_Recognition/README_CN.md) | 解释该扩展功能、参数、依赖和原独立补丁运行方法。 |
+| [transformer/extensions/T3_32_Image_Recognition/adapter.py](transformer/extensions/T3_32_Image_Recognition/adapter.py) | 提供Encoder残差Adapter及其层钩子。 |
+| [transformer/extensions/T3_32_Image_Recognition/bridge.py](transformer/extensions/T3_32_Image_Recognition/bridge.py) | 连接原Dataset.py并审计固定12/4/4划分和生成来源。 |
+| [transformer/extensions/T3_32_Image_Recognition/checksums.json](transformer/extensions/T3_32_Image_Recognition/checksums.json) | 该扩展文件的SHA256校验值。 |
+| [transformer/extensions/T3_32_Image_Recognition/image_data.py](transformer/extensions/T3_32_Image_Recognition/image_data.py) | 用训练集共享尺度绘制灰度折线谱图，保留实测掩码和峰高。 |
+| [transformer/extensions/T3_32_Image_Recognition/image_model.py](transformer/extensions/T3_32_Image_Recognition/image_model.py) | 实现二维CNN、位置编码、Transformer、峰Query和多任务头。 |
+| [transformer/extensions/T3_32_Image_Recognition/intensity_evidence.py](transformer/extensions/T3_32_Image_Recognition/intensity_evidence.py) | 提取17峰窗曲线和强度统计，为浓度识别提供数值辅助。 |
+| [transformer/extensions/T3_32_Image_Recognition/relations.py](transformer/extensions/T3_32_Image_Recognition/relations.py) | 保留训练集跨组合浓度关系监督工具。 |
+| [transformer/extensions/T3_32_Image_Recognition/requirements.txt](transformer/extensions/T3_32_Image_Recognition/requirements.txt) | 该扩展依赖的Python包列表。 |
+| [transformer/extensions/T3_32_Image_Recognition/run_image.py](transformer/extensions/T3_32_Image_Recognition/run_image.py) | 执行二维基础模型检查、训练、评价与图像导出。 |
+| [transformer/extensions/T3_32_Image_Recognition/source_provenance.json](transformer/extensions/T3_32_Image_Recognition/source_provenance.json) | 记录原模块和归档的来源及校验信息。 |
+| [transformer/extensions/T3_32_Image_Recognition/spectral_core.py](transformer/extensions/T3_32_Image_Recognition/spectral_core.py) | 保留原峰先验、混合感知融合、CORN条件损失与等级解码。 |
+| [transformer/extensions/T3_32_Image_Recognition/test_image.py](transformer/extensions/T3_32_Image_Recognition/test_image.py) | 检查图像强度/掩码、二维主干梯度及checkpoint契约。 |
+| [transformer/extensions/T3_32_Image_Recognition/validation_report.json](transformer/extensions/T3_32_Image_Recognition/validation_report.json) | 说明本地验证范围及尚未验证的实际性能。 |
+| [transformer/extensions/T3_32_Image_Recognition/verify_package.py](transformer/extensions/T3_32_Image_Recognition/verify_package.py) | 校验该扩展内文件的SHA256完整性。 |
+| [transformer/extensions/T3_33_Ternary_Correction/README_CN.md](transformer/extensions/T3_33_Ternary_Correction/README_CN.md) | 解释该扩展功能、参数、依赖和原独立补丁运行方法。 |
+| [transformer/extensions/T3_33_Ternary_Correction/baseline_bridge.py](transformer/extensions/T3_33_Ternary_Correction/baseline_bridge.py) | 校验原二维源码、权重、输入来源与冻结状态。 |
+| [transformer/extensions/T3_33_Ternary_Correction/checksums.json](transformer/extensions/T3_33_Ternary_Correction/checksums.json) | 该扩展文件的SHA256校验值。 |
+| [transformer/extensions/T3_33_Ternary_Correction/correction_model.py](transformer/extensions/T3_33_Ternary_Correction/correction_model.py) | 对预测三元的DEL/TEB实施有界修正，保护分类、CHL及未路由输出。 |
+| [transformer/extensions/T3_33_Ternary_Correction/feature_cache.py](transformer/extensions/T3_33_Ternary_Correction/feature_cache.py) | 缓存冻结特征，构建训练子集和一致口径预测/评价。 |
+| [transformer/extensions/T3_33_Ternary_Correction/run_correction.py](transformer/extensions/T3_33_Ternary_Correction/run_correction.py) | 核对第16轮二维基线，缓存特征、训练三元修正并严格验收。 |
+| [transformer/extensions/T3_33_Ternary_Correction/t332_sources.json](transformer/extensions/T3_33_Ternary_Correction/t332_sources.json) | T3.33所要求的原T3.32运行源码哈希。 |
+| [transformer/extensions/T3_33_Ternary_Correction/test_correction.py](transformer/extensions/T3_33_Ternary_Correction/test_correction.py) | 检查零修正、冻结状态、路由、梯度和权重往返。 |
+| [transformer/extensions/T3_33_Ternary_Correction/validation_report.json](transformer/extensions/T3_33_Ternary_Correction/validation_report.json) | 说明本地验证范围及尚未验证的实际性能。 |
+| [transformer/extensions/T3_33_Ternary_Correction/verify_package.py](transformer/extensions/T3_33_Ternary_Correction/verify_package.py) | 校验该扩展内文件的SHA256完整性。 |
+| [transformer/extensions/T3_34_Frozen_Diagnosis/INITIAL_FINDINGS_CN.md](transformer/extensions/T3_34_Frozen_Diagnosis/INITIAL_FINDINGS_CN.md) | 记录当时三元验证错误和诊断限制。 |
+| [transformer/extensions/T3_34_Frozen_Diagnosis/LOCAL_VALIDATION.json](transformer/extensions/T3_34_Frozen_Diagnosis/LOCAL_VALIDATION.json) | 记录诊断脚本的合成数据测试与适用范围。 |
+| [transformer/extensions/T3_34_Frozen_Diagnosis/README_CN.md](transformer/extensions/T3_34_Frozen_Diagnosis/README_CN.md) | 解释该扩展功能、参数、依赖和原独立补丁运行方法。 |
+| [transformer/extensions/T3_34_Frozen_Diagnosis/checksums.json](transformer/extensions/T3_34_Frozen_Diagnosis/checksums.json) | 该扩展文件的SHA256校验值。 |
+| [transformer/extensions/T3_34_Frozen_Diagnosis/run_diagnosis.py](transformer/extensions/T3_34_Frozen_Diagnosis/run_diagnosis.py) | 比较真实/生成训练与验证的三元错误和有限修正幅度。 |
+| [transformer/extensions/T3_35_Ternary_Head_Finetune/README_CN.md](transformer/extensions/T3_35_Ternary_Head_Finetune/README_CN.md) | 解释该扩展功能、参数、依赖和原独立补丁运行方法。 |
+| [transformer/extensions/T3_35_Ternary_Head_Finetune/SOURCE_PROVENANCE.json](transformer/extensions/T3_35_Ternary_Head_Finetune/SOURCE_PROVENANCE.json) | 记录继承源码的来源路径和SHA256。 |
+| [transformer/extensions/T3_35_Ternary_Head_Finetune/cache_audit.py](transformer/extensions/T3_35_Ternary_Head_Finetune/cache_audit.py) | 检查缓存来源、固定划分、形状、有限值和样本唯一性。 |
+| [transformer/extensions/T3_35_Ternary_Head_Finetune/cached_evaluation.py](transformer/extensions/T3_35_Ternary_Head_Finetune/cached_evaluation.py) | 按统一全局loss口径评价缓存并生成预测表。 |
+| [transformer/extensions/T3_35_Ternary_Head_Finetune/checksums.json](transformer/extensions/T3_35_Ternary_Head_Finetune/checksums.json) | 该扩展文件的SHA256校验值。 |
+| [transformer/extensions/T3_35_Ternary_Head_Finetune/head_model.py](transformer/extensions/T3_35_Ternary_Head_Finetune/head_model.py) | 实现复制DEL/TEB等级头、冻结参照、稳定约束和部署封装。 |
+| [transformer/extensions/T3_35_Ternary_Head_Finetune/metrics_core.py](transformer/extensions/T3_35_Ternary_Head_Finetune/metrics_core.py) | 沿用整体、分药、分混合复杂度、分基质评价及学习率调度。 |
+| [transformer/extensions/T3_35_Ternary_Head_Finetune/ordinal_core.py](transformer/extensions/T3_35_Ternary_Head_Finetune/ordinal_core.py) | 沿用S/M/H累计概率解码及条件CORN损失。 |
+| [transformer/extensions/T3_35_Ternary_Head_Finetune/requirements.txt](transformer/extensions/T3_35_Ternary_Head_Finetune/requirements.txt) | 该扩展依赖的Python包列表。 |
+| [transformer/extensions/T3_35_Ternary_Head_Finetune/run_heads.py](transformer/extensions/T3_35_Ternary_Head_Finetune/run_heads.py) | 用真实来源主导损失微调复制等级头，验收、回退及打包报告。 |
+| [transformer/extensions/T3_35_Ternary_Head_Finetune/test_heads.py](transformer/extensions/T3_35_Ternary_Head_Finetune/test_heads.py) | 检查等级头微调、参数保护、来源采样和验收规则。 |
+| [transformer/extensions/T3_35_Ternary_Head_Finetune/validation_report.json](transformer/extensions/T3_35_Ternary_Head_Finetune/validation_report.json) | 说明本地验证范围及尚未验证的实际性能。 |
+| [transformer/extensions/T3_35_Ternary_Head_Finetune/verify_package.py](transformer/extensions/T3_35_Ternary_Head_Finetune/verify_package.py) | 校验该扩展内文件的SHA256完整性。 |
+| [transformer/extensions/T3_36_Ternary_Fusion_Finetune/README_CN.md](transformer/extensions/T3_36_Ternary_Fusion_Finetune/README_CN.md) | 解释该扩展功能、参数、依赖和原独立补丁运行方法。 |
+| [transformer/extensions/T3_36_Ternary_Fusion_Finetune/SOURCE_PROVENANCE.json](transformer/extensions/T3_36_Ternary_Fusion_Finetune/SOURCE_PROVENANCE.json) | 记录继承源码的来源路径和SHA256。 |
+| [transformer/extensions/T3_36_Ternary_Fusion_Finetune/cache_audit.py](transformer/extensions/T3_36_Ternary_Fusion_Finetune/cache_audit.py) | 检查缓存来源、固定划分、形状、有限值和样本唯一性。 |
+| [transformer/extensions/T3_36_Ternary_Fusion_Finetune/cached_evaluation.py](transformer/extensions/T3_36_Ternary_Fusion_Finetune/cached_evaluation.py) | 按统一全局loss口径评价缓存并生成预测表。 |
+| [transformer/extensions/T3_36_Ternary_Fusion_Finetune/checksums.json](transformer/extensions/T3_36_Ternary_Fusion_Finetune/checksums.json) | 该扩展文件的SHA256校验值。 |
+| [transformer/extensions/T3_36_Ternary_Fusion_Finetune/fusion_model.py](transformer/extensions/T3_36_Ternary_Fusion_Finetune/fusion_model.py) | 复制浓度融合/投影/等级头，保持输出保护，集成CUDA初始化零更新修复。 |
+| [transformer/extensions/T3_36_Ternary_Fusion_Finetune/metrics_core.py](transformer/extensions/T3_36_Ternary_Fusion_Finetune/metrics_core.py) | 沿用整体、分药、分混合复杂度、分基质评价及学习率调度。 |
+| [transformer/extensions/T3_36_Ternary_Fusion_Finetune/ordinal_core.py](transformer/extensions/T3_36_Ternary_Fusion_Finetune/ordinal_core.py) | 沿用S/M/H累计概率解码及条件CORN损失。 |
+| [transformer/extensions/T3_36_Ternary_Fusion_Finetune/query_cache.py](transformer/extensions/T3_36_Ternary_Fusion_Finetune/query_cache.py) | 钩取融合前Query，核对原预测和样本身份，复用训练/验证缓存。 |
+| [transformer/extensions/T3_36_Ternary_Fusion_Finetune/requirements.txt](transformer/extensions/T3_36_Ternary_Fusion_Finetune/requirements.txt) | 该扩展依赖的Python包列表。 |
+| [transformer/extensions/T3_36_Ternary_Fusion_Finetune/run_fusion.py](transformer/extensions/T3_36_Ternary_Fusion_Finetune/run_fusion.py) | 提取融合前Query，分层微调浓度分支并保存候选/保留模型报告。 |
+| [transformer/extensions/T3_36_Ternary_Fusion_Finetune/test_fusion.py](transformer/extensions/T3_36_Ternary_Fusion_Finetune/test_fusion.py) | 检查浓度分支梯度、预测保护、Query来源和保存往返。 |
+| [transformer/extensions/T3_36_Ternary_Fusion_Finetune/validation_report.json](transformer/extensions/T3_36_Ternary_Fusion_Finetune/validation_report.json) | 说明本地验证范围及尚未验证的实际性能。 |
+| [transformer/extensions/T3_36_Ternary_Fusion_Finetune/verify_package.py](transformer/extensions/T3_36_Ternary_Fusion_Finetune/verify_package.py) | 校验该扩展内文件的SHA256完整性。 |
+| [transformer/run_recognition.py](transformer/run_recognition.py) | 为各识别阶段解析仓库相对路径并转发命令，支持只读dry-run。 |
+| [transformer/tests/test_fusion_cuda_identity.py](transformer/tests/test_fusion_cuda_identity.py) | 注入计算偏差，检查零初始化不掩盖真实小更新且梯度可达。 |
+| [transformer/tests/test_recognition_entry.py](transformer/tests/test_recognition_entry.py) | 检查各阶段路径解析、现有项目工件复用和参数覆盖。 |
+| [transformer/REPOSITORY_VALIDATION.json](transformer/REPOSITORY_VALIDATION.json) | 记录本次源码集成的检查范围、69项回归和未上传数据权重。 |
