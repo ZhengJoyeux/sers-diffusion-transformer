@@ -1,0 +1,16 @@
+{
+  "README_CN.md": "68313f65e85738de83eef1bf30c07c9bb275b14d094a91539c452a7b15f52457",
+  "adapter.py": "e604dddf9f515ebb1dcfc030089236081891ff48708e07d8e5644a4e13539540",
+  "bridge.py": "3b83efdc3e6876b43bb77ba956158e41dc351d345cc2c4c1efe0bc74690fed63",
+  "image_data.py": "54793deac6c448d4ee544c346d566f2296a0e78084b3acb71a81f9e6559635cf",
+  "image_model.py": "8c4a2a177bd4fd47039790c1c949e10fbf7b7325697841f58e3f414bca4d04ec",
+  "intensity_evidence.py": "8a72a61abda568966ed0b570fe74f6fd1012e00f25e8b50ce0abc4c8c01f3325",
+  "relations.py": "6b7cd1ee5c043bd13fbf0be4b7d3d1366b4008292d31cb75a98f71b5dfdee168",
+  "requirements.txt": "02b92776ba79212064c1bb6a66b4f3b2f1b392c99682c7f9590edae1809fbdee",
+  "run_image.py": "391cd4887231f2afd2f631d220f72b61c482f31ba9c92e551e0dcfeacf84a085",
+  "source_provenance.json": "41b8fa82b7c801a24b07d0bbe94f8fff477211b91fdb25236c67cac2483be3bf",
+  "spectral_core.py": "9a23dc02e636df3c6858ad01cdbe754acdd5a334e80acdc06e67041fe956a026",
+  "test_image.py": "fb3de562d96cb3240549c7b02a78061deefee85bda562857b401939a32d3da67",
+  "validation_report.json": "b29a6c3ba01e8433cbf4814a89eb0eb47cd708daa0c4e08746a71816692dacfd",
+  "verify_package.py": "7a0363a86eaecea5cb786fa5b3536002c8f932bdb46abddfa3bd0cff8507fb3b"
+}

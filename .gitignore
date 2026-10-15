@@ -1,50 +1,17 @@
-# Python
-__pycache__/
-*.py[cod]
-*.so
-*.egg-info/
-.pytest_cache/
-.coverage
-htmlcov/
-
-# Virtual environments
-.venv/
-venv/
-env/
+# 功能：忽略数据、训练权重、运行输出与缓存；保留源码和配置。
+**/__pycache__/
+**/.pytest_cache/
+**/data/
+**/outputs/
+**/output/
+**/checkpoints/
+**/patch_backups/
+*.pt
+*.pth
+*.ckpt
 .env
-
-# IDE
-.idea/
-.vscode/
-
-# System files
-.DS_Store
-Thumbs.db
-
-# Input data
-data/input/**
-
-# Outputs
-# Outputs
-outputs/checkpoints/
-outputs/generated_spectra*/
-outputs/preview_plots/
-outputs/logs/
-outputs/training_logs/
-outputs/**
-# Model files
-*.pt
-*.pth
-*.ckpt
-
-# Model files
-*.pt
-*.pth
-*.ckpt
-
-# Keep empty directories
-!data/input/.gitkeep
-!outputs/checkpoints/.gitkeep
-!outputs/generated_spectra/.gitkeep
-!outputs/preview_plots/.gitkeep
-!outputs/training_logs/.gitkeep
+.env.*
+**/image_cache/
+**/feature_cache/
+**/query_cache/
+**/_backup_cuda_identity_fix/

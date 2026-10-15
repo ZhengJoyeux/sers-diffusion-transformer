@@ -1,0 +1,28 @@
+{
+  "status": "PASS",
+  "date": "2026-10-15",
+  "scope": "recognition source integration; no retraining or new accuracy claim",
+  "environment": {
+    "python": "3.12",
+    "torch": "2.14.1+cpu"
+  },
+  "tests": {
+    "image": 18,
+    "correction": 17,
+    "ordinal_heads": 12,
+    "fusion": 15,
+    "cuda_identity_simulation_cpu": 3,
+    "repository_entry": 4
+  },
+  "total_unit_tests": 69,
+  "all_python_syntax": "PASS",
+  "pinned_extension_checksums": "PASS",
+  "diffusion_and_dit_source_files_unchanged": true,
+  "generation_current_model_metadata_unchanged": true,
+  "generation_readme_sections_unchanged": true,
+  "data_weights_caches_uploaded": false,
+  "recommended_model": "T3.33 epoch 4",
+  "real_server_weights_available_locally": false,
+  "t336_server_check_and_training": "user terminal log only; no formal report ZIP received",
+  "current_loader_synthetic_full_and_short_forward": "PASS"
+}

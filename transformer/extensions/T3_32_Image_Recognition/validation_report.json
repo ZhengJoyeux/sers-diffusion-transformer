@@ -1,0 +1,70 @@
+{
+  "status": "PASS",
+  "unit_tests": 18,
+  "python_syntax": "PASS",
+  "runtime": "2.14.1+cpu",
+  "device": "cpu",
+  "scope": "Synthetic fixtures only; no access to user measured spectra or real trained checkpoints; no claim of accuracy improvement",
+  "synthetic_real_files": 126,
+  "synthetic_real_spectra": 2520,
+  "synthetic_generated_files": 126,
+  "synthetic_generated_spectra": 252,
+  "original_axis_files": {
+    "points1901": 96,
+    "points1401": 30
+  },
+  "fixed_real_split": {
+    "train": 1512,
+    "validation": 504,
+    "test": 504
+  },
+  "structural_warm_start": "Actual archived T3.30 student architecture with randomly initialized weights; compatible keys checked",
+  "image_shape": [
+    2,
+    1,
+    512,
+    2048
+  ],
+  "output_shapes": {
+    "cp": [
+      2,
+      3
+    ],
+    "op": [
+      2,
+      3,
+      2
+    ],
+    "logits": [
+      2,
+      3,
+      2
+    ],
+    "attention": [
+      2,
+      3,
+      210
+    ],
+    "relation": [
+      2,
+      3,
+      16
+    ]
+  },
+  "parameters": 1399975,
+  "smoke": {
+    "completed_updates": 2,
+    "cross_combination_relation_enabled": true,
+    "validation_rows": 4,
+    "save_and_reload": "PASS"
+  },
+  "same_checkpoint_comparison_delta": {
+    "present_correct": 0,
+    "full_profile_correct": 0,
+    "ternary_all_grade_correct": 0,
+    "classification_exact_correct": 0
+  },
+  "test_predictions": 0,
+  "original_project_sources_unchanged": true,
+  "github_writes": 0
+}

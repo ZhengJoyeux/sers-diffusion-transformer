@@ -1,0 +1,11 @@
+{
+  "base_branch": "DiT+transformer",
+  "modules": "Current T3.30 student uses the archived T3.26 backbone; extracted existing Query/fusion/loss, MultiPeakEvidence, Adapter and training relations",
+  "source_sha256": {
+    "packages/sers_t330_feature_finetune/vendor/base/vendor/t328/vendor/t327/archived/Model_T3_26.py": "0d50db366c0ffe6a6c6837450379883d6a1a7093804b3b9cfed8a295bd6edb86",
+    "packages/sers_t330_feature_finetune/vendor/base/vendor/t328/vendor/t327/archived/MultiPeak_T3_25.py": "8a72a61abda568966ed0b570fe74f6fd1012e00f25e8b50ce0abc4c8c01f3325",
+    "packages/sers_t330_feature_finetune/vendor/base/vendor/t328/vendor/t327/archived/Relations_T3_26.py": "6b7cd1ee5c043bd13fbf0be4b7d3d1366b4008292d31cb75a98f71b5dfdee168",
+    "packages/sers_t330_feature_finetune/vendor/base/vendor/t328/vendor/t327/peft.py": "bd70d110e04ce79b86a26fc8d63d7e878f8f05b3ed73e0fa54a0f9d3d00bf127",
+    "transformer/Dataset.py": "8a1138c9b74580108e735fc3b63a8cd437369414b2923aefd5724391bb179869"
+  }
+}

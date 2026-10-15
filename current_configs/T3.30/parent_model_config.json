@@ -1,0 +1,63 @@
+{
+  "model_config": {
+    "dim_model": 32,
+    "attn_head": 8,
+    "attention_dim": 128,
+    "dim_ff": 256,
+    "drop": 0.1,
+    "batch_f": true,
+    "encoder_layers": 6,
+    "n_labels": 3,
+    "model_length": 1901,
+    "peak_guidance_strength_init": 1.5,
+    "use_peak_guidance": true,
+    "concentration_head_mode": "ordinal",
+    "ordinal_head_hidden": 64,
+    "use_mixture_aware_query_fusion": true,
+    "use_adaptive_mixture_gate": false,
+    "use_boundary_specific_mixture_gate": false,
+    "pooling_stride": 3,
+    "use_multi_peak_evidence": true,
+    "relation_projection_dim": 16,
+    "peak_window_centers": [
+      813.0,
+      827.0,
+      981.0,
+      1000.0,
+      1013.0,
+      1090.0,
+      1125.0,
+      1216.0,
+      1298.0,
+      1369.0,
+      1463.0,
+      1487.0,
+      1534.0,
+      1578.0,
+      1597.0,
+      1600.0,
+      2230.0
+    ],
+    "peak_half_width_cm1": 24,
+    "multi_peak_strength": 0.25
+  },
+  "adapter_spec": {
+    "variant": "adapter",
+    "rank": 4,
+    "alpha": 8.0,
+    "bottleneck": 16,
+    "backbone_lr": 1e-06,
+    "head_lr": 5e-06,
+    "evidence_lr": 1e-05,
+    "peft_lr": 0.0001,
+    "weight_decay": 0.01,
+    "minimum_ratio": 0.01,
+    "layer_decay": 0.85
+  },
+  "ternary_options": {
+    "arm": "joint_head",
+    "hidden": 64,
+    "dropout": 0.1,
+    "bound": 4.0
+  }
+}

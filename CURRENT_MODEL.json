@@ -1,0 +1,388 @@
+{
+  "description": "记录当前生成模型与推荐识别模型版本、权重位置、参数及评价口径。",
+  "branch": "DiT+transformer",
+  "archive_date": "2026-10-14",
+  "source_archive": "DiT_transformer_source.tar.gz",
+  "base_branch": "D26+T24",
+  "base_commit": "5a4e2159d18d56e60ef0e7411b30e60416172f8f",
+  "generation": {
+    "version": "D4.27",
+    "architecture": "SpectrumDiT1D",
+    "residual_modes": [
+      "broad_local",
+      "full_residual"
+    ],
+    "parameters": 57922056,
+    "epochs": 50,
+    "batch_size": 16,
+    "seed": 2026,
+    "target_spectra_per_condition": 100,
+    "delivery_approved_conditions": {
+      "broad_local": 125,
+      "full_residual": 116,
+      "common": 116
+    },
+    "runtime_configs": [
+      "current_configs/D4.27/broad_local_runtime_config.yaml",
+      "current_configs/D4.27/full_residual_runtime_config.yaml"
+    ],
+    "downstream_gain_of_D427_not_evaluated": true
+  },
+  "recognition": {
+    "recommended_version": "T3.33",
+    "architecture": "frozen T3.32 image CNN + Transformer with bounded ternary DEL/TEB correction",
+    "baseline_version": "T3.32",
+    "baseline_epoch": 16,
+    "accepted_epoch": 4,
+    "loader": "transformer/current_recognition.py::load_checkpoint",
+    "entrypoint": "transformer/run_recognition.py",
+    "server_checkpoint": "/home/wqzheng/project_transformer/outputs/t3_33_ternary_correction_seed2026/train/checkpoints/best_accepted.pt",
+    "checkpoint_sha256": "09b6ccfdb9368eef298bec8e8525227d109b984f8581c945a9ba0a29d02d1b99",
+    "correction_parameters": 23940,
+    "model_config": {
+      "attention_dim": 128,
+      "heads": 8,
+      "layers": 6,
+      "dim_ff": 256,
+      "dropout": 0.1,
+      "tokens": 210,
+      "numeric_evidence": true,
+      "adapter_bottleneck": 16,
+      "adaptive_gate": false,
+      "peak_guidance": true
+    },
+    "plot_scale": {
+      "width": 2048,
+      "height": 512,
+      "amplitude_scale": 151.376953125,
+      "lower": -0.8164195448160172,
+      "upper": 2.5470575124025343,
+      "axis_start": 600.0,
+      "axis_end": 2500.0,
+      "line_width": 1.5,
+      "supersampling": 2,
+      "version": "T3.32_line_asinh_v1"
+    },
+    "evaluation_split": "validation",
+    "metrics": {
+      "samples": 504,
+      "present_n": 1152,
+      "present_correct": 1027,
+      "present_accuracy": 0.8914930555555556,
+      "classification_exact_correct": 504,
+      "classification_exact_accuracy": 1.0,
+      "full_profile_correct": 408,
+      "full_profile_accuracy": 0.8095238095238095,
+      "ternary_n": 216,
+      "ternary_all_grade_correct": 133,
+      "ternary_full_profile_accuracy": 0.6157407407407407,
+      "present_level_code_mae": 0.10850694444444445,
+      "per_drug": {
+        "DEL": {
+          "present_n": 384,
+          "correct": 332,
+          "accuracy": 0.8645833333333334,
+          "classification_f1": 1.0,
+          "confusion_S_M_H": [
+            [
+              109,
+              19,
+              0
+            ],
+            [
+              14,
+              109,
+              5
+            ],
+            [
+              0,
+              14,
+              114
+            ]
+          ]
+        },
+        "CHL": {
+          "present_n": 384,
+          "correct": 363,
+          "accuracy": 0.9453125,
+          "classification_f1": 1.0,
+          "confusion_S_M_H": [
+            [
+              123,
+              5,
+              0
+            ],
+            [
+              3,
+              120,
+              5
+            ],
+            [
+              0,
+              8,
+              120
+            ]
+          ]
+        },
+        "TEB": {
+          "present_n": 384,
+          "correct": 332,
+          "accuracy": 0.8645833333333334,
+          "classification_f1": 1.0,
+          "confusion_S_M_H": [
+            [
+              111,
+              17,
+              0
+            ],
+            [
+              9,
+              103,
+              16
+            ],
+            [
+              0,
+              10,
+              118
+            ]
+          ]
+        }
+      },
+      "by_mixture": {
+        "1": {
+          "samples": 72,
+          "full_profile_correct": 72,
+          "full_profile_accuracy": 1.0
+        },
+        "2": {
+          "samples": 216,
+          "full_profile_correct": 203,
+          "full_profile_accuracy": 0.9398148148148148
+        },
+        "3": {
+          "samples": 216,
+          "full_profile_correct": 133,
+          "full_profile_accuracy": 0.6157407407407407
+        }
+      },
+      "by_matrix": {
+        "soil": {
+          "samples": 252,
+          "full_profile_correct": 204,
+          "full_profile_accuracy": 0.8095238095238095
+        },
+        "water": {
+          "samples": 252,
+          "full_profile_correct": 204,
+          "full_profile_accuracy": 0.8095238095238095
+        }
+      },
+      "classification_macro_f1": 1.0,
+      "loss_total": 0.08459961414337158,
+      "loss_class": 0.0002509939076844603,
+      "loss_corn": 0.168948233127594,
+      "evaluation_split": "validation",
+      "ordinal_decoding": "median",
+      "max_image_clipped_fraction": 0.003682272488164124,
+      "loss_definition": "0.5 presence BCE + 0.5 all-drug conditional CORN; correction training has additional regularization",
+      "output_protection": "PASS"
+    },
+    "training": {
+      "seed": 2026,
+      "real_spectra": 1512,
+      "generated_per_condition": 48,
+      "generated_spectra": 6048,
+      "validation_spectra": 504,
+      "split_per_source_file": [
+        12,
+        4,
+        4
+      ]
+    },
+    "experiments": {
+      "T3.34": "read-only frozen-feature diagnosis",
+      "T3.35": "copied DEL/TEB ordinal heads; no accepted improvement",
+      "T3.36": "copied concentration fusion/projection/heads; no accepted improvement; CUDA identity fix integrated"
+    },
+    "test_predictions": 0,
+    "test_metrics_available": false,
+    "independent_test_gain_established": false,
+    "baseline_parameters": 1399975,
+    "parameters_total": 1423915
+  },
+  "weights_and_spectra_included": false,
+  "models_jointly_trained": false,
+  "spectral_representation": "generation: one-dimensional numerical residual spectrum; recognition: fixed-scale 2048x512 grayscale line image plus numerical peak evidence",
+  "stft_or_cwt_implemented": false,
+  "historical_recognition": {
+    "T3.30": {
+      "recommended_version": "T3.30",
+      "arm": "concentration",
+      "deployment_mode": "TEB_only",
+      "accepted_epoch": 17,
+      "parameters_total": 3100203,
+      "parameters_trainable": 148807,
+      "loader": "packages/sers_t330_feature_finetune/feature_model.py::load_checkpoint",
+      "server_checkpoint": "/home/wqzheng/project_transformer/outputs/t3_30_feature_finetune_combined_seed2026/train/concentration/checkpoints/TEB_only/best_accepted.pt",
+      "checkpoint_sha256": "d77bde131075c77e5797a9549fdfb6a47f5371922a0a0ea70cd9e9312b535589",
+      "evaluation_split": "validation",
+      "metrics": {
+        "samples": 504,
+        "present_n": 1152,
+        "present_correct": 985,
+        "present_accuracy": 0.8550347222222222,
+        "present_mae": 0.14930555555555555,
+        "full_profile_correct": 380,
+        "classification_exact_correct": 503,
+        "classification_macro_f1": 0.9995654063450674,
+        "ternary_n": 216,
+        "ternary_all_grade_correct": 125,
+        "by_matrix": {
+          "soil": {
+            "n": 252,
+            "full_profile_correct": 188,
+            "ternary_n": 108,
+            "ternary_all_grade_correct": 61
+          },
+          "water": {
+            "n": 252,
+            "full_profile_correct": 192,
+            "ternary_n": 108,
+            "ternary_all_grade_correct": 64
+          }
+        },
+        "DEL_M_by_TEB": {
+          "soil_TEB_1": {
+            "n": 12,
+            "DEL_correct": 5
+          },
+          "soil_TEB_2": {
+            "n": 12,
+            "DEL_correct": 8
+          },
+          "soil_TEB_3": {
+            "n": 12,
+            "DEL_correct": 7
+          },
+          "water_TEB_1": {
+            "n": 12,
+            "DEL_correct": 9
+          },
+          "water_TEB_2": {
+            "n": 12,
+            "DEL_correct": 9
+          },
+          "water_TEB_3": {
+            "n": 12,
+            "DEL_correct": 9
+          }
+        },
+        "per_drug": {
+          "DEL": {
+            "present_n": 384,
+            "correct": 312,
+            "level_code_mae": 0.1953125,
+            "classification_f1": 0.9986962190352021
+          },
+          "CHL": {
+            "present_n": 384,
+            "correct": 351,
+            "level_code_mae": 0.0859375,
+            "classification_f1": 1.0
+          },
+          "TEB": {
+            "present_n": 384,
+            "correct": 322,
+            "level_code_mae": 0.16666666666666666,
+            "classification_f1": 1.0
+          }
+        },
+        "by_mixture": {
+          "1": {
+            "samples": 72,
+            "present_n": 72,
+            "classification_exact_correct": 72,
+            "present_correct": 69,
+            "full_profile_correct": 69,
+            "per_drug": {
+              "DEL": {
+                "present_n": 24,
+                "correct": 23,
+                "level_code_mae": 0.041666666666666664,
+                "classification_f1": 1.0
+              },
+              "CHL": {
+                "present_n": 24,
+                "correct": 23,
+                "level_code_mae": 0.041666666666666664,
+                "classification_f1": 1.0
+              },
+              "TEB": {
+                "present_n": 24,
+                "correct": 23,
+                "level_code_mae": 0.041666666666666664,
+                "classification_f1": 1.0
+              }
+            }
+          },
+          "2": {
+            "samples": 216,
+            "present_n": 432,
+            "classification_exact_correct": 215,
+            "present_correct": 400,
+            "full_profile_correct": 186,
+            "per_drug": {
+              "DEL": {
+                "present_n": 144,
+                "correct": 127,
+                "level_code_mae": 0.11805555555555555,
+                "classification_f1": 0.9965156794425087
+              },
+              "CHL": {
+                "present_n": 144,
+                "correct": 137,
+                "level_code_mae": 0.04861111111111111,
+                "classification_f1": 1.0
+              },
+              "TEB": {
+                "present_n": 144,
+                "correct": 136,
+                "level_code_mae": 0.05555555555555555,
+                "classification_f1": 1.0
+              }
+            }
+          },
+          "3": {
+            "samples": 216,
+            "present_n": 648,
+            "classification_exact_correct": 216,
+            "present_correct": 516,
+            "full_profile_correct": 125,
+            "per_drug": {
+              "DEL": {
+                "present_n": 216,
+                "correct": 162,
+                "level_code_mae": 0.2638888888888889,
+                "classification_f1": 1.0
+              },
+              "CHL": {
+                "present_n": 216,
+                "correct": 191,
+                "level_code_mae": 0.11574074074074074,
+                "classification_f1": 1.0
+              },
+              "TEB": {
+                "present_n": 216,
+                "correct": 163,
+                "level_code_mae": 0.25462962962962965,
+                "classification_f1": 1.0
+              }
+            }
+          }
+        }
+      },
+      "T331_replaces_recommended_checkpoint": false
+    }
+  },
+  "recognition_update_date": "2026-10-15"
+}

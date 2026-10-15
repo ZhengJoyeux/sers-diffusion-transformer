@@ -1,0 +1,14 @@
+{
+  "status": "PASS",
+  "environment": "Python 3.12, PyTorch 2.14.1+cpu",
+  "checks": [
+    "83-row synthetic train/validation CPU end-to-end",
+    "Accepted validation metrics reproduction",
+    "CHL and non-routed output protection",
+    "Bound oracle compared against dense residual search",
+    "Checkpoint and both cache file hashes unchanged",
+    "Mismatched cache rejected before output"
+  ],
+  "actual_user_checkpoint_available_locally": false,
+  "server_python_target": "Python 3.11 / PyTorch 2.11; standard APIs used, actual user cache run still required"
+}

@@ -1,0 +1,471 @@
+project:
+  name: d4_3_2_9_formal_tailoff_evaluation
+  random_seed: 2026
+diagnostic_overfit:
+  enabled: false
+  spectrum_index: 0
+  repeat_count: 50
+data:
+  input_directory: data/input
+  recursive: true
+  allowed_extensions:
+  - .xlsx
+  - .xls
+  sheet_name: 0
+  header_row: 0
+  raman_shift_column: 0
+  intensity_start_column: 1
+  require_same_raman_shift_axis: false
+  raman_shift_tolerance: 1.0e-06
+  raman_range_tolerance: 1.0
+  original_spectrum_length: auto
+  model_spectrum_length: auto
+  length_adaptation: raman_axis_interpolation
+  padding_mode: right_zero_padding
+  padding_value: 0.0
+  split_unit: fixed_spectra_within_source_file
+  fixed_spectrum_split:
+    train_count: 12
+    validation_count: 4
+    test_count: 4
+  train_ratio: 0.6
+  validation_ratio: 0.2
+  test_ratio: 0.2
+  shuffle: false
+  raman_axis_mode: union_with_valid_mask
+normalization:
+  enabled: true
+  method: global_minmax
+  fit_on: train_only
+  target_min: -1.0
+  target_max: 1.0
+  clip: false
+  epsilon: 1.0e-12
+  save_in_checkpoint: true
+prior_residual:
+  enabled: true
+  prior_method: pca_reconstruction
+  pca_explained_variance_ratio: 0.95
+  pca_max_components: 6
+  pca_sampling_strategy: independent_truncated_gaussian_scores
+  pca_score_clip_standard_deviations: 1.5
+  residual_normalization: robust_asinh
+  residual_quantile: 99.5
+  target_abs_max: 1.0
+  epsilon: 1.0e-08
+  mad_scale_factor: 1.4826
+  pointwise_scale_floor_quantile: 10.0
+broad_local_residual:
+  enabled: true
+  broad_filter:
+    method: gaussian
+    sigma_cm1: 7.0
+    truncate: 4.0
+  broad_prior:
+    method: pca
+    pca_explained_variance_ratio: 0.95
+    pca_max_components: 6
+    sampling_strategy: independent_truncated_gaussian_scores
+    score_clip_standard_deviations: 1.5
+  local_normalization:
+    method: robust_asinh
+    residual_quantile: 99.5
+    target_abs_max: 1.0
+  epsilon: 1.0e-08
+physics_constraints:
+  enabled: false
+peak_derivative_constraints:
+  enabled: false
+  reference_baseline_sigma_cm1: 30.0
+  reference_peak_smoothing_sigma_cm1: 2.0
+  minimum_relative_prominence: 0.06
+  minimum_peak_distance_cm1: 12.0
+  maximum_peak_count: 10
+  edge_exclusion_cm1: 24.0
+  peak_core_half_width_cm1: 18.0
+  transition_width_cm1: 6.0
+  derivative_scale_quantile: 95.0
+  minimum_derivative_scale: 0.0001
+  smooth_l1_beta: 0.25
+  timestep_weight_power: 1.0
+  minimum_timestep_weight: 0.0
+  total_weight: 1.0
+  maximum_total_ratio_to_ddpm: 0.05
+  numerical_safety_limit: 12.0
+  epsilon: 1.0e-08
+relative_peak_intensity_constraints:
+  enabled: false
+  reference_baseline_sigma_cm1: 30.0
+  reference_peak_smoothing_sigma_cm1: 2.0
+  minimum_relative_prominence: 0.06
+  minimum_peak_distance_cm1: 12.0
+  maximum_peak_count: 10
+  minimum_peak_count: 2
+  edge_exclusion_cm1: 24.0
+  peak_half_width_cm1: 12.0
+  baseline_inner_half_width_cm1: 18.0
+  baseline_outer_half_width_cm1: 30.0
+  minimum_relative_height_fraction: 0.03
+  log_ratio_margin_iqr: 1.5
+  minimum_log_ratio_width: 0.08
+  smooth_l1_beta: 0.25
+  timestep_weight_power: 1.0
+  minimum_timestep_weight: 0.0
+  total_weight: 1.0
+  maximum_total_ratio_to_ddpm: 0.05
+  numerical_safety_limit: 12.0
+  epsilon: 1.0e-08
+peak_parameter_constraints:
+  enabled: false
+  reference_baseline_sigma_cm1: 30.0
+  reference_peak_smoothing_sigma_cm1: 2.0
+  minimum_relative_prominence: 0.06
+  minimum_peak_distance_cm1: 12.0
+  maximum_peak_count: 10
+  minimum_peak_count: 3
+  edge_exclusion_cm1: 30.0
+  maximum_measurement_half_window_cm1: 18.0
+  minimum_measurement_half_window_cm1: 4.0
+  neighbor_window_fraction: 0.45
+  minimum_median_peak_height_fraction: 0.05
+  softplus_temperature_fraction: 0.05
+  minimum_softplus_temperature: 0.0001
+  lower_quantile: 10.0
+  upper_quantile: 90.0
+  position_margin_mad: 0.5
+  width_margin_mad: 0.5
+  minimum_position_half_range_cm1: 1.0
+  minimum_width_half_range_cm1: 1.0
+  position_scale_cm1: 1.0
+  width_scale_cm1: 2.0
+  position_loss_weight: 1.0
+  width_loss_weight: 0.5
+  smooth_l1_beta: 0.5
+  maximum_active_timestep_fraction: 0.5
+  timestep_weight_power: 1.0
+  minimum_timestep_weight: 0.0
+  total_weight: 0.1
+  maximum_total_ratio_to_ddpm: 0.02
+  numerical_safety_limit: 12.0
+  epsilon: 1.0e-08
+diversity_constraints:
+  enabled: true
+  strategy: low_noise_pairwise_residual_geometry
+  total_weight: 0.05
+  maximum_total_ratio_to_ddpm: 0.05
+  epsilon: 1.0e-08
+  condition_grouping:
+    samples_per_condition: 4
+    shared_timestep: true
+  low_noise_gate:
+    minimum_alpha_cumprod: 0.5
+    minimum_samples: 4
+  high_frequency_filter:
+    smoothing_sigma_points: 1.0
+    kernel_truncate: 3.0
+    distance_reference_quantile: 50.0
+    correlation_reference_quantile: 90.0
+  pairwise_distance:
+    enabled: true
+    metric: whitened_l2
+    penalty_mode: floor_only
+    minimum_distance_ratio: 0.95
+    maximum_distance_ratio: 1.25
+    transition_fraction: 0.2
+    weight: 1.0
+  pairwise_correlation:
+    enabled: true
+    maximum_excess_correlation: 0.02
+    transition_fraction: 0.2
+    weight: 0.5
+  pointwise_variance_floor:
+    enabled: true
+    penalty_mode: floor_only
+    active_std_quantile: 20.0
+    minimum_std_ratio: 0.9
+    maximum_std_ratio: 1.25
+    reference_std_floor_fraction: 0.25
+    weight: 0.5
+  peak_morphology:
+    enabled: false
+  quality_fidelity:
+    enabled: true
+    total_weight: 0.08
+    maximum_total_ratio_to_ddpm: 0.08
+    high_noise_sampling:
+      enabled: true
+      sampling_probability: 0.25
+      minimum_timestep_fraction: 0.75
+    high_noise_weighting:
+      enabled: true
+      maximum_weight: 2.25
+      power: 1.5
+    first_derivative:
+      enabled: true
+      smooth_l1_beta: 0.05
+      weight: 0.4
+    multiscale_shape:
+      enabled: true
+      kernel_sizes:
+      - 5
+      - 15
+      - 31
+      smooth_l1_beta: 0.05
+      weight: 0.4
+    condition_multiscale_variance_floor:
+      enabled: true
+      kernel_sizes:
+      - 5
+      - 15
+      - 31
+      minimum_group_size: 4
+      minimum_std_ratio: 0.9
+      active_std_quantile: 20.0
+      maximum_timestep_fraction: 0.5
+      smooth_l1_beta: 0.05
+      weight: 0.5
+    condition_derivative_variance_floor:
+      enabled: true
+      smoothing_kernel_sizes:
+      - 5
+      - 15
+      minimum_group_size: 4
+      minimum_std_ratio: 0.92
+      active_std_quantile: 30.0
+      maximum_timestep_fraction: 0.5
+      smooth_l1_beta: 0.05
+      weight: 0.5
+    condition_mean:
+      enabled: true
+      smooth_l1_beta: 0.05
+      minimum_group_size: 4
+      weight: 1.0
+    condition_pointwise_envelope:
+      enabled: true
+      lower_quantile: 0.05
+      upper_quantile: 0.95
+      iqr_margin: 0.75
+      smooth_l1_beta: 0.05
+      minimum_group_size: 4
+      weight: 1.0
+feature_peak_residual_limiter:
+  enabled: false
+local_peak_distribution_constraints:
+  enabled: false
+model:
+  channels: 1
+  model_dimension: 32
+  dimension_multipliers:
+  - 1
+  - 2
+  - 4
+  dropout: 0.05
+  self_condition: false
+  diffusion_timesteps: 200
+  sampling_timesteps: 100
+  objective: pred_x0
+  beta_schedule: cosine
+  ddim_sampling_eta: 0.0
+  auto_normalize: false
+diffusion:
+  diffusion_steps: 200
+  sampling_steps: 100
+  objective: pred_x0
+  beta_schedule: cosine
+  ddim_sampling_eta: 0.0
+  auto_normalize: false
+  loss_weighting: uniform
+  residual_aware_loss:
+    enabled: false
+training:
+  device: cuda
+  batch_size: 8
+  number_of_epochs: 106
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  number_of_workers: 0
+  pin_memory: true
+  drop_last: false
+  validate_every_epochs: 2
+  save_every_epochs: 5
+  log_every_batches: 10
+  gradient_accumulation_steps: 1
+  maximum_gradient_norm: 1.0
+  use_mixed_precision: false
+  ema_decay: 0.995
+  ema_update_every: 1
+  maximum_validation_batches: 0
+  validation_random_seed: 2026001
+output:
+  output_directory: outputs/experiments/d4_3_2_9_joint_qq_peakshift_diversity_formal
+  checkpoint_directory: outputs/experiments/d4_3_2_9_joint_qq_peakshift_diversity_formal/checkpoints
+  log_directory: outputs/experiments/d4_3_2_9_joint_qq_peakshift_diversity_formal/logs
+  generated_spectrum_directory: outputs/experiments/d4_3_2_9_joint_qq_peakshift_diversity_formal/generated
+  preview_plot_directory: outputs/experiments/d4_3_2_9_joint_qq_peakshift_diversity_formal/plots
+  latest_checkpoint_name: latest.pt
+  best_checkpoint_name: best.pt
+  training_log_name: training_log.csv
+  split_assignment_name: split_assignment.csv
+generation:
+  number_of_spectra: 2000
+  batch_size: 10
+  model_source: ema
+  crop_to_original_length: true
+  inverse_normalize: true
+  variation_scale: 1.0
+  pca_score_clip_override_standard_deviations: 2.5
+  mean_fidelity_calibration:
+    enabled: true
+    standard_error_multiplier: 1.96
+    correction_strength: 0.35
+    maximum_correction_iqr_fraction: 0.25
+    minimum_maximum_correction_intensity: 1.0
+    maximum_modified_raman_fraction: 1.0
+  pca_spread_calibration:
+    enabled: true
+    maximum_components: 6
+    explained_variance_ratio: 0.95
+    minimum_component_variance_fraction: 0.01
+    minimum_component_std_ratio: 0.88
+    maximum_scale_factor: 1.35
+    minimum_pairwise_mse_ratio: 0.88
+    maximum_global_scale_factor: 1.3
+    pairwise_mse_pair_count: 10000
+    pairwise_mse_search_iterations: 24
+    maximum_correction_range_fraction: 0.12
+    minimum_generated_count: 20
+    epsilon: 1.0e-12
+  tail_calibration:
+    enabled: false
+    strategy: oracle_piecewise_quantile
+    piecewise_probabilities:
+    - 0.01
+    - 0.1
+    - 0.5
+    - 0.9
+    - 0.99
+    minimum_segment_span_ratio: 0.9
+    maximum_segment_span_ratio: 1.1
+    correction_strength: 0.6
+    maximum_absolute_correction_z: 0.4
+    axis_profiles:
+      '1401':
+        correction_strength_multiplier: 1.25
+        maximum_absolute_correction_z_multiplier: 1.5
+      '1901':
+        correction_strength_multiplier: 0.75
+        maximum_absolute_correction_z_multiplier: 0.75
+    analyte_count_profiles:
+      '1':
+        correction_strength_multiplier: 1.0
+      '2':
+        correction_strength_multiplier: 1.15
+      '3':
+        correction_strength_multiplier: 0.9
+    minimum_postcalibration_pairwise_mse_ratio: 0.82
+    diversity_guard_search_iterations: 20
+    diversity_guard_pair_count: 10000
+    lower_probability: 0.01
+    upper_probability: 0.99
+    lower_anchor_probability: 0.05
+    upper_anchor_probability: 0.95
+    oracle_reference_count: 4
+    oracle_bootstrap_repeats: 256
+    oracle_confidence: 0.975
+    minimum_allowed_tail_ratio: 1.15
+    minimum_trigger_tail_ratio: 1.5
+    minimum_compression_factor: 0.25
+    maximum_modified_fraction: 1.0
+    epsilon: 1.0e-12
+    random_seed: 2026
+  intensity_envelope_guard:
+    enabled: true
+    training_lower_quantile: 0.05
+    training_upper_quantile: 0.95
+    training_iqr_margin: 0.5
+    training_extrema_margin_iqr_fraction: 0.1
+    minimum_extrema_margin_intensity: 2.0
+    generated_lower_quantile: 0.025
+    generated_upper_quantile: 0.975
+    minimum_generated_count: 20
+    activation_maximum_intensity: -18.0
+    minimum_deficit_intensity: 5.0
+    minimum_excess_intensity: 5.0
+    softness_iqr_fraction: 0.05
+    minimum_softness_intensity: 0.25
+    maximum_softness_intensity: 2.0
+    enforce_training_global_extrema: true
+    maximum_modified_fraction: 0.05
+  peak_diversity_evaluation:
+    baseline_sigma_cm1: 30.0
+    smoothing_sigma_cm1: 2.0
+    minimum_relative_prominence: 0.06
+    minimum_peak_distance_cm1: 12.0
+    maximum_peak_count: 10
+    edge_exclusion_cm1: 24.0
+    measurement_half_width_cm1: 12.0
+    minimum_position_std_cm1: 0.35
+  sampling_calibration:
+    enabled: false
+    non_peak_noise:
+      enabled: false
+      reference_smoothing_sigma_cm1: 30.0
+      minimum_relative_prominence: 0.06
+      minimum_peak_distance_cm1: 12.0
+      maximum_peak_count: 20
+      peak_protection_half_width_cm1: 24.0
+      transition_width_cm1: 6.0
+      fine_sigma_cm1: 1.5
+      broad_sigma_cm1: 7.0
+      broad_variation_scale: 0.46
+      middle_component_scale: 0.55
+      fine_component_scale: 0.85
+    raman_shift_jitter:
+      enabled: true
+      distribution: truncated_normal
+      standard_deviation_cm1: 1.2
+      maximum_absolute_shift_cm1: 3.0
+    peak_height_compression:
+      enabled: true
+      reference_smoothing_sigma_cm1: 30.0
+      reference_peak_smoothing_sigma_cm1: 2.0
+      minimum_relative_prominence: 0.06
+      minimum_peak_distance_cm1: 12.0
+      maximum_peak_count: 10
+      peak_half_width_cm1: 12.0
+      transition_width_cm1: 6.0
+      height_variation_scale: 0.9
+      minimum_batch_peak_median_height_fraction: 0.05
+      minimum_valid_height: 1.0e-08
+      minimum_factor: 0.65
+      maximum_factor: 1.25
+  training_guard:
+    enabled: true
+    reference_smoothing_sigma_cm1: 30.0
+    minimum_relative_prominence: 0.06
+    minimum_peak_distance_cm1: 12.0
+    maximum_peak_count: 20
+    metric_half_width_cm1: 24.0
+    position_margin_cm1: 2.0
+    bound_margin_iqr: 1.5
+    minimum_valid_training_count: 8
+    minimum_guard_peak_median_height_fraction: 0.05
+    check_peak_position: true
+    check_peak_height: true
+    check_peak_width: true
+    check_negative_minimum: true
+    maximum_peak_violation_fraction: 0.2
+  final_evaluation:
+    random_seed: 2026
+    pca_components: 6
+    bootstrap_repeats: 500
+    generated_pair_count: 50000
+    broad_sigma_cm1: 7.0
+  output_filename: generated_spectra.xlsx
+  output_formats:
+  - xlsx
+conditioning:
+  enabled: true
+  vector_size: 14
+  embedding_dimension: 32
+  injection: input_and_all_resnet_blocks_film

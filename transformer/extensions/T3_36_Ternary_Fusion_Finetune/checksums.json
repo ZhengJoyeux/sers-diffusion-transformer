@@ -1,0 +1,15 @@
+{
+  "README_CN.md": "45fd71971629a7a74d5f0cecf7a5f10fbbb80e6dbe7445c35f4513c343e92b95",
+  "SOURCE_PROVENANCE.json": "da989df39738f125ccb96a9a2f9edc5c4f894a921de037b95c62010be9d5f6a2",
+  "cache_audit.py": "d25acc737eee85edeb508da3ba0a1060fa966ffd6312a1b95abb475ef2eaa66c",
+  "cached_evaluation.py": "86cbeac81951a1a5e4ac8617c6e9d63cfcb30ae0f458ed63c0868d88eee70766",
+  "fusion_model.py": "e359a5e110c5f222b48dfb05166b3f176fd3dfd0a5abc77d0d8bab116c3c7590",
+  "metrics_core.py": "7e0e83cba45e6e3bc52dbfcfc0fd3ef87c73e1694cda494a7e2ac2ffcfdaf3a3",
+  "ordinal_core.py": "b9da8935ef5c12931fb20470edcf24302f0de35a79ba049460f23f8fd73622ff",
+  "query_cache.py": "6d9982d3343c72a7542a02a88a2dd277eb6608a3d8b68cdcec9613ddefa215c6",
+  "requirements.txt": "02b92776ba79212064c1bb6a66b4f3b2f1b392c99682c7f9590edae1809fbdee",
+  "run_fusion.py": "ea0c4748cc37b405f2d872d76e5f4e337c172e9220a7a76d3db9a99cda0328ae",
+  "test_fusion.py": "abe5d5e53467965573cc8e61816f6d54f5f72f07447b347efd7d9dc13b897654",
+  "validation_report.json": "004b92156cd3d2125877840b84c92deba47e6ea3718ee3f2878bdf9cc62cea0d",
+  "verify_package.py": "76ae9d0c817b4add3560ad6a32e139621796aaaff54713c3231f823d9cc05272"
+}

@@ -1,0 +1,45 @@
+{
+  "status": "PASS",
+  "unit_tests": 17,
+  "runtime": "2.14.1+cpu",
+  "device": "cpu",
+  "scope": "Synthetic spectra and synthetic random-weight baseline only; user epoch-16 weights and measured data were not available here",
+  "source_dependency_files": 8,
+  "baseline_source_files_unchanged": true,
+  "github_writes": 0,
+  "synthetic_fixtures": {
+    "real_files": 126,
+    "real_spectra": 2520,
+    "generated_files": 126,
+    "generated_spectra": 252,
+    "real_split": {
+      "train": 1512,
+      "validation": 504,
+      "test": 504
+    }
+  },
+  "integration": {
+    "cache_extraction": "PASS",
+    "normalization_real_training_only": "PASS",
+    "correction_smoke_updates": 2,
+    "validation_rows": 504,
+    "baseline_digest_unchanged": true,
+    "output_protection": "PASS",
+    "checkpoint_save_load": "PASS",
+    "evaluation_data_reload": "PASS",
+    "baseline_fallback": "PASS",
+    "test_predictions": 0
+  },
+  "production_checks": {
+    "requires_epoch16": true,
+    "requires_reported_counts": {
+      "present_correct": 1026,
+      "full_profile_correct": 406,
+      "ternary_all_grade_correct": 131,
+      "classification_exact_correct": 504
+    },
+    "baseline_metric_guard_bypassed_only_in_external_synthetic_fixture": true
+  },
+  "correction_parameters": 23940,
+  "strict_acceptance": "ternary >131; present >=1026; full profile >=406; classification >=504"
+}

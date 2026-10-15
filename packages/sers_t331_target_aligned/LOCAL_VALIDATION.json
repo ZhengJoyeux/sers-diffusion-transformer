@@ -1,0 +1,28 @@
+{
+  "status": "PASS",
+  "tests": 9,
+  "parent_T330_epoch17_weights_available_locally": false,
+  "local_weights": "Actual uploaded T3.28 combined_verified.pt; simulated T3.30 parent built for tests",
+  "spectra": "Synthetic 1901-point data; actual T3.30 504 prediction reference",
+  "server_check_required": true,
+  "parameter_counts": {
+    "total_each": 3244720,
+    "trainable_each": 144517
+  },
+  "checks": [
+    "Parent active-path zero-update identity",
+    "Pre-fusion cached prediction equals direct spectrum path",
+    "DEL grouped max argmax equals joint-MAP coordinate",
+    "TEB valid conditional masks and ignores other drug grades",
+    "Actual gradients reach trainable concentration features",
+    "Frozen parameters, parent and all local buffers unchanged",
+    "Target-only and non-route protections; no true-label model input",
+    "Standalone checkpoint restore and optimizer/schedule/RNG bit-identical update",
+    "Strict adoption over current125 and per-drug guards",
+    "Synthetic full check/smoke/train/source-audit/compare/pack/evaluate and completed-epoch recovery",
+    "Protected cache tampering rejected",
+    "Wrong parent epoch/mode/persistent teacher weights rejected"
+  ],
+  "new_real_spectrum_performance_assessed": false,
+  "test_predictions": 0
+}

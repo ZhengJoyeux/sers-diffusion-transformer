@@ -1,0 +1,24 @@
+{
+  "base_commit": "5a4e2159d18d56e60ef0e7411b30e60416172f8f",
+  "unit_and_regression_passed": 39,
+  "installer_checks_passed": true,
+  "config_parity_passed": true,
+  "synthetic_cli_check_train_generate_passed": true,
+  "synthetic_condition_count": 2,
+  "generated_per_condition_per_group": 100,
+  "total_synthetic_generated": 400,
+  "real_data_training_performed": false,
+  "gpu_test_performed": false,
+  "test_environment": {
+    "python": "3.12",
+    "torch": "2.14.1+cpu",
+    "denoising-diffusion-pytorch": "2.2.6"
+  },
+  "formal_denoiser_parameters": 57922056,
+  "parallel_scheduler_tests_passed": 3,
+  "parallel_cpu_pipeline_check_passed": true,
+  "parallel_gpu_mapping": {
+    "broad_local": 0,
+    "full_residual": 1
+  }
+}
