@@ -1,0 +1,11 @@
+# Local runtime products; source, configs and tests stay tracked.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+packages/**/last_suite.txt
+outputs/
+**/outputs/
+*.pt
+*.pth
+*.ckpt
+*.npz

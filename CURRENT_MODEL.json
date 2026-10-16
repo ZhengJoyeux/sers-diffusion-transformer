@@ -1,6 +1,6 @@
 {
   "branch": "D26+T24",
-  "commit_message": "D26+T24",
+  "commit_message": "D4.28: integrate curve-image DiT and bounded prior generation",
   "weights_uploaded": false,
   "T3.24_selection": "accepted_residual_control",
   "T3.24_epoch": 2,
@@ -13,5 +13,44 @@
       "server_path": "/home/wqzheng/project_transformer/outputs/t3_24_concentration_update_train_20261009_203833_2694678/residual_control/checkpoints/recommended.pt",
       "sha256": "bf1e2be7b2ffa46bd1adb7e2e80e48db1af8b70e8025a6c45ad56fbda57da1bd"
     }
+  },
+  "current_diffusion": {
+    "version": "D4.28",
+    "architecture": "dit_curve2d",
+    "residual_mode": "full_residual",
+    "image_height": 768,
+    "image_width": 1920,
+    "patch_height": 768,
+    "patch_width": 16,
+    "tokens": 120,
+    "hidden_size": 512,
+    "depth": 12,
+    "num_heads": 8,
+    "parameter_count": 83083776,
+    "training_epochs": 50,
+    "training_batch_size": 16,
+    "generation_number_per_condition": 50,
+    "physical_gpu": 0,
+    "suite_server_path": "/home/wqzheng/project/outputs/experiments/d4_28_curve2d_20261015_204734_914086",
+    "checkpoint_server_path": "/home/wqzheng/project/outputs/experiments/d4_28_curve2d_20261015_204734_914086/curve2d/checkpoints/best.pt",
+    "checkpoint_sha256": null,
+    "weights_uploaded": false,
+    "runtime_config_uploaded": false,
+    "fixed_y_axis_normalized": [
+      -1.5,
+      1.5
+    ],
+    "generation_policy": "same-condition whole-prior rejection sampling within saved fixed y-axis; original final delivery guard retained",
+    "reported_evaluation": {
+      "reference_split": "validation",
+      "condition_count": 126,
+      "generated_count": 6300,
+      "nearest_reference_model_normalized_mse_mean": 0.0011161370351672234,
+      "nearest_reference_pearson_mean": 0.9677326943181834,
+      "first_derivative_pearson_mean": 0.7963729857639531,
+      "diversity_pairwise_mse_ratio": 0.943166279,
+      "qq_any_tail_underrun_condition_count": 122
+    },
+    "quality_status": "experimental; local peak detail and tail contraction remain unresolved; downstream concentration benefit unverified"
   }
 }

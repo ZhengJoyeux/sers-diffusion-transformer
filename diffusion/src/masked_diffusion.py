@@ -3147,6 +3147,7 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
         prior_conditioning: torch.Tensor | None = None,
         full_spectrum_target: torch.Tensor | None = None,
         local_inverse_slope: torch.Tensor | None = None,
+        prediction_override: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if model_forward_kwargs is None:
             model_forward_kwargs = {}
@@ -3204,14 +3205,16 @@ class MaskedGaussianDiffusion1D(GaussianDiffusion1D):
                 "self_cond": self_condition,
             }
 
-        model_out = self.model(
-            noisy_input,
-            t,
-            valid_mask=mask,
-            condition=prepared_condition,
-            prior_conditioning=prepared_prior,
-            **model_forward_kwargs,
-        )
+        if prediction_override is None:
+            model_out = self.model(
+                noisy_input, t, valid_mask=mask, condition=prepared_condition,
+                prior_conditioning=prepared_prior, **model_forward_kwargs)
+        else:
+            # D4.28: already decoded from a genuine 2D diffusion prediction.
+            # Leave every original numerical loss and budget unchanged.
+            if prediction_override.shape != x_start.shape or self.objective != 'pred_x0':
+                raise ValueError('prediction_override requires matching pred_x0 tensor')
+            model_out = prediction_override * mask
 
         if self.objective == "pred_noise":
             target = noise

@@ -240,8 +240,29 @@ def build_diffusion_model(
     self_condition = bool(
         architecture.get("self_condition", False)
     )
+    from src.dit_configuration import validate_dit_context
+    dit_configuration = validate_dit_context(model_configuration)
     hybrid_configuration = validate_hybrid_context(model_configuration)
-    if mask_enabled:
+    if dit_configuration is not None:
+        if architecture.get('architecture') == 'dit_curve2d':
+            from src.dit_curve2d import CurveImageDiT2D
+            from src.curve_image_codec import validate_curve_configuration
+            curve_configuration = validate_curve_configuration(model_configuration)
+            unet = CurveImageDiT2D(channels=channels, condition_dimension=condition_dimension,
+                prior_conditioning_enabled=prior_conditioning_enabled, dropout=dropout,
+                curve_configuration=curve_configuration, **dit_configuration)
+            print(f'2D curve pixels: H={unet.codec.height}, W={unet.codec.width}; '
+                  f'full-height patch=({unet.codec.height},{unet.patch_size}); '
+                  f'tokens={unet.codec.width // unet.patch_size}')
+        else:
+            from src.dit_1d import SpectrumDiT1D
+            unet = SpectrumDiT1D(channels=channels, condition_dimension=condition_dimension,
+                                 prior_conditioning_enabled=prior_conditioning_enabled,
+                                 dropout=dropout, **dit_configuration)
+        print(f"Pure DiT: parameters={sum(p.numel() for p in unet.parameters())}; "
+              f"depth={dit_configuration['depth']}; hidden={dit_configuration['hidden_size']}; "
+              f"heads={dit_configuration['num_heads']}; patch_width={unet.patch_size}")
+    elif mask_enabled:
         if self_condition:
             raise ValueError(
                 "D4.0-B掩码条件U-Net当前要求self_condition=false。"
@@ -508,10 +529,14 @@ def build_diffusion_model(
             )
 
     if mask_enabled:
-        diffusion_model = MaskedGaussianDiffusion1D(
-            diversity_configuration=diversity_config,
-            **common_arguments,
-        )
+        if architecture.get('architecture') == 'dit_curve2d':
+            from src.curve_image_diffusion import CurveImageGaussianDiffusion2D
+            diffusion_model = CurveImageGaussianDiffusion2D(
+                curve_configuration=curve_configuration,
+                diversity_configuration=diversity_config, **common_arguments)
+        else:
+            diffusion_model = MaskedGaussianDiffusion1D(
+                diversity_configuration=diversity_config, **common_arguments)
     elif extra_loss_enabled:
         diffusion_model = SersPhysicsGuidedGaussianDiffusion1D(
             physics_configuration=physics_config,

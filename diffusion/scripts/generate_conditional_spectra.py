@@ -693,6 +693,8 @@ def main() -> None:
             conditional_prior_residual_bank=conditional_prior_bank,
             prior_random_seed=base_seed + condition_index,
             generated_scaled_residual_batches=scaled_residual_batches,
+            generated_curve_directory=(spectrum_root / '_curve_images' / source_condition_name
+                if checkpoint_configuration.get('model', {}).get('architecture') == 'dit_curve2d' else None),
             **trace_arguments,
         )
         diversity_diagnostics = None
@@ -895,6 +897,9 @@ def main() -> None:
             "point_count": int(output_axis.size),
             "output_files": [str(Path(path).resolve()) for path in paths],
         }
+        if checkpoint_configuration.get('model', {}).get('architecture') == 'dit_curve2d':
+            condition_record['curve_image_directory'] = str(spectrum_root / '_curve_images' / source_condition_name)
+            condition_record['curve_image_state'] = {k:v for k,v in diffusion.codec.state.items() if k != 'bridge'}
         if trace is not None:
             trace_path = trace.save()
             condition_record["diagnostic_stage_trace_manifest"] = str(trace_path.resolve())

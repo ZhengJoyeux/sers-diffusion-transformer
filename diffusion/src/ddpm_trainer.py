@@ -457,6 +457,10 @@ class DdpmTrainer:
             checkpoint_path,
             map_location=self.device,
         )
+        saved_curve = checkpoint.get('configuration', {}).get('curve_image')
+        current_curve = self.configuration.get('curve_image')
+        if saved_curve != current_curve:
+            raise ValueError('curve-image checkpoint/config mismatch; do not resume 1D weights into 2D')
         self.diffusion.load_state_dict(checkpoint["diffusion_state"])
         ema_state = checkpoint.get("ema_state")
 
