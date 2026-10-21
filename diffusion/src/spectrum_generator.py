@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import torch
 from torch import nn
@@ -2102,6 +2104,7 @@ def generate_spectra(
     generated_scaled_residual_batches: list[np.ndarray] | None = None,
     generated_prior_components: list[dict[str, np.ndarray]] | None = None,
     generated_sampling_rng_fingerprints: list[dict] | None = None,
+    generated_curve_directory: str | Path | None = None,
     variation_scale: float = 1.0,
     sampling_calibrator: (
         SersSamplingCalibrator | None
@@ -2351,6 +2354,10 @@ def generate_spectra(
             batch_size=current_batch_size,
             **batch_sampling_arguments,
         )
+
+        if generated_curve_directory is not None and getattr(diffusion, 'last_curve_images', None) is not None:
+            from src.curve_image_outputs import save_curve_batch
+            save_curve_batch(diffusion, generated_curve_directory, number_generated)
 
         if generated.ndim != 3:
             raise RuntimeError(

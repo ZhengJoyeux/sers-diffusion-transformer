@@ -9,6 +9,8 @@ from typing import Any
 
 
 COMPONENT_FIELDS = (
+    "curve_image_loss",
+    "curve_spectral_total_loss",
     "ddpm_loss",
     "ddpm_uniform_loss",
     "ddpm_residual_aware_loss",

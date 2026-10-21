@@ -1,0 +1,24 @@
+{
+  "experiment": "D4.35",
+  "additional_epochs": [
+    5,
+    10,
+    20
+  ],
+  "arms": [
+    "control",
+    "d4_31",
+    "d4_32"
+  ],
+  "conditions": 126,
+  "generated_per_condition": 50,
+  "training_per_condition": 12,
+  "reference_per_condition": 4,
+  "reference_split": "validation",
+  "training_seed_count": 1,
+  "learning_rate": 1e-05,
+  "learning_rate_scheduler": false,
+  "retained": "D4.31 epoch 20",
+  "data_uploaded": false,
+  "weights_uploaded": false
+}

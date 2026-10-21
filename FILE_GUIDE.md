@@ -1,3 +1,25 @@
+# 当前最佳版本更新：2026-10-21
+
+main当前推荐为D4.35长训练实验中的D4.31第20轮生成模型，以及既有T3.32＋T3.33第4轮识别模型。下方原索引保留历史归档说明；旧D4.27是对照，不再是当前推荐生成版本。
+
+| 新增或修改路径 | 功能 |
+|---|---|
+| `diffusion/current_diffusion.py` | 当前权重身份与固定轴核验，EMA生成、同条件整条先验重抽和不依赖FID的评价 |
+| `diffusion/run_generation.py` | inspect／generate／evaluate命令入口 |
+| `diffusion/src/dit_curve2d.py` | 真实二维曲线图输入输出的全高度条带DiT |
+| `diffusion/src/curve_image_codec.py` | 固定物理坐标渲染／解码、有效区掩码及残差桥接 |
+| `diffusion/src/curve_image_diffusion.py` | 二维加噪、采样、梯度流与光谱损失 |
+| `diffusion/src/curve_image_outputs.py`、`curve_image_audit.py` | 保存浮点曲线图和坐标／往返审计 |
+| `diffusion/extensions/D4_31_Budget2/` | 实际使用的2%预算训练扩展、整谱重抽及原回归测试 |
+| `diffusion/tests/test_current_diffusion.py` | 拒绝错误版本、被修改权重或坐标的身份核验测试 |
+| `diffusion/tests/test_d4_28_curve_image.py` | 二维渲染、真实图像加噪、梯度、掩码和采样回归测试 |
+| `current_configs/D4.31/` | 当前权重记录、结构、训练协议和实际验证摘要 |
+| `current_configs/D4.35/` | 9组同口径实验摘要与逐条件比较计数 |
+
+原有识别源码保持原样。所有训练权重和原始数据均不在仓库中。
+
+---
+
 # 文件与文件夹功能索引
 
 本索引覆盖当前分支的全部文件与目录。当前推荐T3.33二维识别，T3.30/T3.31条目为历史依赖；本次新增内容见文末。功能说明用于快速定位；模块是否启用以正式配置和完整加载器为准。

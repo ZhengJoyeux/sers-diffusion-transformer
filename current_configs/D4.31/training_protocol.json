@@ -1,0 +1,32 @@
+{
+  "base_training_epochs": 50,
+  "additional_finetuning_epochs": 20,
+  "steps_per_epoch": 95,
+  "total_finetuning_steps": 1900,
+  "batch_size": 16,
+  "learning_rate": 1e-05,
+  "learning_rate_scheduler_enabled": false,
+  "optimizer": "AdamW",
+  "weight_decay": 0.0,
+  "initial_model_source": "ema",
+  "initializer_sha256": "1e6fd1b31f8869eff339308cf2075aee8f89e264dd0115b63349a53",
+  "fresh_optimizer": true,
+  "fresh_ema": true,
+  "ema_decay": 0.995,
+  "ema_update_every": 1,
+  "use_mixed_precision": false,
+  "source_package_version": "d4_31_boundary_budget2_v1",
+  "loss": {
+    "weight": 0.1,
+    "difference_scale": 0.01,
+    "boundary_extra": 4.0,
+    "smooth_l1_beta": 1.0,
+    "maximum_ratio": 0.02
+  },
+  "maximum_ratio_applies_to": "auxiliary loss value, not gradient norm",
+  "training_count_per_condition": 12,
+  "validation_count_per_condition": 4,
+  "test_count_per_condition": 4,
+  "condition_count": 126,
+  "training_seed_count": 1
+}

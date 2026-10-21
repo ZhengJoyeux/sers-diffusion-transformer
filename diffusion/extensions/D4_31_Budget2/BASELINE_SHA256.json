@@ -1,0 +1,21 @@
+{
+  "commit": "b8488526cb41b6e1c9455f3bfb3fbee21aa77679",
+  "files": {
+    "src/curve_image_codec.py": "a63b3399ef16327d3a396c890e9ec2781b9bae2a42f328199c93e658762ea11c",
+    "src/curve_image_diffusion.py": "37f01c67f46c7eb381d3cdb50888701d0350a254dff0e5d2116688be1c263b6f",
+    "src/dit_curve2d.py": "a8faa5ad0ed739862c70dcd522a64d7460362428808316c7c6d27ff587e766ad",
+    "src/generation_stage_trace.py": "0834d287c8c86ac97634c281881a9fe0d80424fb460705194e7d99cf548b759a",
+    "src/intensity_normalizer.py": "75c25346f88146efff525e047cee314217c64b440b2e8a4786195bafc445a05c",
+    "src/spectrum_file_reader.py": "14d8a35a7b8b733ab861e7ffa9428a6234cde2eb8aa63685760026073af7e9e7",
+    "src/spectrum_conditioning.py": "7a4e92093e122a77520a8293e0bef48848c2dc51e678a74c2a4c37d88d946480",
+    "src/sers_generation_evaluator.py": "3ff90d334cbc18035f3fe0da8f78d04204ecbfbc1dac9b322b86a7a0d76a378f",
+    "scripts/evaluate_d4_2_generation.py": "0cd6e78409fb2422deef146414c2249ada65e02166a15c0672c8dce78f88bc54",
+    "scripts/start_ddpm_training.py": "ac0c714255107ceac89f6888fe6e64b6fd2788d1f9089dd743e9ebca90181a23",
+    "scripts/generate_conditional_spectra.py": "c400098b1d6862b78f69fb28d06a05a0b34350e75e61925f9dfb42cf5797510c",
+    "src/model_builder.py": "2323fd6fcccdf2ce838f01d3b412a7883f789b64d0fd6621f999b89f1e91fcd5",
+    "src/ddpm_trainer.py": "c580080915f743eacc264ceec6bcd92e9dc3271cdfe13390ea775b6b47b4f519",
+    "src/training_logger.py": "89eb6cdb2c461ce173b456d612ad407db8e0e1750ff0a215b856c7cea3588b18",
+    "src/configuration_loader.py": "177247f7b6a54646b047b6792ee3b9ac8613bb9db088a8cc99667c58f10d92b5",
+    "src/spectrum_generator.py": "d72e5cb50a2cded49f60eb69a22f42e0d049129bcc3705217f1ee7d0182b927f"
+  }
+}

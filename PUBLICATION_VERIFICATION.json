@@ -1,0 +1,49 @@
+{
+  "date": "2026-10-21",
+  "target_branch": "main",
+  "base_main_commit": "03835c2af279e8d20bd9b7aac36b01a5a17c28e8",
+  "diffusion_source_commit": "b8488526cb41b6e1c9455f3bfb3fbee21aa77679",
+  "selection": {
+    "diffusion": "D4.35 experiment / D4.31 epoch20 step1900 EMA",
+    "recognition": "T3.32 epoch16 + T3.33 epoch4"
+  },
+  "scope": "Modified and added source/configuration/documentation files only; no deletions, raw data, checkpoints, logs, or caches.",
+  "verification": {
+    "diffusion_curve_and_dit_regressions_and_initial_identity_tests": {
+      "passed": 38
+    },
+    "additional_final_identity_and_numpy_serialization_suite": {
+      "passed": 10
+    },
+    "d431_extension_regressions": {
+      "passed": 11,
+      "skipped": 1,
+      "skip_reason": "Optional sibling D4.29 fixture package is not part of this publication."
+    },
+    "t333_existing_recognition_tests": {
+      "passed": 17
+    },
+    "d431_protected_baseline_files": {
+      "checked": 16,
+      "all_match": true
+    },
+    "d431_package_manifest": "all six FILES.sha256 entries passed",
+    "recognition_source_unchanged": true,
+    "actual_synthetic_generation_and_evaluation": "passed",
+    "synthetic_generation_same_as_original_d435": {
+      "condition_count": 1,
+      "generated_count": 50,
+      "max_abs_difference": 0.0
+    },
+    "fid_required": false
+  },
+  "limitations": [
+    "Synthetic generation used the existing tiny fixture and an explicit test-only selection record, not user checkpoint weights.",
+    "Real user checkpoint files and raw spectra were not available to load here.",
+    "Real experiment metrics come from uploaded report tables; output SHA256 and checkpoint identifiers were verified for all nine views.",
+    "The selected generator is best for derivative fidelity and absolute patch-boundary jumps, not every metric.",
+    "No downstream benefit from the newly selected generator has been demonstrated."
+  ],
+  "weights_uploaded": false,
+  "data_uploaded": false
+}

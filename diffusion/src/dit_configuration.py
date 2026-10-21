@@ -5,17 +5,20 @@ import math
 def validate_dit_context(configuration):
     model = configuration.get('model', configuration)
     kind = model.get('architecture', 'unet')
-    if kind not in ('unet', 'dit'):
-        raise ValueError('model.architecture must be unet or dit')
+    if kind not in ('unet', 'dit', 'dit_curve2d'):
+        raise ValueError('model.architecture must be unet, dit or dit_curve2d')
     residual_mode = configuration.get('broad_local_residual', {}).get('residual_mode', 'broad_local')
     if residual_mode not in ('broad_local', 'full_residual'):
         raise ValueError('residual_mode must be broad_local or full_residual')
-    if residual_mode == 'full_residual' and kind != 'dit':
+    if residual_mode == 'full_residual' and kind not in ('dit', 'dit_curve2d'):
         raise ValueError('full_residual experiment requires DiT')
     if residual_mode == 'full_residual' and configuration.get('generation', {}).get('joint_prior_sampling', {}).get('enabled', False):
         raise ValueError('full_residual has no broad prior to jointly sample')
-    if kind != 'dit':
+    if kind not in ('dit', 'dit_curve2d'):
         return None
+    if kind == 'dit_curve2d':
+        from src.curve_image_codec import validate_curve_configuration
+        validate_curve_configuration(configuration)
     defaults = dict(hidden_size=512, depth=12, num_heads=8, patch_size=8,
                     mlp_ratio=4.0, gradient_checkpointing=True)
     raw = model.get('dit', {})

@@ -1,0 +1,29 @@
+{
+  "version": "D4.31",
+  "experiment": "D4.35 matched 20-epoch experiment",
+  "arm": "d4_31",
+  "architecture": "dit_curve2d",
+  "epoch": 20,
+  "step": 1900,
+  "parameter_count": 83083776,
+  "server_checkpoint": "/home/wqzheng/d4_35_long20_v1/d4_31/boundary/checkpoints/step_00001900.pt",
+  "checkpoint_sha256": "be2bf6411894d51de8d4e20cc95512cf4e1a9805cddd1f3a020bbab1450340ea",
+  "weights_uploaded": false,
+  "weight_source": "ema",
+  "source_commit": "b8488526cb41b6e1c9455f3bfb3fbee21aa77679",
+  "entrypoint": "diffusion/run_generation.py",
+  "training_extension": "diffusion/extensions/D4_31_Budget2/d4_30.py",
+  "selection_basis": "Best derivative correlation and lowest absolute patch-boundary jump among the nine matched validation views; not best on every metric.",
+  "fixed_coordinates": {
+    "height": 768,
+    "width": 1920,
+    "sequence_length": 1904,
+    "y_min": -1.5,
+    "y_max": 1.5
+  },
+  "number_per_condition": 50,
+  "reference_split": "validation",
+  "training_seed_count": 1,
+  "heldout_test_evaluated": false,
+  "downstream_gain_evaluated": false
+}

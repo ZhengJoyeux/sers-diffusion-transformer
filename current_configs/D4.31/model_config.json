@@ -1,0 +1,21 @@
+{
+  "architecture": "dit_curve2d",
+  "channels": 1,
+  "condition_dimension": 14,
+  "hidden_size": 512,
+  "depth": 12,
+  "num_heads": 8,
+  "mlp_ratio": 4.0,
+  "dropout": 0.05,
+  "gradient_checkpointing": true,
+  "image_height": 768,
+  "image_width": 1920,
+  "patch_height": 768,
+  "patch_width": 16,
+  "tokens": 120,
+  "parameter_count": 83083776,
+  "diffusion_timesteps": 200,
+  "sampling_timesteps": 100,
+  "objective": "pred_x0",
+  "prior_conditioning_enabled": true
+}
