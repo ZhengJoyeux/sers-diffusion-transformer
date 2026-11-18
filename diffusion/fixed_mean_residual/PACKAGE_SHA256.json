@@ -1,0 +1,19 @@
+{
+  "README_CN.md": "5e1d913b9642f0e2c8fe450711cd8cc7f5b8395c2ed0a786ea363a1e08c737ae",
+  "THIRD_PARTY_NOTICES.md": "e60eee4208503a48293d9a7ffa9c7e28d06e95ede990083d94c3f25c3ffc5424",
+  "core.py": "62c8408d34718c0a2aa08166360246fc096e9f455b41ca62280cd326884c2493",
+  "metrics.py": "291c9913237e70a3d2b46d69acebb9ff7e051c795b5f62c6e16d76b8f902162e",
+  "provenance.json": "d1dad07722e173eb1b9f1482e69765145c233c85ba4f443b8740be83f3bfac27",
+  "requirements.txt": "80b753350f74cc25d60e3091349dbf28d622ddde06e74e7dcf07296494aceec6",
+  "run.py": "bc4b74f16be321d87920f216debd7687e2558ba69e2d53aa5207726912d89517",
+  "selftest.py": "7b568a8ef07d0f68465fec96413657d2f09ea4d60a23fa3e478524e7cb427af8",
+  "vendor/boundary_loss.py": "8d95ef4389b8fc213ac584bf0a979221bbca3c09cf813a1408bc26be2c6dd231",
+  "vendor/geometry.py": "fcddba4ed6d7e0cf9f0db813266960950f41c803b305c98216d1b15d37a6e25d",
+  "vendor/src/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "vendor/src/curve_image_codec.py": "a63b3399ef16327d3a396c890e9ec2781b9bae2a42f328199c93e658762ea11c",
+  "vendor/src/dit_1d.py": "cf1528fde78f891493a8863cf54389ffa770756473eceffa6f9ce19f77d905db",
+  "vendor/src/dit_curve2d.py": "a8faa5ad0ed739862c70dcd522a64d7460362428808316c7c6d27ff587e766ad",
+  "vendor/src/spectrum_conditioning.py": "7a4e92093e122a77520a8293e0bef48848c2dc51e678a74c2a4c37d88d946480",
+  "vendor/src/spectrum_file_reader.py": "14d8a35a7b8b733ab861e7ffa9428a6234cde2eb8aa63685760026073af7e9e7",
+  "vendor/train_joint.py": "4d8008c9d583db667cd72cb6211b11f2304f6837bf037220b508082963f256e1"
+}

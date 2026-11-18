@@ -1,37 +1,29 @@
-"""Inspect, generate, or evaluate the retained D4.31 epoch-20 model."""
-import argparse
-import json
+"""Run the fixed-condition-mean 2D residual diffusion pipeline."""
 
-from current_diffusion import evaluate, generate, load_selected_checkpoint, selected_model
+import argparse
+import runpy
+import sys
+from pathlib import Path
 
 
 def main():
+    root = Path(__file__).resolve().parent / "fixed_mean_residual"
     parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest='command', required=True)
-    for command in ('inspect', 'generate', 'evaluate'):
-        item = commands.add_parser(command)
-        item.add_argument('--checkpoint', default=None)
-        if command != 'inspect':
-            item.add_argument('--real-data', default=None)
-            item.add_argument('--condition', default='all')
-            item.add_argument('--output', required=True)
-        if command == 'generate':
-            item.add_argument('--device', default='cuda')
-            item.add_argument('--save-stage-trace', action='store_true')
-        if command == 'evaluate':
-            item.add_argument('--generated', required=True)
-            item.add_argument('--reference-split', choices=['validation', 'test'], default='validation')
-    args = vars(parser.parse_args())
-    command = args.pop('command')
-    if command == 'inspect':
-        path, state = load_selected_checkpoint(args['checkpoint'])
-        print(json.dumps(dict(selection=selected_model(), actual_path=str(path),
-                              actual_step=state['step'], weights_verified=True), ensure_ascii=False, indent=2))
-    elif command == 'generate':
-        generate(**args)
-    else:
-        evaluate(**args)
+    parser.add_argument("command", choices=(
+        "generate", "postprocess", "evaluate", "evaluate-native",
+        "prepare", "train", "check", "selftest",
+    ))
+    args = parser.parse_args(sys.argv[1:2])
+    entry, prefix = {
+        "generate": ("generate_ridge0.py", []),
+        "postprocess": ("pca_diversity_trial.py", []),
+        "evaluate": ("evaluate_sers126.py", ["--project", str(root)]),
+        "evaluate-native": ("run.py", ["evaluate"]),
+    }.get(args.command, ("run.py", [args.command]))
+    sys.path.insert(0, str(root))
+    sys.argv = [str(root / entry), *prefix, *sys.argv[2:]]
+    runpy.run_path(sys.argv[0], run_name="__main__")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

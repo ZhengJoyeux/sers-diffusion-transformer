@@ -1,0 +1,16 @@
+{
+  "version": "fixed_condition_mean_residual_image_v1",
+  "architecture": "dit_curve2d",
+  "experiment": "pc4_distribution_geometry_v1",
+  "weight_source": "ema",
+  "output_layer": "ridge_0",
+  "finetuning_updates": 0,
+  "entrypoint": "diffusion/run_generation.py",
+  "number_per_condition": 50,
+  "conditions": 126,
+  "reference_split": "validation",
+  "heldout_test_evaluated": false,
+  "downstream_gain_evaluated": false,
+  "weights_uploaded": false,
+  "private_provenance_required": true
+}

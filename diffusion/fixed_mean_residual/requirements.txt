@@ -1,0 +1,8 @@
+# Keep the server's existing torch 2.11.0+cu128 and torchvision 0.26.0+cu128.
+# No torch/torchvision replacement, denoising package, AE, FID or online weight download.
+numpy>=1.26
+pandas>=2.1
+scipy>=1.11
+Pillow>=9.1
+openpyxl>=3.1
+xlrd>=2.0.1
